@@ -44,7 +44,7 @@ import com.celestiallemon.lagrange.ui.onboarding.OnboardingScreen
 import com.celestiallemon.lagrange.ui.system.SystemScreen
 import com.celestiallemon.lagrange.ui.theme.LagrangeTheme
 import com.celestiallemon.lagrange.ui.today.TodayScreen
-import com.celestiallemon.lagrange.ui.trends.TrendsScreen
+import com.celestiallemon.lagrange.ui.trends.TrendsTab
 
 enum class Tab(val label: String, val icon: ImageVector) {
     Today("Today", Icons.Outlined.WbTwilight),
@@ -90,7 +90,10 @@ fun LagrangeRoot(main: MainViewModel = viewModel()) {
 @Composable
 fun LagrangeShell(main: MainViewModel) {
     var tab by rememberSaveable { mutableStateOf(Tab.Today) }
-    // Predictive back: from any other tab, back returns to Today before leaving the app.
+    // The app open in the Trends deep dive, if any. It lives here so re-selecting Trends can return to the list.
+    var deepDive by rememberSaveable { mutableStateOf<Long?>(null) }
+    // Predictive back: from any other tab, back returns to Today before leaving the app. The deep dive registers
+    // its own (later, so higher-priority) handler that returns to the Trends list first.
     BackHandler(enabled = tab != Tab.Today) { tab = Tab.Today }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
@@ -99,7 +102,10 @@ fun LagrangeShell(main: MainViewModel) {
                 Tab.entries.forEach { t ->
                     NavigationBarItem(
                         selected = t == tab,
-                        onClick = { tab = t },
+                        onClick = {
+                            if (t == Tab.Trends && tab == Tab.Trends) deepDive = null
+                            tab = t
+                        },
                         icon = { Icon(t.icon, contentDescription = null) },
                         label = { Text(t.label) },
                     )
@@ -110,7 +116,7 @@ fun LagrangeShell(main: MainViewModel) {
         Crossfade(targetState = tab, label = "tab") { current ->
             when (current) {
                 Tab.Today -> TodayScreen(main, padding, onOpenSystem = { tab = Tab.System })
-                Tab.Trends -> TrendsScreen(padding)
+                Tab.Trends -> TrendsTab(padding, deepDive, onDeepDive = { deepDive = it })
                 Tab.Lab -> LabScreen(padding)
                 Tab.Friction -> FrictionScreen(padding)
                 Tab.System -> SystemScreen(main, padding)

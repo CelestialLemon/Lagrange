@@ -47,6 +47,7 @@ abstract class LagrangeDatabase : RoomDatabase() {
     abstract fun ingestionStateDao(): IngestionStateDao
     abstract fun settingsHistoryDao(): SettingsHistoryDao
     abstract fun derivedDao(): DerivedDao
+    abstract fun analyticsDao(): AnalyticsDao
 
     /** Forces the database open (running any migration) and reads Room's schema identity hash. */
     suspend fun identityHash(): String? = useReaderConnection { connection ->
