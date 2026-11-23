@@ -30,6 +30,8 @@ import com.celestiallemon.lagrange.domain.LogicalDay
 import com.celestiallemon.lagrange.domain.friction.ActiveOverlay
 import com.celestiallemon.lagrange.domain.friction.FrictionAppPolicy
 import com.celestiallemon.lagrange.domain.friction.FrictionEffect
+import com.celestiallemon.lagrange.domain.friction.ActivityTransition
+import com.celestiallemon.lagrange.domain.friction.ForegroundRecovery
 import com.celestiallemon.lagrange.domain.friction.FrictionEngine
 import com.celestiallemon.lagrange.domain.friction.FrictionSchedule
 import com.celestiallemon.lagrange.domain.friction.RedirectLaunchResult
@@ -61,10 +63,7 @@ import kotlinx.coroutines.withContext
  */
 class LagrangeAccessibilityService : AccessibilityService() {
     private val mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-    private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-
-    /** Serialized DB / DataStore work queue keeping event writes and coverage transitions in arrival order. */
-    private val work = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+    private val work get() = Companion.work
 
     private val graph get() = (application as LagrangeApplication).graph
 
@@ -102,8 +101,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
     /** Bumped on every connect and teardown so a late attach from an earlier connection is detached, never kept. */
     private var connectionGeneration = 0
     private var liveRegistration: FrictionRepository.LiveRegistration? = null
-    /** Latest window event that arrived after binding but before [ready]; replayed once ready. */
-    private var pendingStartupEvent: Pair<String?, String?>? = null
+    /** Window events that arrived after binding but before [ready] (newest last, capped); replayed in order once ready. */
+    private val pendingStartupEvents = ArrayDeque<Pair<String?, String?>>()
 
     private val liveCommandHandler: suspend (FrictionControlCommand) -> Boolean = { cmd ->
         withContext(Dispatchers.Main.immediate) {
@@ -157,7 +156,14 @@ class LagrangeAccessibilityService : AccessibilityService() {
             useDynamicColor = { currentPrefs.useDynamicColor },
         )
 
-        ioScope.launch {
+        startWorkConsumerOnce()
+    }
+
+    private fun startWorkConsumerOnce() {
+        if (workConsumerStarted) return
+        workConsumerStarted = true
+        val graph = graph
+        processScope.launch {
             try {
                 graph.awaitReady()
             } catch (e: StartupFailedException) {
@@ -181,7 +187,7 @@ class LagrangeAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         connected = true
         connectionGeneration++
-        pendingStartupEvent = null
+        pendingStartupEvents.clear()
         registerScreenReceiver()
         startObserversAndRestore()
         startTicker()
@@ -192,7 +198,11 @@ class LagrangeAccessibilityService : AccessibilityService() {
         val pkg = event.packageName?.toString()
         val cls = event.className?.toString()
         if (!ready) {
-            if (connected) pendingStartupEvent = pkg to cls
+            if (connected) {
+                // Keep a short ordered history: a trailing IME/SystemUI/dialog event must not replace the activity entry.
+                pendingStartupEvents.addLast(pkg to cls)
+                while (pendingStartupEvents.size > MAX_PENDING_STARTUP_EVENTS) pendingStartupEvents.removeFirst()
+            }
             return
         }
         handleWindowEvent(pkg, cls)
@@ -234,7 +244,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
 
     override fun onDestroy() {
         teardownConnection()
-        work.close()
+        // The work queue is process-wide and keeps draining: a re-enabled service queues its restore behind this
+        // instance's final snapshot and detach, so it never restores older state or strands a deferred command.
         mainScope.cancel()
         super.onDestroy()
     }
@@ -245,7 +256,7 @@ class LagrangeAccessibilityService : AccessibilityService() {
         ready = false
         engineRestored = false
         connectionGeneration++
-        pendingStartupEvent = null
+        pendingStartupEvents.clear()
         _readyState.value = false
         connected = false
 
@@ -321,7 +332,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
                     val keep = withContext(Dispatchers.Main.immediate) {
                         (generation == connectionGeneration && engineRestored).also { if (it) liveRegistration = registration }
                     }
-                    if (!keep) graph.friction.detachLiveService(registration)
+                    // Detach behind anything queued meanwhile (a teardown's final snapshot), never ahead of it.
+                    if (!keep) work.trySend { graph.friction.detachLiveService(registration) }
                     attached.complete(keep)
                 } catch (e: Throwable) {
                     attached.complete(false)
@@ -665,31 +677,40 @@ class LagrangeAccessibilityService : AccessibilityService() {
      * adopts the app UsageStats reports as currently resumed so a restored timer keeps counting without a prompt.
      */
     private suspend fun reconcileStartupForeground() {
-        pendingStartupEvent?.let { (pkg, cls) ->
-            pendingStartupEvent = null
+        // Screen broadcasts are dropped until ready: catch up with a lock or unlock that happened during startup.
+        val unlocked = isScreenInteractiveNow()
+        if (engine.isScreenInteractive && !unlocked) {
+            applyEffects(engine.onScreenOff(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+        } else if (!engine.isScreenInteractive && unlocked) {
+            handleUnlock(System.currentTimeMillis(), SystemClock.elapsedRealtime())
+        }
+        while (pendingStartupEvents.isNotEmpty()) {
+            val (pkg, cls) = pendingStartupEvents.removeFirst()
             handleWindowEvent(pkg, cls)
         }
-        if (engine.currentForegroundPackage != null) return
+        if (engine.currentForegroundPackage != null || !engine.isScreenInteractive) return
         val generation = connectionGeneration
+        val epoch = engine.foregroundEpoch
         val resumed = withContext(Dispatchers.IO) { currentlyResumedPackage(System.currentTimeMillis()) } ?: return
-        if (!ready || generation != connectionGeneration || engine.currentForegroundPackage != null) return
-        applyEffects(engine.onForegroundRecovered(resumed, SystemClock.elapsedRealtime(), ::resolvePolicyCached))
+        if (!ready || generation != connectionGeneration) return
+        applyEffects(engine.onForegroundRecovered(resumed, SystemClock.elapsedRealtime(), epoch, ::resolvePolicyCached))
     }
 
     private fun currentlyResumedPackage(nowWallMs: Long): String? = runCatching {
         val usm = getSystemService(UsageStatsManager::class.java) ?: return null
         val events = usm.queryEvents(nowWallMs - FOREGROUND_RECOVERY_LOOKBACK_MS, nowWallMs) ?: return null
         val event = UsageEvents.Event()
-        var resumed: String? = null
+        val transitions = ArrayList<ActivityTransition>()
         while (events.hasNextEvent()) {
             events.getNextEvent(event)
-            when (event.eventType) {
-                UsageEvents.Event.ACTIVITY_RESUMED -> resumed = event.packageName
-                UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
-                    if (event.packageName == resumed) resumed = null
+            val resumed = when (event.eventType) {
+                UsageEvents.Event.ACTIVITY_RESUMED -> true
+                UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED -> false
+                else -> continue
             }
+            transitions += ActivityTransition(event.packageName, event.className, resumed)
         }
-        resumed
+        ForegroundRecovery.resumedPackage(transitions)
     }.getOrNull()
 
     private fun publishStatus(nowElapsedMs: Long) {
@@ -785,7 +806,12 @@ class LagrangeAccessibilityService : AccessibilityService() {
         screenReceiverRegistered = false
     }
 
-    private fun isScreenInteractiveNow(): Boolean = getSystemService(PowerManager::class.java)?.isInteractive ?: true
+    /** Screen on AND past the keyguard: an awake lockscreen counts as locked, matching the unlock broadcasts. */
+    private fun isScreenInteractiveNow(): Boolean {
+        val interactive = getSystemService(PowerManager::class.java)?.isInteractive ?: true
+        val keyguardLocked = getSystemService(KeyguardManager::class.java)?.isKeyguardLocked == true
+        return interactive && !keyguardLocked
+    }
 
     private fun currentBootCount(): Int =
         runCatching { Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT, 0) }.getOrDefault(0)
@@ -809,6 +835,17 @@ class LagrangeAccessibilityService : AccessibilityService() {
         private const val HEARTBEAT_INTERVAL_MS = 15 * 60_000L
         private const val ACCRUAL_SAMPLE_HORIZON_MS = 6 * 60 * 60_000L
         private const val FOREGROUND_RECOVERY_LOOKBACK_MS = 3 * 60 * 60_000L
+        private const val MAX_PENDING_STARTUP_EVENTS = 8
+
+        /**
+         * Serialized DB / DataStore work queue keeping event writes, coverage transitions and live attach/detach in
+         * arrival order. Process-wide so a disabled-then-re-enabled service restores only after the previous
+         * instance's final snapshot and detach have run.
+         */
+        private val work = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+        private val processScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        /** Main-thread only (Service.onCreate). */
+        private var workConsumerStarted = false
 
         /** True while Android has this AccessibilityService bound in this process. */
         @Volatile

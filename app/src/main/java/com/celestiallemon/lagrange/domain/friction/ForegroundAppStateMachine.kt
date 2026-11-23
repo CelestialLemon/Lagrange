@@ -203,6 +203,13 @@ class ForegroundAppStateMachine(
      *   so even a `<15s` micro-lock straight back into the same activity cannot bypass the pause.
      */
     fun onScreenOff(elapsedMs: Long, exitBlocked: Boolean = false): ForegroundTransition {
+        if (!isScreenInteractive) {
+            // Lockscreen wake-and-sleep (notification, lift-to-wake) with no unlock in between: keep the original
+            // lock time and pre-lock app; only forget what was seen on the lockscreen.
+            postWakeObservedApp = null
+            postWakeObservedLauncher = false
+            return ForegroundTransition.Ignored(IgnoreReason.SCREEN_OFF)
+        }
         val prev = currentPackage
         isScreenInteractive = false
         screenOffAtElapsedMs = elapsedMs
@@ -313,6 +320,7 @@ class ForegroundAppStateMachine(
     }
 
     private fun resolveObservedAppOnUnlock(pkg: String, previousPackage: String?, fromUnlock: Boolean): ForegroundTransition {
+        lastAppWasBlocked = false
         if (classifier.isCallOrDialerPackage(pkg)) {
             currentPackage = pkg
             return ForegroundTransition.CallInterrupted(pkg, previousPackage)

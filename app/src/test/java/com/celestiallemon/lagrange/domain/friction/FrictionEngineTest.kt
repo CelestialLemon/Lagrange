@@ -359,16 +359,16 @@ class FrictionEngineTest {
         val running = FrictionRuntimeSnapshot(bootCount = 1, savedAtElapsedMs = 100_000L, activeTimerRemainingMs = 60_000L, activeTimerInitialMin = 5)
         val c = FrictionEngine(classifier)
         c.restore(running, currentBootCount = 1, nowElapsedMs = 101_000L)
-        val recovered = c.onForegroundRecovered(reddit.packageName, 101_000L) { apps[it]!! }
+        val recovered = c.onForegroundRecovered(reddit.packageName, 101_000L, c.foregroundEpoch) { apps[it]!! }
         assertTrue(recovered.none { it is FrictionEffect.ShowOverlay })
         c.onTick(w0 + 111_000L, 111_000L, zone, settings, emptyList()) { usageOf() }
         assertEquals(50_000L, c.liveStatus(111_000L).activeTimerRemainingMs)
         // Launcher / own app are never adopted.
-        assertTrue(FrictionEngine(classifier).onForegroundRecovered("com.launcher", 1L) { apps[it]!! }.isEmpty())
+        assertTrue(FrictionEngine(classifier).onForegroundRecovered("com.launcher", 1L, 0L) { apps[it]!! }.isEmpty())
 
         val d = FrictionEngine(classifier)
         d.restore(running.copy(activeTimerRemainingMs = 0L), currentBootCount = 1, nowElapsedMs = 101_000L)
-        d.onForegroundRecovered(reddit.packageName, 101_000L) { apps[it]!! }
+        d.onForegroundRecovered(reddit.packageName, 101_000L, d.foregroundEpoch) { apps[it]!! }
         val due = d.onTick(w0 + 102_000L, 102_000L, zone, settings, emptyList()) { usageOf() }
         assertTrue(due.any { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.TimerExpired })
 
@@ -435,6 +435,109 @@ class FrictionEngineTest {
         e.setInitialScreenInteractive(false)
         e.restore(null, currentBootCount = 1, nowElapsedMs = 300_000L)
         assertEquals(300_000L, e.activateFocusBoost1h(300_000L).filterIsInstance<FrictionEffect.PersistState>().single().snapshot.screenOffAtElapsedMs)
+    }
+
+    @Test
+    fun `stale recovery never adopts over Home, expiry reached on a transition under snooze is dropped, calls are not blocks`() {
+        val w0 = 1_700_000_000_000L
+
+        // 1. The UsageStats lookup started while Reddit was resumed, but the user pressed Home before it returned.
+        val running = FrictionRuntimeSnapshot(bootCount = 1, savedAtElapsedMs = 100_000L, activeTimerRemainingMs = 60_000L, activeTimerInitialMin = 5)
+        val a = FrictionEngine(classifier)
+        a.restore(running, currentBootCount = 1, nowElapsedMs = 101_000L)
+        val epoch = a.foregroundEpoch
+        enter(a, "com.launcher", w0 + 101_500L, 101_500L)
+        assertNull(a.currentForegroundPackage)
+        assertTrue(a.onForegroundRecovered(reddit.packageName, 102_000L, epoch) { apps[it]!! }.isEmpty())
+        a.onTick(w0 + 112_000L, 112_000L, zone, settings, emptyList()) { usageOf() }
+        assertEquals(60_000L, a.liveStatus(112_000L).activeTimerRemainingMs)
+
+        // 2. Snoozed, the timer runs out exactly as the user goes Home (no tick in between): the expiry is dropped, so
+        // reopening Reddit right after the snooze ends never shows a stale check-in.
+        val b = FrictionEngine(classifier)
+        enter(b, reddit.packageName, w0, 1_000L)
+        b.onPauseTimerSelected(2)
+        b.onPauseContinue(w0 + 4_000L, 4_000L, settings)
+        b.activateSnooze1h(w0 + 5_000L, 5_000L, "2026-11-23", own.pkgId)
+        enter(b, "com.launcher", w0 + 130_000L, 130_000L)
+        assertNull(b.liveStatus(130_000L).activeTimerRemainingMs)
+        b.cancelSnooze(131_000L)
+        val reopen = enter(b, reddit.packageName, w0 + 133_000L, 133_000L)
+        assertTrue(reopen.none { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.TimerExpired })
+
+        // 3. An incoming call over a launch pause is logged as INTERRUPTED, never as a blocked open.
+        val c = FrictionEngine(classifier)
+        enter(c, reddit.packageName, w0, 1_000L)
+        val call = enter(c, "com.dialer", w0 + 2_000L, 2_000L)
+        val outcome = call.filterIsInstance<FrictionEffect.LogEvent>().single().record.outcome
+        assertEquals(FrictionVocab.OUTCOME_INTERRUPTED, outcome)
+        assertFalse(outcome in FrictionVocab.BLOCKING_OUTCOMES)
+    }
+
+    @Test
+    fun `duplicate unlock keeps the session, a lockscreen peek never shortens a lock or forgets a pause, opted-in neutral suppressed opens count`() {
+        val w0 = 1_700_000_000_000L
+        fun unlock(e: FrictionEngine, at: Long) =
+            e.onUserPresent(w0 + at, at, zone, settings, emptyList(), { apps[it]!! }, { usageOf() })
+        fun timedReddit(): FrictionEngine = FrictionEngine(classifier).also { e ->
+            enter(e, reddit.packageName, w0, 1_000L)
+            e.onPauseTimerSelected(5)
+            e.onPauseContinue(w0 + 4_000L, 4_000L, settings)
+            e.onTick(w0 + 60_000L, 60_000L, zone, settings, emptyList()) { usageOf() }
+        }
+
+        // 1. SCREEN_ON (no keyguard) and USER_PRESENT both report one micro-lock unlock: the timer and session survive.
+        val a = timedReddit()
+        a.onScreenOff(w0 + 60_000L, 60_000L)
+        unlock(a, 65_000L)
+        unlock(a, 65_050L)
+        assertNotNull(a.liveStatus(65_050L).activeTimerRemainingMs)
+        assertTrue(a.liveStatus(65_050L).sessionDistractingMs > 0L)
+
+        // 2. Locked for 30 min, a notification wakes and sleeps the lockscreen, then the user unlocks 4s later: still a
+        // long lock, so the stale session is cleared.
+        val b = timedReddit()
+        b.onScreenOff(w0 + 60_000L, 60_000L)
+        b.onScreenOff(w0 + 1_860_000L, 1_860_000L)
+        unlock(b, 1_864_000L)
+        assertNull(b.liveStatus(1_864_000L).activeTimerRemainingMs)
+        assertEquals(0L, b.liveStatus(1_864_000L).sessionDistractingMs)
+
+        // 3. Locking over a launch pause then a lockscreen peek: the quick unlock still re-shows the pause.
+        val c = FrictionEngine(classifier)
+        enter(c, reddit.packageName, w0, 1_000L)
+        c.onScreenOff(w0 + 2_000L, 2_000L)
+        c.onScreenOff(w0 + 6_000L, 6_000L)
+        unlock(c, 8_000L)
+        val fallback = c.onUnlockFallbackTimeout(w0 + 8_400L, 8_400L, zone, settings, emptyList(), { apps[it]!! }, { usageOf() })
+        assertTrue(fallback.any { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.LaunchPause })
+
+        // 4. A NEUTRAL app the user opted into friction records its unprompted (snoozed) opens for escalation.
+        val kindleOptIn = kindle.copy(override = AppFrictionOverride(enabled = true))
+        val d = FrictionEngine(classifier)
+        d.activateSnooze1h(w0, 1_000L, "2026-11-23", own.pkgId)
+        val open = d.onWindowStateChanged(
+            kindle.packageName, "${kindle.packageName}.MainActivity", w0 + 2_000L, 2_000L, zone, settings, emptyList(),
+            resolveApp = { if (it == kindle.packageName) kindleOptIn else apps[it]!! },
+            loadUsage = { usageOf() },
+        )
+        assertTrue(open.none { it is FrictionEffect.ShowOverlay })
+        assertTrue(open.any { it is FrictionEffect.RecordUnpromptedOpen && it.pkgId == kindle.pkgId })
+    }
+
+    @Test
+    fun `foreground recovery tracks activities so a same-app activity handoff stays resumed`() {
+        fun t(pkg: String, cls: String, resumed: Boolean) = ActivityTransition(pkg, cls, resumed)
+        // A opens B: B resumes before A stops.
+        assertEquals(
+            reddit.packageName,
+            ForegroundRecovery.resumedPackage(listOf(t(reddit.packageName, "A", true), t(reddit.packageName, "B", true), t(reddit.packageName, "A", false))),
+        )
+        // The resumed activity itself pauses: nothing is foreground.
+        assertNull(ForegroundRecovery.resumedPackage(listOf(t(reddit.packageName, "A", true), t(reddit.packageName, "A", false))))
+        // Another app resumed later wins.
+        assertEquals("com.yt", ForegroundRecovery.resumedPackage(listOf(t(reddit.packageName, "A", true), t("com.yt", "M", true), t(reddit.packageName, "A", false))))
+        assertNull(ForegroundRecovery.resumedPackage(emptyList()))
     }
 
     @Test

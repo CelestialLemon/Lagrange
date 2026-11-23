@@ -50,6 +50,15 @@ class FrictionEngine(
 
     val currentForegroundPackage: String? get() = foreground.currentPackage
 
+    val isScreenInteractive: Boolean get() = foreground.isScreenInteractive
+
+    /** Bumped on every window, screen-off and unlock signal, so a slow foreground lookup can tell it went stale. */
+    var foregroundEpoch: Long = 0L
+        private set
+
+    /** Last master-switch value seen; an expiry reached while friction is off is dropped wherever the clock advances. */
+    private var frictionEnabledHint = true
+
     val accumulatedSessionDistractingMs: Long get() = sessionDistractingMs
 
     fun setInitialScreenInteractive(interactive: Boolean) {
@@ -222,8 +231,11 @@ class FrictionEngine(
     fun onForegroundRecovered(
         packageName: String,
         nowElapsedMs: Long,
+        observedEpoch: Long,
         resolveApp: (String) -> FrictionAppPolicy,
     ): List<FrictionEffect> {
+        // Any window or screen signal since the lookup started is newer than the lookup: never adopt over it.
+        if (observedEpoch != foregroundEpoch) return emptyList()
         if (activeOverlay != null || !foreground.adoptRecoveredForeground(packageName)) return emptyList()
         val app = resolveApp(packageName)
         currentAppPolicy = app
@@ -274,11 +286,19 @@ class FrictionEngine(
         loadUsage: (FrictionAppPolicy) -> TodayUsageSnapshot,
         resolveRedirect: (String) -> FrictionAppPolicy? = { null },
     ): List<FrictionEffect> {
+        foregroundEpoch++
         val transition = foreground.onWindowStateChanged(packageName, className, nowElapsedMs)
         return handleTransition(transition, nowWallMs, nowElapsedMs, zone, settings, schedules, resolveApp, loadUsage, resolveRedirect)
     }
 
     fun onScreenOff(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+        foregroundEpoch++
+        if (!foreground.isScreenInteractive) {
+            // Already locked (lockscreen peek going back to sleep): the first screen-off did all the work, and its
+            // timestamp must survive so a long lock is never mistaken for a micro-lock.
+            foreground.onScreenOff(nowElapsedMs)
+            return emptyList()
+        }
         val effects = ArrayList<FrictionEffect>()
         effects += FrictionEffect.CancelUnlockFallback
         advanceActiveClocks(nowElapsedMs)
@@ -308,6 +328,10 @@ class FrictionEngine(
         loadUsage: (FrictionAppPolicy) -> TodayUsageSnapshot,
         resolveRedirect: (String) -> FrictionAppPolicy? = { null },
     ): List<FrictionEffect> {
+        foregroundEpoch++
+        // SCREEN_ON (no keyguard) and USER_PRESENT can both report the same unlock: the second must not be read as a
+        // long unlock that wipes the session.
+        if (foreground.isScreenInteractive && screenOffAtElapsedMs == null) return emptyList()
         val offAt = screenOffAtElapsedMs
         val offDuration = if (offAt != null) (nowElapsedMs - offAt).coerceAtLeast(0L) else Long.MAX_VALUE
         screenOffAtElapsedMs = null
@@ -372,6 +396,7 @@ class FrictionEngine(
         loadUsage: (FrictionAppPolicy) -> TodayUsageSnapshot,
     ): List<FrictionEffect> {
         pruneExpired(nowElapsedMs)
+        frictionEnabledHint = settings.frictionEnabled
         val app = currentAppPolicy ?: return emptyList()
         if (!foreground.isScreenInteractive || !app.countsAsDistracting) {
             lastTickElapsedMs = nowElapsedMs
@@ -642,6 +667,7 @@ class FrictionEngine(
         resolveRedirect: (String) -> FrictionAppPolicy?,
     ): List<FrictionEffect> {
         pruneExpired(nowElapsedMs)
+        frictionEnabledHint = settings.frictionEnabled
         when (transition) {
             is ForegroundTransition.Ignored -> return emptyList()
             is ForegroundTransition.ScreenOff -> return emptyList()
@@ -674,12 +700,14 @@ class FrictionEngine(
                 timerRunning = false
                 currentAppPolicy = null
                 val hadBlocking = isBlockingOverlayShowing()
-                // An incoming call only interrupts the check-in; it returns when the user goes back to a distracting app.
+                // An incoming call only interrupts the card (never a blocked open); a check-in returns with the app.
+                val call = transition is ForegroundTransition.CallInterrupted
                 dismissActiveOverlayAsSystemExit(
                     nowWallMs,
                     nowElapsedMs,
-                    clearExpiredTimer = transition !is ForegroundTransition.CallInterrupted,
+                    clearExpiredTimer = !call,
                     effects = effects,
+                    outcome = if (call) FrictionVocab.OUTCOME_INTERRUPTED else FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV,
                 )
                 if (hadBlocking && transition is ForegroundTransition.LeftToHome) {
                     // Prevent a <1.5s Home bounce from bypassing an unresolved launch pause or timer expiry.
@@ -786,6 +814,10 @@ class FrictionEngine(
         totalAccruedDistractingMs += delta
         if (timerRunning && timerRemainingMs != null) {
             timerRemainingMs = (timerRemainingMs!! - delta).coerceAtLeast(0L)
+            // Reaching zero while snoozed or switched off drops the check-in here, whichever path advanced the clock,
+            // so it can never ambush the user once the snooze ends.
+            val snoozed = snoozeUntilElapsedMs?.let { nowElapsedMs < it } == true
+            if (timerRemainingMs == 0L && (snoozed || !frictionEnabledHint)) clearTimer()
         }
     }
 
@@ -807,6 +839,7 @@ class FrictionEngine(
         nowElapsedMs: Long,
         clearExpiredTimer: Boolean,
         effects: MutableList<FrictionEffect>,
+        outcome: String = FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV,
     ) {
         when (val overlay = activeOverlay) {
             null -> return
@@ -814,13 +847,13 @@ class FrictionEngine(
                 activeOverlay = null
                 val reaction = reactionMsIfPastCountdown(overlay, nowElapsedMs)
                 effects += FrictionEffect.DismissOverlay
-                effects += FrictionEffect.LogEvent(overlay.toRecord(FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV, reaction, redirectPkgId = null))
+                effects += FrictionEffect.LogEvent(overlay.toRecord(outcome, reaction, redirectPkgId = null))
             }
             is ActiveOverlay.TimerExpired -> {
                 activeOverlay = null
                 if (clearExpiredTimer) clearTimer()
                 effects += FrictionEffect.DismissOverlay
-                effects += FrictionEffect.LogEvent(overlay.toRecord(FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV, selectedTimerMin = null))
+                effects += FrictionEffect.LogEvent(overlay.toRecord(outcome, selectedTimerMin = null))
             }
             is ActiveOverlay.TimeBlindnessNudge -> {
                 logAndDismissNudge(FrictionVocab.OUTCOME_NUDGE_IGNORED, effects)

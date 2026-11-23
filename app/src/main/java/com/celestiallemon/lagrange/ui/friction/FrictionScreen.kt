@@ -429,7 +429,7 @@ fun FrictionScreen(
                     val redirectApp = loadedPrefs.redirectPackageName?.let { pkg -> appList.firstOrNull { it.packageName == pkg } }
                     val redirectName = loadedPrefs.redirectPackageName?.let { pkg -> redirectApp?.displayName ?: pkg } ?: "None"
                     // Same eligibility rule the pause card applies (EscalationPolicy): otherwise the button is hidden.
-                    val redirectInactive = loadedPrefs.redirectPackageName != null && (
+                    val redirectInactive = apps != null && loadedPrefs.redirectPackageName != null && (
                         redirectApp == null || redirectApp.isFrictionEligible ||
                             redirectApp.category == AppCategory.DISTRACTING || redirectApp.category == AppCategory.SELF_APP
                         )

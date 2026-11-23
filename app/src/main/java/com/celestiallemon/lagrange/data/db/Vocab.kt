@@ -78,6 +78,8 @@ object FrictionVocab {
     const val OUTCOME_NUDGE_DISMISSED = "NUDGE_DISMISSED"
     const val OUTCOME_NUDGE_IGNORED = "NUDGE_IGNORED"
     const val OUTCOME_SNOOZE_ACTIVATED = "SNOOZE_ACTIVATED"
+    /** An incoming call took over the screen while the card was up: neither a block nor a continue. */
+    const val OUTCOME_INTERRUPTED = "INTERRUPTED"
 
     /** Outcomes where the user left during the pause: the open never became real use. */
     val BLOCKING_OUTCOMES = setOf(OUTCOME_CLOSED_GO_HOME, OUTCOME_CLOSED_SYSTEM_NAV, OUTCOME_REDIRECTED)

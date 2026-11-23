@@ -187,7 +187,7 @@ friction_events
 ├── intention_tag (TEXT, nullable: REPLY | LOOKUP | UNWIND | BORED | CUSTOM)
 ├── selected_timer_min (INT, nullable)
 ├── redirect_pkg_id (INT, nullable)             -- if user tapped healthy redirect
-└── outcome (TEXT: CLOSED_GO_HOME | CLOSED_SYSTEM_NAV | REDIRECTED | CONTINUED | EXTENDED_5M | DISMISSED_SESSION | NUDGE_DISMISSED | NUDGE_IGNORED | SNOOZE_ACTIVATED)
+└── outcome (TEXT: CLOSED_GO_HOME | CLOSED_SYSTEM_NAV | REDIRECTED | CONTINUED | EXTENDED_5M | DISMISSED_SESSION | NUDGE_DISMISSED | NUDGE_IGNORED | SNOOZE_ACTIVATED | INTERRUPTED)
 
 -- Derived tables (tagged with algorithm_version, cleanly recomputable by dirty date range)
 sessions
