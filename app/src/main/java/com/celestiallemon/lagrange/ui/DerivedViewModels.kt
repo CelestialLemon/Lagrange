@@ -5,7 +5,11 @@ import android.net.Uri
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.celestiallemon.lagrange.AppGraph
+import com.celestiallemon.lagrange.data.CheckInCard
+import com.celestiallemon.lagrange.data.IngestionKeys
 import com.celestiallemon.lagrange.data.RecomputeProgress
+import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.TodayComparison
 import com.celestiallemon.lagrange.data.UserPrefs
 import com.celestiallemon.lagrange.data.db.DailyAppRollupEntity
@@ -34,6 +38,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -112,14 +118,15 @@ class TodayViewModel(app: Application) : AndroidViewModel(app) {
         if (key == null) return@mapLatest null
         withContext(Dispatchers.IO) {
             val session = state.value?.episodes?.firstOrNull { it.session.episodeKey == key } ?: return@withContext null
-            val notif = session.session.triggerNotificationId?.let { graph.database.rawNotificationDao().byId(it) }
-            val blocked = session.segments.filter { it.isBlockedAttempt }.flatMap { seg ->
-                graph.database.derivedDao().frictionFor(seg.pkgId, seg.startMs - FRICTION_SLACK_MS, seg.endMs + FRICTION_SLACK_MS)
-                    .filter { it.outcome in FrictionVocab.BLOCKING_OUTCOMES }
-            }.distinctBy { it.id }
-            SessionDetail(key, notif, blocked)
+            loadSessionDetail(graph.database, session)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    /** The calm "Was that worth it?" card (at most a couple of recent rabbit holes a day). */
+    val checkIn: StateFlow<CheckInCard?> = graph.checkInFlow()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    fun dismissCheckIn(episodeKey: String) = launchIo { graph.lab.dismissCheckIn(episodeKey) }
 
     fun loadDetail(episodeKey: String?) {
         openDetail.value = episodeKey
@@ -159,9 +166,45 @@ class TodayViewModel(app: Application) : AndroidViewModel(app) {
     companion object {
         const val NOTE_MAX_CHARS = 280
         private const val COMPARISON_REFRESH_MS = 5 * 60_000L
-        private const val FRICTION_SLACK_MS = 5_000L
         private const val TAG = "LagrangeToday"
     }
+}
+
+private const val FRICTION_SLACK_MS = 5_000L
+
+/** The trigger notification and blocked attempts behind one episode: shared by Today and the Behavior Lab. */
+internal suspend fun loadSessionDetail(db: LagrangeDatabase, episode: EpisodeUi): SessionDetail {
+    val notif = episode.session.triggerNotificationId?.let { db.rawNotificationDao().byId(it) }
+    val blocked = episode.segments.filter { it.isBlockedAttempt }.flatMap { seg ->
+        db.derivedDao().frictionFor(seg.pkgId, seg.startMs - FRICTION_SLACK_MS, seg.endMs + FRICTION_SLACK_MS)
+            .filter { it.outcome in FrictionVocab.BLOCKING_OUTCOMES }
+    }.distinctBy { it.id }
+    return SessionDetail(episode.session.episodeKey, notif, blocked)
+}
+
+/**
+ * The check-in card, re-sampled whenever the logical day, ratings, rebuilds or the check-in memory change, and once
+ * more when the offer on screen expires (36 hours after its episode, at any time of day). Asking the
+ * repository records the offer, which changes the memory once; the second pass then finds nothing new to write.
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal fun AppGraph.checkInFlow(): Flow<CheckInCard?> = afterReady {
+    val state = database.ingestionStateDao()
+    combine(
+        minuteTickFlow().map { derived.dateOf(it) }.distinctUntilChanged(),
+        state.observe(IngestionKeys.DERIVED_LAST_RUN_AT_MS).distinctUntilChanged(),
+        database.analyticsDao().observeUserSignals().distinctUntilChanged(),
+        preferences.worthCheckInLog.distinctUntilChanged(),
+    ) { a, b, c, d -> listOf(a, b, c, d) }
+        .transformLatest {
+            while (true) {
+                val card = runCatching { lab.checkIn() }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+                emit(card)
+                val expiresAt = card?.expiresAtMs?.takeIf { it != Long.MAX_VALUE } ?: break
+                delay((expiresAt - System.currentTimeMillis() + 1).coerceAtLeast(1))
+            }
+        }
+        .distinctUntilChanged()
 }
 
 /** One row of the Debug Timeline Inspector: raw facts on the left, what Lagrange made of them on the right. */

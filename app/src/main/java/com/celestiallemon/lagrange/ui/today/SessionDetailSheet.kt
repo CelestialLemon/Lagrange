@@ -50,7 +50,7 @@ import com.celestiallemon.lagrange.ui.theme.EyebrowStyle
 import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
 import com.celestiallemon.lagrange.ui.theme.Space
 
-private val ratingWords = listOf("Regret it", "Mostly not", "Meh", "Mostly yes", "Worth it")
+internal val ratingWords = listOf("Regret it", "Mostly not", "Meh", "Mostly yes", "Worth it")
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -192,10 +192,10 @@ private fun SheetSection(title: String, content: @Composable () -> Unit) {
 
 /** "Was that worth it?" 1–5. Tapping the current rating again clears it. */
 @Composable
-private fun RatingRow(current: Int?, onRate: (Int?) -> Unit) {
+internal fun RatingRow(current: Int?, onRate: (Int?) -> Unit, title: String = "Was that worth it?") {
     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
         Column(Modifier.padding(Space.m).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("Was that worth it?", style = MaterialTheme.typography.titleMedium)
+            Text(title, style = MaterialTheme.typography.titleMedium)
             Row(horizontalArrangement = Arrangement.Center) {
                 (1..5).forEach { n ->
                     val filled = current != null && n <= current

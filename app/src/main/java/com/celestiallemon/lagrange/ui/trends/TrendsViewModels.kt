@@ -74,7 +74,7 @@ internal fun <T, R> Flow<T>.scanRetaining(initial: R, operation: (acc: R, value:
  * deep dive, which draws the live goal itself.
  */
 @OptIn(FlowPreview::class)
-private fun AppGraph.trendsRefresh(includeGoals: Boolean): Flow<Any> = afterReady {
+internal fun AppGraph.trendsRefresh(includeGoals: Boolean): Flow<Any> = afterReady {
     val state = database.ingestionStateDao()
     combine(
         listOf(
@@ -95,7 +95,7 @@ private fun AppGraph.trendsRefresh(includeGoals: Boolean): Flow<Any> = afterRead
 private const val REFRESH_DEBOUNCE_MS = 400L
 
 /** One step of a load: started for a request, finished with a value, or failed. */
-private sealed interface Load<out T> {
+internal sealed interface Load<out T> {
     data object Started : Load<Nothing>
     data class Done<T>(val value: T) : Load<T>
     data class Failed(val message: String) : Load<Nothing>
@@ -106,7 +106,7 @@ private sealed interface Load<out T> {
  * can never clear the loading state of the one that replaced it.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-private fun <K, T> Flow<K>.loadLatest(tag: String, load: suspend (K) -> T): Flow<Pair<K, Load<T>>> = transformLatest { k ->
+internal fun <K, T> Flow<K>.loadLatest(tag: String, load: suspend (K) -> T): Flow<Pair<K, Load<T>>> = transformLatest { k ->
     emit(k to Load.Started)
     val result: Load<T> = try {
         Load.Done(load(k))

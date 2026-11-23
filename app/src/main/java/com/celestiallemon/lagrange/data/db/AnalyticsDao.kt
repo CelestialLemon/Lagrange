@@ -40,6 +40,9 @@ data class SessionLite(
 
 data class FrictionLite(val timestampMs: Long, val eventKind: String, val outcome: String)
 
+/** Where a real (not blocked) run of an app started: reopen follow-ups for the Lab's friction view. */
+data class RunStartRow(val pkgId: Long, val startMs: Long)
+
 /** "Covered" for a joined `daily_rollups d` row: see [AnalyticsDao]. */
 private const val COVERED = "d.coverage_status IN ('COMPLETE', 'NO_NOTIF_COVERAGE', 'BACKFILL') " +
     "AND d.day_status IN ('NORMAL', 'SPIKE', 'GOOD_DAY', 'INSUFFICIENT_BASELINE')"
@@ -148,6 +151,93 @@ interface AnalyticsDao {
             "WHERE pkg_id = :pkgId AND timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs ORDER BY timestamp_utc_ms, id",
     )
     suspend fun frictionOf(pkgId: Long, fromMs: Long, toMs: Long): List<FrictionLite>
+
+    // -- Behavior Lab (read-only) -------------------------------------------------------------------------------------
+
+    /** Unlocked episodes counted on the logical days of the range (an episode belongs to the day it started). */
+    @Query(
+        "SELECT * FROM sessions WHERE is_glance_only = 0 AND logical_date >= :fromDate AND logical_date <= :toDate ORDER BY start_ms, id",
+    )
+    suspend fun unlockedSessions(fromDate: String, toDate: String): List<SessionEntity>
+
+    /**
+     * Notifications lockscreen glances on the range's logical days consumed as their trigger. Glances never count as
+     * pickups or downstream use in the Lab, but the reconstructor's switch matching could not reuse these.
+     */
+    @Query(
+        "SELECT trigger_notification_id FROM sessions WHERE is_glance_only = 1 AND trigger_notification_id IS NOT NULL " +
+            "AND logical_date >= :fromDate AND logical_date <= :toDate",
+    )
+    suspend fun glanceTriggerNotificationIds(fromDate: String, toDate: String): List<Long>
+
+    /** Of the unlocked episodes that started before [beforeMs], the one that ended last. */
+    @Query("SELECT * FROM sessions WHERE is_glance_only = 0 AND start_ms < :beforeMs ORDER BY end_ms DESC, id DESC LIMIT 1")
+    suspend fun lastUnlockedEndingBefore(beforeMs: Long): SessionEntity?
+
+    /** Every segment of those episodes, in order. */
+    @Query(
+        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
+            "WHERE s.is_glance_only = 0 AND s.logical_date >= :fromDate AND s.logical_date <= :toDate ORDER BY g.session_id, g.seq_index",
+    )
+    suspend fun unlockedSegments(fromDate: String, toDate: String): List<SessionSegmentEntity>
+
+    @Query(
+        "SELECT * FROM sessions WHERE is_glance_only = 0 AND is_rabbit_hole = 1 AND logical_date >= :fromDate AND logical_date <= :toDate " +
+            "ORDER BY start_ms DESC, id",
+    )
+    suspend fun rabbitHolesBetween(fromDate: String, toDate: String): List<SessionEntity>
+
+    @Query(
+        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id WHERE s.is_glance_only = 0 AND s.is_rabbit_hole = 1 " +
+            "AND s.logical_date >= :fromDate AND s.logical_date <= :toDate ORDER BY g.session_id, g.seq_index",
+    )
+    suspend fun rabbitHoleSegmentsBetween(fromDate: String, toDate: String): List<SessionSegmentEntity>
+
+    /** Rabbit holes that ended at or after [sinceMs]: candidates for the "Was that worth it?" check-in. */
+    @Query(
+        "SELECT * FROM sessions WHERE is_glance_only = 0 AND is_rabbit_hole = 1 AND end_ms >= :sinceMs ORDER BY end_ms DESC, id",
+    )
+    suspend fun rabbitHolesEndingSince(sinceMs: Long): List<SessionEntity>
+
+    @Query(
+        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
+            "WHERE s.is_glance_only = 0 AND s.is_rabbit_hole = 1 AND s.end_ms >= :sinceMs ORDER BY g.session_id, g.seq_index",
+    )
+    suspend fun rabbitHoleSegmentsEndingSince(sinceMs: Long): List<SessionSegmentEntity>
+
+    @Query("SELECT * FROM sessions WHERE episode_key = :episodeKey AND is_glance_only = 0 ORDER BY id LIMIT 1")
+    suspend fun sessionByKey(episodeKey: String): SessionEntity?
+
+    @Query("SELECT * FROM session_segments WHERE session_id = :sessionId ORDER BY seq_index")
+    suspend fun segmentsOf(sessionId: Long): List<SessionSegmentEntity>
+
+    @Query("SELECT * FROM daily_notes WHERE logical_date >= :fromDate AND logical_date <= :toDate")
+    suspend fun notesBetween(fromDate: String, toDate: String): List<DailyNoteEntity>
+
+    @Query("SELECT * FROM daily_app_rollups WHERE logical_date IN (:dates)")
+    suspend fun appRollupsFor(dates: List<String>): List<DailyAppRollupEntity>
+
+    @Query("SELECT * FROM hourly_app_usage WHERE logical_date IN (:dates)")
+    suspend fun hourlyFor(dates: List<String>): List<HourlyAppUsageEntity>
+
+    /** Hour slots (0..24) of every app of a category, per day, over the range. */
+    @Query(
+        "SELECT h.* FROM hourly_app_usage h JOIN packages p ON p.id = h.pkg_id " +
+            "WHERE p.category = :category AND h.logical_date >= :fromDate AND h.logical_date <= :toDate",
+    )
+    suspend fun hourlyOfCategory(category: String, fromDate: String, toDate: String): List<HourlyAppUsageEntity>
+
+    /** Starts of real (not blocked) runs of any app in `[fromMs, toMs)`. */
+    @Query(
+        "SELECT g.pkg_id AS pkgId, g.start_ms AS startMs FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
+            "WHERE g.is_blocked_attempt = 0 AND g.duration_ms > 0 AND s.is_glance_only = 0 " +
+            "AND g.start_ms >= :fromMs AND g.start_ms < :toMs ORDER BY g.start_ms",
+    )
+    suspend fun runStartsBetween(fromMs: Long, toMs: Long): List<RunStartRow>
+
+    /** Refresh signal for the Lab: notes written from Today (never shown). */
+    @Query("SELECT COUNT(*) || ':' || COALESCE(MAX(updated_at_ms), 0) FROM daily_notes")
+    fun observeNotesSignal(): Flow<String>
 
     @Query("SELECT * FROM packages WHERE id = :id")
     suspend fun packageById(id: Long): PackageEntity?
