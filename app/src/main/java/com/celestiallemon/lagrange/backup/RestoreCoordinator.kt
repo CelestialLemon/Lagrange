@@ -240,6 +240,16 @@ class RestoreCoordinator(
             current = current.copy(state = State.SWAPPED)
             writeJournal(current)
         } catch (e: Exception) {
+            if (current.state == State.STAGED) {
+                // Failed before SAVING_PREVIOUS was journaled: no live file has moved, so there is nothing to roll
+                // back. A rollback here would treat every live file as "not an original" and delete it.
+                Log.e(TAG, "restore swap failed before anything moved; discarding the staged restore", e)
+                discardStaged()
+                previous.deleteRecursively()
+                journalFile.delete()
+                writeOutcome("Restore failed (${e.message}). Your data is unchanged.")
+                return
+            }
             Log.e(TAG, "restore swap failed; rolling back", e)
             rollbackOrKeep(current, "Restore failed (${e.message}). Your previous data was kept.")
         }
@@ -264,24 +274,34 @@ class RestoreCoordinator(
         writeOutcome("Backup restored.")
     }
 
-    /** The restored database could not be opened: put the previous generation back. */
+    /** The restored database could not be opened: put the previous generation back. Throws if that is incomplete. */
     fun rollback(reason: String?) {
         val journal = readJournal() ?: return
         rollbackOrKeep(journal, "The restored database couldn't be opened (${reason ?: "unknown error"}). Your previous data was put back.")
     }
 
+    /**
+     * Puts the previous generation back. An incomplete rollback throws [RestoreRecoveryException]: the journal stays
+     * (the next start retries before Room opens) and the caller must not open the database, which may now be a mix
+     * of both generations.
+     */
     private fun rollbackOrKeep(journal: Journal, message: String) {
         try {
             restorePreviousGeneration(journal)
-            writeOutcome(message)
         } catch (e: Exception) {
-            // The journal stays, so the next start tries again before Room opens.
             Log.e(TAG, "rollback incomplete; will retry on next start", e)
-            writeOutcome("Restore couldn't be rolled back yet (${e.message}). Lagrange will retry on the next start.")
+            throw RestoreRecoveryException(
+                "Lagrange couldn't finish putting your previous data back (${e.message}). Your data is kept on the " +
+                    "device and nothing will be recorded until it is. Restart Lagrange to try again.",
+                e,
+            )
         }
+        writeOutcome(message)
     }
 
     private fun restorePreviousGeneration(journal: Journal) {
+        // Nothing was moved aside while STAGED: "restoring" would only delete live files that look like non-originals.
+        if (journal.state == State.STAGED) throw BackupException("Refusing to roll back a restore that never started")
         val previous = previousDir(journal.generation)
         val saved = previous.listFiles()?.map { it.name }?.toSet().orEmpty()
         // A legacy journal has no list of originals: everything saved is an original.
@@ -339,6 +359,9 @@ class RestoreCoordinator(
         root.deleteRecursively()
         workRoot.deleteRecursively()
     }
+
+    /** Restore state that [clearAll] should have removed but is still on disk. */
+    fun leftovers(): List<File> = listOf(root, workRoot).filter { it.exists() }
 
     private fun previousDir(generation: String): File =
         if (generation == LEGACY_GENERATION) File(root, "previous") else File(workRoot, PREVIOUS_PREFIX + generation)
@@ -416,3 +439,6 @@ class RestoreCoordinator(
         }
     }
 }
+
+/** A restore rollback could not finish; the database must stay closed until a later start completes it. */
+class RestoreRecoveryException(message: String, cause: Throwable) : Exception(message, cause)

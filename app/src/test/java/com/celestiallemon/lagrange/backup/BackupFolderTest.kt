@@ -101,11 +101,57 @@ class BackupFolderTest {
     @Test
     fun `a backup half-written by a killed process is cleaned up and never counted`() = runBlocking<Unit> {
         val partial = File(dir, BackupFormat.fileName(5_000L)).apply { writeText("trunc") }
-        preferences.setBackupInProgress(partial.path)
+        preferences.setBackupInProgress(partial.path, partial.name)
         backUp()
         assertFalse(partial.exists())
         assertEquals(1, dir.list()!!.size)
         assertNull(preferences.backupInProgress())
+    }
+
+    @Test
+    fun `completed backups are recorded with the length and SHA-256 of the written file`() = runBlocking<Unit> {
+        Interner(db, FakeResolver()).packageId("com.kept")
+        val name = backUp()
+        val file = File(dir, name)
+        val fingerprint = preferences.completedBackups().getValue(file.path)
+        assertEquals(file.length(), fingerprint!!.size)
+        assertEquals(BackupFormat.sha256(file), fingerprint.sha256)
+    }
+
+    @Test
+    fun `pruning never deletes a file that was replaced at the same path`() = runBlocking<Unit> {
+        Interner(db, FakeResolver()).packageId("com.kept")
+        clock.now += 86_400_000L
+        val oldest = File(dir, backUp())
+        // A sync tool or the user puts a different file at the oldest backup's path.
+        oldest.writeText("someone else's file now")
+        repeat(3) {
+            clock.now += 86_400_000L
+            backUp()
+        }
+        assertTrue("replaced file kept", oldest.exists())
+        assertEquals("someone else's file now", oldest.readText())
+        assertFalse("and no longer tracked as ours", oldest.path in preferences.completedBackups())
+        assertEquals(3, preferences.completedBackups().size)
+    }
+
+    @Test
+    fun `a leftover in-progress record pointing at a complete bundle is not deleted`() = runBlocking<Unit> {
+        Interner(db, FakeResolver()).packageId("com.kept")
+        val complete = File(dir, BackupFormat.fileName(5_000L))
+        complete.outputStream().use { backups.writeBackup(it) }
+        preferences.setBackupInProgress(complete.path, complete.name)
+        clock.now += 86_400_000L
+        backUp()
+        assertTrue("a complete bundle is not our half-written file", complete.exists())
+        assertNull(preferences.backupInProgress())
+
+        // A partial left under a different name than the one recorded is not touched either.
+        val renamed = File(dir, "renamed.zip").apply { writeText("trunc") }
+        preferences.setBackupInProgress(renamed.path, "lagrange-backup-other.zip")
+        clock.now += 86_400_000L
+        backUp()
+        assertTrue(renamed.exists())
     }
 
     @Test

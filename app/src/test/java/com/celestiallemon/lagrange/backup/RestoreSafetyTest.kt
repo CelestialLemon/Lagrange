@@ -120,6 +120,70 @@ class RestoreSafetyTest {
     }
 
     @Test
+    fun `a swap that fails before anything moved never touches the live database or its WAL`() = runBlocking<Unit> {
+        addPackage("com.kept")
+        val bytes = backupBytes()
+        backups().stageRestore(ByteArrayInputStream(bytes))
+        addPackage("com.only_in_wal")
+
+        // Leave the live generation as a killed process would: the newest row only in the WAL.
+        val scratch = File(context.cacheDir, "wal-capture-2").apply { deleteRecursively(); mkdirs() }
+        File(dbPath).copyTo(File(scratch, "main"), overwrite = true)
+        File("$dbPath-wal").copyTo(File(scratch, "wal"), overwrite = true)
+        db.close()
+        File(scratch, "main").copyTo(File(dbPath), overwrite = true)
+        File(scratch, "wal").copyTo(File("$dbPath-wal"), overwrite = true)
+        File("$dbPath-shm").delete()
+        val mainBefore = File(dbPath).readBytes()
+        val walBefore = File("$dbPath-wal").readBytes()
+        assertTrue("precondition: the row lives in the WAL", walBefore.isNotEmpty())
+
+        // A regular file where the rollback folder must go: creating previous-<generation>/ fails while STAGED.
+        val generation = restore.readJournal()!!.generation
+        val blocker = File(File(dbPath).parentFile, "lagrange-restore/previous-$generation").apply { writeText("in the way") }
+
+        nextStart().applyPendingIfAny()
+
+        assertTrue(File(dbPath).readBytes().contentEquals(mainBefore))
+        assertTrue(File("$dbPath-wal").readBytes().contentEquals(walBefore))
+        assertNull("journal cleared", nextStart().readJournal())
+        assertFalse("staged restore discarded", restore.hasStagedRestore())
+        assertFalse(blocker.exists())
+        assertTrue(restore.consumeOutcome()!!.contains("unchanged"))
+        reopen()
+        assertEquals(setOf("com.kept", "com.only_in_wal"), packageNames())
+        scratch.deleteRecursively()
+    }
+
+    @Test
+    fun `an incomplete rollback throws instead of letting Room open a mixed generation`() = runBlocking<Unit> {
+        addPackage("com.kept")
+        val bytes = backupBytes()
+        backups().stageRestore(ByteArrayInputStream(bytes))
+        db.close()
+        restore.applyPendingIfAny()
+        restore.beginVerification()
+
+        // A non-empty directory where the restored WAL would be deleted from: the rollback can't finish.
+        val blocker = File("$dbPath-wal").apply { delete(); mkdirs() }
+        File(blocker, "child").writeText("x")
+        try {
+            nextStart().applyPendingIfAny()
+            fail("an incomplete rollback must not return normally")
+        } catch (e: RestoreRecoveryException) {
+            assertTrue(e.message!!.contains("Restart"))
+        }
+        assertNotNull("journal kept for the next start", nextStart().readJournal())
+
+        // Once the obstacle is gone the next start completes the rollback.
+        blocker.deleteRecursively()
+        nextStart().applyPendingIfAny()
+        assertNull(nextStart().readJournal())
+        reopen()
+        assertEquals(setOf("com.kept"), packageNames())
+    }
+
+    @Test
     fun `a crash after the swap, before verification, is verified on the next start`() = runBlocking<Unit> {
         addPackage("com.kept")
         val bytes = backupBytes()

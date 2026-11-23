@@ -4,7 +4,9 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.InputStream
 import java.io.OutputStream
 
 /** One file in a backup folder. [id] is stable for the file's lifetime (a document URI for SAF). */
@@ -18,6 +20,7 @@ interface BackupFolder {
     fun canWrite(): Boolean
     fun create(mimeType: String, name: String): BackupDocument?
     fun openOutput(doc: BackupDocument): OutputStream?
+    fun openInput(id: String): InputStream?
     fun list(): List<BackupDocument>
     fun delete(id: String): Boolean
 
@@ -36,6 +39,8 @@ class SafBackupFolder(private val context: Context, private val treeUri: Uri) : 
         tree.createFile(mimeType, name)?.let { BackupDocument(it.uri.toString(), it.name ?: name) }
 
     override fun openOutput(doc: BackupDocument): OutputStream? = context.contentResolver.openOutputStream(Uri.parse(doc.id), "wt")
+
+    override fun openInput(id: String): InputStream? = context.contentResolver.openInputStream(Uri.parse(id))
 
     override fun list(): List<BackupDocument> =
         tree.listFiles().filter { it.isFile }.map { BackupDocument(it.uri.toString(), it.name) }
@@ -58,6 +63,8 @@ class FileBackupFolder(private val dir: File) : BackupFolder {
     }
 
     override fun openOutput(doc: BackupDocument): OutputStream = FileOutputStream(doc.id)
+
+    override fun openInput(id: String): InputStream? = File(id).takeIf { it.isFile }?.let(::FileInputStream)
 
     override fun list(): List<BackupDocument> = dir.listFiles()?.filter { it.isFile }?.map { BackupDocument(it.path, it.name) }.orEmpty()
 

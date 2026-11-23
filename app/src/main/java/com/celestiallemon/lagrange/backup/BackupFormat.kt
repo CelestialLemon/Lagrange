@@ -1,10 +1,12 @@
 package com.celestiallemon.lagrange.backup
 
 import android.database.sqlite.SQLiteDatabase
+import com.celestiallemon.lagrange.data.BackupFingerprint
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
+import java.util.zip.ZipInputStream
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -67,6 +69,39 @@ object BackupFormat {
         names.filter(::isBackupFileName).sortedDescending().drop(keep)
 
     fun sha256(file: File): String = file.inputStream().use { sha256(it) }
+
+    /** Byte length and SHA-256 of everything [input] yields. */
+    fun fingerprint(input: InputStream): BackupFingerprint {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        var size = 0L
+        while (true) {
+            val n = input.read(buffer)
+            if (n < 0) break
+            digest.update(buffer, 0, n)
+            size += n
+        }
+        return BackupFingerprint(size, digest.digest().toHex())
+    }
+
+    /**
+     * True when [input] reads as a whole Lagrange bundle (every entry, manifest included, readable to the end). A
+     * write killed mid-stream never is, so a complete bundle found where a partial one was recorded is not ours.
+     */
+    fun isCompleteBundle(input: InputStream): Boolean = try {
+        val seen = HashSet<String>()
+        ZipInputStream(input.buffered()).use { zip ->
+            while (true) {
+                val entry = zip.nextEntry ?: break
+                val buffer = ByteArray(64 * 1024)
+                while (zip.read(buffer) >= 0) Unit
+                seen += entry.name
+            }
+        }
+        seen.containsAll(ENTRIES)
+    } catch (_: Exception) {
+        false
+    }
 
     fun sha256(input: InputStream): String {
         val digest = MessageDigest.getInstance("SHA-256")

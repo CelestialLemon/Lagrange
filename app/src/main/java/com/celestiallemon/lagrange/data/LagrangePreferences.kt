@@ -13,6 +13,7 @@ import com.celestiallemon.lagrange.data.db.SettingsHistoryEntity
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -34,6 +35,17 @@ data class UserPrefs(
         const val DEFAULT_ROLLOVER_HOUR = 4
     }
 }
+
+/** Byte length and SHA-256 of a backup file exactly as Lagrange wrote it. */
+@Serializable
+data class BackupFingerprint(val size: Long, val sha256: String)
+
+@Serializable
+internal data class CompletedBackup(val id: String, val fingerprint: BackupFingerprint? = null)
+
+/** A folder backup being written: its document id and the name it was created with. */
+@Serializable
+data class InProgressBackup(val id: String, val name: String? = null)
 
 /**
  * DataStore-backed preferences. Changes that affect how history is interpreted (the logical-day rollover) are also
@@ -76,24 +88,35 @@ class LagrangePreferences(
 
     // -- Backup-folder bookkeeping (device-specific, never exported) ------------------------------------------------
 
-    /** The document of a folder backup that was being written; set while writing, so a killed run can be cleaned up. */
-    suspend fun backupInProgress(): String? = store.data.first()[BACKUP_IN_PROGRESS]
+    /** The folder backup that was being written; set while writing, so a killed run can be cleaned up. */
+    suspend fun backupInProgress(): InProgressBackup? = store.data.first()[BACKUP_IN_PROGRESS]?.let(::decodeInProgress)
 
-    suspend fun setBackupInProgress(documentId: String?) = store.edit {
-        if (documentId == null) it.remove(BACKUP_IN_PROGRESS) else it[BACKUP_IN_PROGRESS] = documentId
+    suspend fun setBackupInProgress(documentId: String?, name: String? = null) = store.edit {
+        if (documentId == null) {
+            it.remove(BACKUP_IN_PROGRESS)
+        } else {
+            it[BACKUP_IN_PROGRESS] = recordJson.encodeToString(InProgressBackup.serializer(), InProgressBackup(documentId, name))
+        }
     }
 
-    /** Folder backups Lagrange wrote and saw complete. Only these are ever counted for retention or pruned. */
-    suspend fun completedBackups(): Set<String> = store.data.first()[COMPLETED_BACKUPS].orEmpty()
+    /**
+     * Folder backups Lagrange wrote and saw complete, with the fingerprint of the bytes it wrote (null for a record
+     * kept from a build that stored none). Only these are ever counted for retention or pruned, and only after the
+     * file at that id still matches its fingerprint.
+     */
+    suspend fun completedBackups(): Map<String, BackupFingerprint?> =
+        store.data.first()[COMPLETED_BACKUPS].orEmpty().map(::decodeCompleted).associate { it.id to it.fingerprint }
 
     /** Records a finished folder backup and clears the in-progress marker in one step. */
-    suspend fun recordCompletedBackup(documentId: String) = store.edit {
-        it[COMPLETED_BACKUPS] = it[COMPLETED_BACKUPS].orEmpty() + documentId
+    suspend fun recordCompletedBackup(documentId: String, fingerprint: BackupFingerprint) = store.edit {
+        val kept = it[COMPLETED_BACKUPS].orEmpty().filterNot { raw -> decodeCompleted(raw).id == documentId }
+        it[COMPLETED_BACKUPS] = kept.toSet() + recordJson.encodeToString(CompletedBackup.serializer(), CompletedBackup(documentId, fingerprint))
         it.remove(BACKUP_IN_PROGRESS)
     }
 
     suspend fun forgetBackups(documentIds: Collection<String>) = store.edit {
-        it[COMPLETED_BACKUPS] = it[COMPLETED_BACKUPS].orEmpty() - documentIds.toSet()
+        val ids = documentIds.toSet()
+        it[COMPLETED_BACKUPS] = it[COMPLETED_BACKUPS].orEmpty().filterNot { raw -> decodeCompleted(raw).id in ids }.toSet()
     }
 
     /** The portable subset that goes into a backup. Device-specific state (folder grants, backup status) is left out. */
@@ -128,6 +151,17 @@ class LagrangePreferences(
         private val LAST_BACKUP_STATUS = stringPreferencesKey("last_backup_status")
         private val BACKUP_IN_PROGRESS = stringPreferencesKey("backup_in_progress")
         private val COMPLETED_BACKUPS = stringSetPreferencesKey("completed_backups")
+
+        private val recordJson = Json { ignoreUnknownKeys = true }
+
+        /** A plain string is a record from the build that stored ids only. */
+        private fun decodeCompleted(raw: String): CompletedBackup =
+            if (raw.startsWith("{")) runCatching { recordJson.decodeFromString(CompletedBackup.serializer(), raw) }.getOrElse { CompletedBackup(raw, null) }
+            else CompletedBackup(raw, null)
+
+        private fun decodeInProgress(raw: String): InProgressBackup =
+            if (raw.startsWith("{")) runCatching { recordJson.decodeFromString(InProgressBackup.serializer(), raw) }.getOrElse { InProgressBackup(raw, null) }
+            else InProgressBackup(raw, null)
 
         /** Throws [IllegalArgumentException] when [text] isn't a preferences object this version understands. */
         fun parsePortable(text: String): JsonObject {

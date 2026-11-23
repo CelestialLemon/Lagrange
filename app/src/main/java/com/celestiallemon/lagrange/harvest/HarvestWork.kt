@@ -14,6 +14,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
 import com.celestiallemon.lagrange.LagrangeApplication
+import com.celestiallemon.lagrange.StartupFailedException
 import com.celestiallemon.lagrange.backup.WeeklyBackupWorker
 import java.util.concurrent.TimeUnit
 import android.util.Log
@@ -26,7 +27,11 @@ import kotlinx.coroutines.withContext
 class HarvestWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val graph = (applicationContext as LagrangeApplication).graph
-        graph.awaitReady()
+        try {
+            graph.awaitReady()
+        } catch (e: StartupFailedException) {
+            return Result.failure() // recovery failed: never harvest into an unrecovered database
+        }
         val trigger = inputData.getString(KEY_TRIGGER)?.let { name -> HarvestTrigger.entries.firstOrNull { it.name == name } }
             ?: HarvestTrigger.PERIODIC
         return run(

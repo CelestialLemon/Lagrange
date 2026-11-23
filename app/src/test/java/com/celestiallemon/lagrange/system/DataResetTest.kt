@@ -20,13 +20,33 @@ import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import com.celestiallemon.lagrange.harvest.RawUsageEvent
 import com.celestiallemon.lagrange.harvest.UsageStatsHarvester
 import com.celestiallemon.lagrange.harvest.WorkScheduler
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import com.celestiallemon.lagrange.backup.BackupDocument
+import com.celestiallemon.lagrange.backup.BackupException
+import com.celestiallemon.lagrange.backup.BackupFolder
+import com.celestiallemon.lagrange.backup.FileBackupFolder
+import com.celestiallemon.lagrange.backup.LagrangeBackups
+import com.celestiallemon.lagrange.backup.RestoreCoordinator
+import com.celestiallemon.lagrange.data.LagrangePreferences
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.FileOutputStream
+import java.io.OutputStream
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
@@ -99,6 +119,77 @@ class DataResetTest {
         val fresh = LagrangeDatabase.create(context)
         assertTrue(fresh.packageDao().all().none { it.packageName == "com.secret" })
         fresh.close()
+    }
+
+    @Test
+    fun `the reset marker stays until every file is verifiably gone`() = runBlocking {
+        // Something that survives a plain delete where the preferences file lives (a non-empty directory).
+        val prefs = File(context.filesDir, "datastore/lagrange_prefs.preferences_pb").apply { mkdirs() }
+        File(prefs, "stuck").writeText("x")
+        reset().requestReset()
+        try {
+            DataReset.applyPendingIfAny(context)
+            fail("an unverified wipe must not complete")
+        } catch (e: IllegalStateException) {
+            assertTrue(e.message!!.contains("lagrange_prefs"))
+        }
+        assertTrue("marker kept so the next start retries", DataReset.isPending(context))
+
+        prefs.deleteRecursively()
+        assertTrue(DataReset.applyPendingIfAny(context))
+        assertFalse(DataReset.isPending(context))
+    }
+
+    @Test
+    fun `reset refuses new backups and waits for a running one before releasing grants`() = runBlocking<Unit> {
+        val folderUri = Uri.parse("content://com.android.externalstorage.documents/tree/primary%3ABackups")
+        context.contentResolver.takePersistableUriPermission(folderUri, grant)
+        val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+        val store = PreferenceDataStoreFactory.create(scope = scope) { File(context.filesDir, "reset-drain.preferences_pb") }
+        val db = LagrangeDatabase.inMemory(context)
+        val backups = LagrangeBackups(context, db, LagrangePreferences(store, db), RestoreCoordinator(context), "test", 1, { now })
+        val dir = File(context.cacheDir, "reset-drain-folder").apply { deleteRecursively(); mkdirs() }
+        val writing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val slow = object : BackupFolder by FileBackupFolder(dir) {
+            override fun openOutput(doc: BackupDocument): OutputStream {
+                val real = FileOutputStream(doc.id)
+                return object : OutputStream() {
+                    override fun write(b: Int) = write(byteArrayOf(b.toByte()), 0, 1)
+                    override fun write(b: ByteArray, off: Int, len: Int) {
+                        writing.countDown()
+                        release.await()
+                        real.write(b, off, len)
+                    }
+                    override fun close() = real.close()
+                }
+            }
+        }
+        val running = async(Dispatchers.IO) { backups.backUpToFolder({ slow }, automatic = true) }
+        assertTrue(writing.await(10, TimeUnit.SECONDS))
+
+        var cancelled = false
+        val resetting = async(Dispatchers.IO) { DataReset(context, { now }, { cancelled = true }, backups).requestReset() }
+        delay(300)
+        assertTrue("work cancelled before draining", cancelled)
+        assertFalse("still waiting for the running backup", resetting.isCompleted)
+        assertEquals("grant kept while the ZIP is still being written", 1, context.contentResolver.persistedUriPermissions.size)
+        assertFalse(DataReset.isPending(context))
+        try {
+            backups.writeBackup(ByteArrayOutputStream())
+            fail("new backups must be refused once a reset began")
+        } catch (e: BackupException) {
+            assertTrue(e.message!!.contains("resetting"))
+        }
+
+        release.countDown()
+        running.await()
+        assertEquals(now, resetting.await())
+        assertTrue(context.contentResolver.persistedUriPermissions.isEmpty())
+        assertTrue(DataReset.isPending(context))
+        db.close()
+        scope.cancel()
+        dir.deleteRecursively()
     }
 
     @Test

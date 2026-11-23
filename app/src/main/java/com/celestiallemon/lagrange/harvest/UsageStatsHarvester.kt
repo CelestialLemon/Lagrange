@@ -203,8 +203,9 @@ class UsageStatsHarvester(
         }
         val latest = dao.latest(kind, CoverageStatus.ACTIVE.name)
         if (backfillFrom == null && gapFrom == null && latest != null && (latest.endMs ?: latest.lastSeenMs) >= begin) {
-            // maxOf: after a backward clock jump "now" can be earlier than the interval's start.
-            dao.update(latest.copy(endMs = maxOf(now, latest.startMs), lastSeenMs = now))
+            // maxOf: after a backward clock jump "now" can be earlier than the interval's start or its recorded end.
+            // A correction never shrinks coverage that was already recorded (09:00–12:00 stays 09:00–12:00).
+            dao.update(latest.copy(endMs = maxOf(now, latest.startMs, latest.endMs ?: now), lastSeenMs = now))
         } else {
             // After a backfill or a gap, live coverage starts now; it never overlaps the BACKFILL or GAP interval.
             val start = if (backfillFrom != null || gapFrom != null) now else begin

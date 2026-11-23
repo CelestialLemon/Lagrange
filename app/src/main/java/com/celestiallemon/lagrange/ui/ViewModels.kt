@@ -27,6 +27,9 @@ import com.celestiallemon.lagrange.system.PermissionHealthChecker
 import java.time.ZoneId
 import android.util.Log
 import com.celestiallemon.lagrange.AppGraph
+import com.celestiallemon.lagrange.StartupFailedException
+import com.celestiallemon.lagrange.StartupGate
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -68,9 +71,16 @@ data class CollectorStats(
         lastHarvestAtMs != null && nowMs - lastHarvestAtMs > UsageStatsHarvester.GAP_ALERT_MS
 }
 
-/** Waits for startup (database verified, restored preferences applied), then mirrors [source]. */
+/**
+ * Waits for startup (database verified, restored preferences applied), then mirrors [source]. If startup failed it
+ * never emits: the UI shows the recovery error from [AppGraph.startupState] instead.
+ */
 private fun <T> AppGraph.afterReady(source: AppGraph.() -> Flow<T>): Flow<T> = flow {
-    awaitReady()
+    try {
+        awaitReady()
+    } catch (_: StartupFailedException) {
+        awaitCancellation()
+    }
     emitAll(source())
 }.flowOn(Dispatchers.IO)
 
@@ -165,6 +175,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     val restoreNotice: StateFlow<String?> = graph.restoreNotice
+
+    /** Starting, Ready, or Failed with a message: a failed recovery keeps every data screen closed. */
+    val startupState: StateFlow<StartupGate.State> = graph.startupState
+
+    fun restartApp() = AppRestarter.restart(getApplication())
 
     fun dismissRestoreNotice() {
         graph.restoreNotice.value = null
@@ -268,10 +283,11 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
         "Backup verified (created ${formatDateTime(m.createdAtUtcMs)}). Restart to apply it."
     }
 
-    fun cancelRestore() = viewModelScope.launch {
-        withContext(Dispatchers.IO) { graph.restore.cancelStaged() }
+    /** Runs through [run] (one data operation at a time) and the backup lock, so it can't race a stage in flight. */
+    fun cancelRestore() = run("Discarding staged restore…") {
+        graph.backups.cancelStagedRestore()
         _restoreStaged.value = false
-        _op.value = DataOpState(message = "Staged restore discarded")
+        "Staged restore discarded"
     }
 
     fun restartToApplyRestore() = AppRestarter.restart(getApplication())
@@ -323,7 +339,8 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
     /** Stops background work, releases folder grants and restarts; the wipe itself happens before Room reopens. */
     fun resetAll() = run("Deleting all data…") {
         val app = getApplication<Application>()
-        DataReset(app).requestReset()
+        // Refuses new backups, cancels jobs and waits out any backup still writing before grants go and we exit.
+        DataReset(app, backups = graph.backups).requestReset()
         AppRestarter.restart(app)
         "Reset"
     }

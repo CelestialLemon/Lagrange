@@ -7,13 +7,18 @@ import androidx.work.CoroutineWorker
 import androidx.work.ListenableWorker.Result
 import androidx.work.WorkerParameters
 import com.celestiallemon.lagrange.LagrangeApplication
+import com.celestiallemon.lagrange.StartupFailedException
 import kotlinx.coroutines.CancellationException
 
 /** Writes the weekly backup into the folder the user picked, keeping the newest eight. */
 class WeeklyBackupWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
         val graph = (applicationContext as LagrangeApplication).graph
-        graph.awaitReady()
+        try {
+            graph.awaitReady()
+        } catch (e: StartupFailedException) {
+            return Result.failure() // recovery failed: the database stays closed
+        }
         val tree = graph.preferences.current().backupTreeUri
         return run(tree, runAttemptCount) { graph.backups.backUpToFolder(Uri.parse(it), automatic = true) }
     }

@@ -232,9 +232,9 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
                                 color = MaterialTheme.colorScheme.onTertiaryContainer,
                             )
                             Row {
-                                Button(onClick = data::restartToApplyRestore) { Text("Restart & restore") }
+                                Button(onClick = data::restartToApplyRestore, enabled = !op.busy) { Text("Restart & restore") }
                                 Spacer(Modifier.width(Space.s))
-                                TextButton(onClick = data::cancelRestore) { Text("Discard") }
+                                TextButton(onClick = { data.cancelRestore() }, enabled = !op.busy) { Text("Discard") }
                             }
                         }
                     }

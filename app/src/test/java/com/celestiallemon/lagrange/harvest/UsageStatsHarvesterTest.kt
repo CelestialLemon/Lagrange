@@ -252,6 +252,25 @@ class UsageStatsHarvesterTest {
     }
 
     @Test
+    fun `a backward clock correction never shrinks recorded coverage`() = runBlocking {
+        val h = harvester()
+        source.events += ev(start - 1000)
+        h.harvest(HarvestTrigger.MANUAL) // backfill; live coverage starts at `start`
+        clock.now = start + 3 * HOUR
+        source.events += ev(start + 3 * HOUR - 10)
+        h.harvest(HarvestTrigger.PERIODIC)
+        val before = db.coverageDao().all().single { it.status == CoverageStatus.ACTIVE.name }
+        assertEquals(start + 3 * HOUR, before.endMs)
+
+        // The clock is corrected back two hours (12:00 -> 10:00): the 09:00-12:00 interval must stay 09:00-12:00.
+        clock.now = start + HOUR
+        h.harvest(HarvestTrigger.TIME_CHANGED)
+        val after = db.coverageDao().all().single { it.status == CoverageStatus.ACTIVE.name }
+        assertEquals(before.startMs, after.startMs)
+        assertEquals(start + 3 * HOUR, after.endMs)
+    }
+
+    @Test
     fun `a cursor older than the backfill window never queries beyond it`() = runBlocking {
         val h = harvester()
         source.events += ev(start - 1000)

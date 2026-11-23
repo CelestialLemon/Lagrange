@@ -29,19 +29,37 @@ class DataReset(
     private val context: Context,
     private val clock: () -> Long = System::currentTimeMillis,
     private val cancelWork: suspend () -> Unit = { WorkScheduler.cancelAllAndAwait(context) },
+    private val backups: BackupDrain? = null,
 ) {
-    /** Stages the reset; the caller restarts the process to apply it. Returns the cutoff. */
+    /**
+     * Stages the reset; the caller restarts the process to apply it. Returns the cutoff.
+     *
+     * Order matters: new backups are refused first, then WorkManager jobs are cancelled (a running weekly backup
+     * stops and cleans up), then the backup lock is held while folder grants are revoked and the marker written, so
+     * no ZIP copy or cleanup is still touching the backup folder when its grant goes away or the process exits.
+     * The caller restarts while admissions stay closed. On failure, backups are admitted again.
+     */
     suspend fun requestReset(): Long = withContext(Dispatchers.IO) {
-        cancelWork()
-        releaseFolderGrants(context)
-        val cutoff = clock()
-        writeSynced(markerFile(context), cutoff.toString())
-        cutoff
+        backups?.closeAdmissions()
+        try {
+            cancelWork()
+            val stage: suspend () -> Long = {
+                releaseFolderGrants(context)
+                val cutoff = clock()
+                writeSynced(markerFile(context), cutoff.toString())
+                cutoff
+            }
+            backups?.whileDrained(stage) ?: stage()
+        } catch (e: Throwable) {
+            backups?.reopenAdmissions()
+            throw e
+        }
     }
 
     companion object {
         private const val TAG = "LagrangeReset"
         private const val PREFS_FILE = "datastore/lagrange_prefs.preferences_pb"
+        private val DB_SUFFIXES = listOf("", "-wal", "-shm", "-journal")
 
         private fun dir(context: Context) = File(context.noBackupFilesDir, "reset")
         private fun markerFile(context: Context) = File(dir(context), "RESET_PENDING")
@@ -58,12 +76,29 @@ class DataReset(
             if (!marker.isFile) return false
             val cutoff = marker.readText().trim().toLongOrNull() ?: System.currentTimeMillis()
             writeSynced(cutoffFile(context), cutoff.toString())
+            val dbFile = context.getDatabasePath(LagrangeDatabase.FILE_NAME)
+            val dbFiles = DB_SUFFIXES.map { File(dbFile.path + it) }
+            val prefs = File(context.filesDir, PREFS_FILE)
+            val snapshots = File(context.cacheDir, "snapshots")
+            val pseudonymKey = File(context.noBackupFilesDir, "pseudonym.key")
+            val restore = RestoreCoordinator(context)
+
             context.deleteDatabase(LagrangeDatabase.FILE_NAME)
-            File(context.filesDir, PREFS_FILE).delete()
-            RestoreCoordinator(context).clearAll()
-            File(context.cacheDir, "snapshots").deleteRecursively()
-            File(context.noBackupFilesDir, "pseudonym.key").delete()
-            marker.delete()
+            dbFiles.forEach { it.delete() }
+            prefs.delete()
+            restore.clearAll()
+            snapshots.deleteRecursively()
+            pseudonymKey.delete()
+
+            // The marker is the only record that a wipe is owed: keep it until every file is verifiably gone, so a
+            // failed delete is retried on the next start instead of reopening the old data.
+            val survivors = (dbFiles + prefs + snapshots + pseudonymKey).filter { it.exists() } + restore.leftovers()
+            if (survivors.isNotEmpty()) {
+                throw IllegalStateException(
+                    "Reset couldn't delete ${survivors.joinToString { it.name }}. Lagrange will retry on the next start.",
+                )
+            }
+            if (!marker.delete()) throw IllegalStateException("Reset couldn't be completed. Lagrange will retry on the next start.")
             Log.i(TAG, "all data deleted; cutoff $cutoff")
             return true
         }
@@ -103,6 +138,15 @@ class DataReset(
             }
         }
     }
+}
+
+/** What a reset needs from the backup subsystem: stop admitting work, then wait out (and hold off) what is running. */
+interface BackupDrain {
+    fun closeAdmissions()
+    fun reopenAdmissions()
+
+    /** Runs [block] holding the backup lock, after any backup, export, restore stage or cleanup in flight finished. */
+    suspend fun <T> whileDrained(block: suspend () -> T): T
 }
 
 object AppRestarter {

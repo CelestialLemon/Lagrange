@@ -40,6 +40,7 @@ class NotificationRecorderTest {
         conversationChannel: Boolean = false,
         matched: Boolean = true,
         ambient: Boolean = false,
+        ranked: Boolean = true,
     ) = NotificationMeta(
         key = key,
         packageName = "com.chat",
@@ -58,6 +59,7 @@ class NotificationRecorderTest {
         dndOrSilent = false,
         parentChannelId = parent,
         isConversationChannel = conversationChannel,
+        channelClassKnown = ranked,
     )
 
     @Test
@@ -149,6 +151,39 @@ class NotificationRecorderTest {
         val after = db.rawNotificationDao().all().associateBy { it.postedAtMs }
         assertEquals(RemovalReason.DISCONNECT_RECONCILED.name, after.getValue(1_000).removalReason)
         assertNull(after.getValue(1_100).removedAtMs)
+    }
+
+    @Test
+    fun `an empty snapshot closes open records only once a second one corroborates it`() = runBlocking {
+        recorder.onPosted(meta(key = "a", post = 1_000), 1_000)
+        recorder.onPosted(meta(key = "b", post = 1_100), 1_100)
+        // getActiveNotifications() answered [] (possibly a failed binder call): nothing is closed yet.
+        assertFalse(recorder.onConnected(emptyList(), 5_000))
+        assertTrue(db.rawNotificationDao().all().all { it.removedAtMs == null })
+        assertFalse(recorder.reconcile(emptyList(), 5_500))
+        assertTrue(db.rawNotificationDao().all().all { it.removedAtMs == null })
+
+        // A second empty snapshot a moment later confirms it.
+        assertTrue(recorder.reconcile(emptyList(), 6_500, emptyCorroborated = true))
+        assertTrue(db.rawNotificationDao().all().all { it.removalReason == RemovalReason.DISCONNECT_RECONCILED.name })
+
+        // With nothing open, an empty snapshot has nothing to close and needs no corroboration.
+        assertTrue(recorder.reconcile(emptyList(), 7_000))
+    }
+
+    @Test
+    fun `a removal without ranking never stores the raw channel id`() = runBlocking {
+        // Never seen before, removed with no ranking: it might be a per-chat conversation channel.
+        recorder.onRemoved(meta(key = "unseen", channel = "chat-with-alice", conversation = false, ranked = false), 2, 2_000)
+        val stored = db.rawNotificationDao().all().single().channelId!!
+        assertTrue(stored, stored.startsWith(NotificationRecorder.UNCLASSIFIED_PREFIX))
+        assertFalse(stored.contains("alice"))
+        assertEquals(stored, recorder.storedChannelId(meta(channel = "chat-with-alice", conversation = false, ranked = false)))
+
+        // With ranking, an ordinary channel is stored as is; an unranked update keeps it.
+        recorder.onPosted(meta(key = "seen", channel = "promos", conversation = false), 3_000)
+        recorder.onPosted(meta(key = "seen", channel = "promos", conversation = false, ranked = false), 3_100)
+        assertEquals("promos", db.rawNotificationDao().all().single { it.postedAtMs == 1_000L && it.removedAtMs == null }.channelId)
     }
 
     @Test

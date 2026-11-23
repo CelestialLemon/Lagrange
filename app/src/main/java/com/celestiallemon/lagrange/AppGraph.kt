@@ -24,11 +24,11 @@ import com.celestiallemon.lagrange.notifications.LagrangeNotificationListenerSer
 import com.celestiallemon.lagrange.system.DataReset
 import java.io.File
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -36,19 +36,27 @@ import kotlinx.coroutines.withContext
 /**
  * Hand-wired dependencies, one instance per process.
  *
- * Nothing here may touch the database from the main thread. [start] opens (and, after a restore, verifies) the
- * database on the IO dispatcher, applies restored preferences and records a reset cutoff; everything that reads
- * or writes data first calls [awaitReady].
+ * Nothing here may touch the database from the main thread. [start] runs filesystem recovery (a pending reset
+ * wipe, a restore swap or rollback), opens (and, after a restore, verifies) the database, records a reset cutoff and
+ * applies restored preferences, all on the IO dispatcher behind [gate]. Everything that reads or writes data first
+ * calls [awaitReady]. If any recovery step fails the gate stays shut: Room is never opened over a partial
+ * generation, workers and collectors stay idle, and the UI shows [startupState].
  */
 class AppGraph(private val app: Application) {
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val restore = RestoreCoordinator(app)
 
-    private val ready = CompletableDeferred<Unit>()
+    private val gate = StartupGate()
 
-    /** Suspends until startup (database open/verify, restored preferences) has finished. */
-    suspend fun awaitReady() = ready.await()
+    /** Starting, Ready, or Failed with a message for the user. */
+    val startupState: StateFlow<StartupGate.State> = gate.state
+
+    /**
+     * Suspends until startup (recovery, database open/verify, restored preferences) has finished. Throws
+     * [StartupFailedException] when it failed, so callers never touch data from a generation that wasn't recovered.
+     */
+    suspend fun awaitReady() = gate.awaitReady()
 
     /** First touched by [start] on the IO dispatcher; other callers come after [awaitReady]. */
     val database: LagrangeDatabase by lazy { openDatabase() }
@@ -89,17 +97,20 @@ class AppGraph(private val app: Application) {
     /** Startup, off the main thread. Called once from [LagrangeApplication.onCreate]. */
     fun start() {
         applicationScope.launch(Dispatchers.IO) {
-            try {
+            gate.open {
+                // Both are file deletes and renames only, and must finish before anything opens Room or DataStore.
+                // A failure (wipe not verified, rollback incomplete) throws and keeps the gate shut.
+                DataReset.applyPendingIfAny(app)
+                restore.applyPendingIfAny()
                 database // opens, and verifies a fresh restore
                 restoreNotice.value = restore.consumeOutcome()
+                // Collectors must never run without the reset cutoff persisted: a failure here keeps them gated.
                 DataReset.recordPendingCutoff(app, database)
                 applyRestoredPreferences()
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "startup failed", e)
-            } finally {
-                ready.complete(Unit)
+            }
+            (startupState.value as? StartupGate.State.Failed)?.let {
+                Log.e(TAG, "startup recovery failed; data stays closed until the next start: ${it.message}")
+                return@launch
             }
             try {
                 backups.clearSnapshots()

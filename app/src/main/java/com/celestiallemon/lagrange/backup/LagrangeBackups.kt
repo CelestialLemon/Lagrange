@@ -3,11 +3,15 @@ package com.celestiallemon.lagrange.backup
 import android.content.Context
 import android.net.Uri
 import androidx.room3.useWriterConnection
+import com.celestiallemon.lagrange.data.BackupFingerprint
+import com.celestiallemon.lagrange.data.InProgressBackup
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
+import com.celestiallemon.lagrange.system.BackupDrain
 import java.io.File
 import java.io.InputStream
 import java.io.OutputStream
+import java.security.MessageDigest
 import java.util.UUID
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
@@ -32,13 +36,40 @@ class LagrangeBackups(
     private val appVersionName: String,
     private val appVersionCode: Long,
     private val clock: () -> Long = System::currentTimeMillis,
-) {
+) : BackupDrain {
     /** One backup, export, restore stage or cleanup at a time, always on the IO dispatcher. */
     private val lock = Mutex()
 
+    /** False once a reset began: nothing new may start writing to a folder whose grant is about to go away. */
+    @Volatile
+    private var admitting = true
+
     private val snapshotRoot get() = File(context.cacheDir, "snapshots")
 
-    private suspend fun <T> exclusive(block: suspend () -> T): T = lock.withLock { withContext(Dispatchers.IO) { block() } }
+    private suspend fun <T> exclusive(block: suspend () -> T): T {
+        checkAdmitting()
+        return lock.withLock {
+            checkAdmitting() // waited behind a drain: still refused
+            withContext(Dispatchers.IO) { block() }
+        }
+    }
+
+    private fun checkAdmitting() {
+        if (!admitting) throw BackupException("Lagrange is resetting; backups are paused.")
+    }
+
+    override fun closeAdmissions() {
+        admitting = false
+    }
+
+    override fun reopenAdmissions() {
+        admitting = true
+    }
+
+    override suspend fun <T> whileDrained(block: suspend () -> T): T = lock.withLock { withContext(Dispatchers.IO) { block() } }
+
+    /** Discards a staged restore under the backup lock, so it can't race a stage that is still being written. */
+    suspend fun cancelStagedRestore() = exclusive { restore.cancelStaged() }
 
     /** Writes a complete backup ZIP to [out] and returns its manifest. */
     suspend fun writeBackup(out: OutputStream): BackupManifest = exclusive { writeBackupLocked(out) }
@@ -117,16 +148,21 @@ class LagrangeBackups(
             val folder = folderFactory()
             if (!folder.canWrite()) throw BackupException("Lagrange can no longer write to the backup folder.")
             preferences.backupInProgress()?.let { leftover ->
-                if (folder.owns(leftover)) runCatching { folder.delete(leftover) }
+                if (folder.owns(leftover.id) && isOurPartialWrite(folder, leftover)) runCatching { folder.delete(leftover.id) }
                 preferences.setBackupInProgress(null)
             }
             val name = BackupFormat.fileName(clock())
             val doc = folder.create(BackupFormat.MIME_ZIP, name) ?: throw BackupException("Couldn't create $name.")
             try {
-                preferences.setBackupInProgress(doc.id)
-                (folder.openOutput(doc) ?: throw BackupException("Couldn't open $name for writing.")).use { writeBackupLocked(it) }
+                preferences.setBackupInProgress(doc.id, doc.name ?: name)
+                val fingerprint = (folder.openOutput(doc) ?: throw BackupException("Couldn't open $name for writing.")).use { out ->
+                    val sink = FingerprintingOutputStream(out)
+                    writeBackupLocked(sink)
+                    sink.flush()
+                    sink.fingerprint()
+                }
                 // Recorded only after the stream closed cleanly.
-                preferences.recordCompletedBackup(doc.id)
+                preferences.recordCompletedBackup(doc.id, fingerprint)
             } catch (e: Throwable) {
                 withContext(NonCancellable) {
                     runCatching { folder.delete(doc.id) }
@@ -145,16 +181,66 @@ class LagrangeBackups(
         throw e
     }
 
+    /**
+     * Deletes recorded backups beyond the newest [keep]. A file is only deleted while its bytes still match the
+     * fingerprint recorded when Lagrange wrote it: a file the user or a sync tool replaced at the same id is no
+     * longer ours, so it is forgotten instead. Records without a fingerprint (older builds) are never deleted.
+     */
     private suspend fun prune(folder: BackupFolder, keep: Int) {
         val recorded = preferences.completedBackups()
         val present = folder.list()
         val ours = present.filter { it.id in recorded }
         val presentIds = present.mapTo(HashSet()) { it.id }
         // Recorded backups the user deleted by hand are forgotten, so the record can't grow forever.
-        val vanished = recorded.filter { folder.owns(it) && it !in presentIds }
+        val vanished = recorded.keys.filter { folder.owns(it) && it !in presentIds }
         val excess = ours.sortedByDescending { it.name.orEmpty() }.drop(keep)
-        val deleted = excess.filter { runCatching { folder.delete(it.id) }.getOrDefault(false) }.map { it.id }
-        if (vanished.isNotEmpty() || deleted.isNotEmpty()) preferences.forgetBackups(vanished + deleted)
+        val forgotten = excess.filter { doc ->
+            val expected = recorded[doc.id]
+            if (expected == null || !matches(folder, doc.id, expected)) {
+                true // not provably ours any more: forget it, never delete it
+            } else {
+                runCatching { folder.delete(doc.id) }.getOrDefault(false)
+            }
+        }.map { it.id }
+        if (vanished.isNotEmpty() || forgotten.isNotEmpty()) preferences.forgetBackups(vanished + forgotten)
+    }
+
+    private fun matches(folder: BackupFolder, id: String, expected: BackupFingerprint): Boolean =
+        runCatching { folder.openInput(id)?.use(BackupFormat::fingerprint) == expected }.getOrDefault(false)
+
+    /**
+     * A leftover in-progress document is deleted only if it is still the half-written file: listed under the name
+     * Lagrange created it with, and not a complete bundle (something replaced it, or it is someone else's file).
+     */
+    private fun isOurPartialWrite(folder: BackupFolder, leftover: InProgressBackup): Boolean = runCatching {
+        val doc = folder.list().firstOrNull { it.id == leftover.id } ?: return@runCatching false
+        if (leftover.name != null && doc.name != leftover.name) return@runCatching false
+        folder.openInput(leftover.id)?.use { !BackupFormat.isCompleteBundle(it) } ?: false
+    }.getOrDefault(false)
+
+    /** Passes bytes through while measuring exactly what was written. */
+    private class FingerprintingOutputStream(private val out: OutputStream) : OutputStream() {
+        private val digest = MessageDigest.getInstance("SHA-256")
+        private var size = 0L
+
+        override fun write(b: Int) {
+            out.write(b)
+            digest.update(b.toByte())
+            size++
+        }
+
+        override fun write(b: ByteArray, off: Int, len: Int) {
+            out.write(b, off, len)
+            digest.update(b, off, len)
+            size += len
+        }
+
+        override fun flush() = out.flush()
+
+        // The caller owns and closes [out].
+        override fun close() = flush()
+
+        fun fingerprint() = BackupFingerprint(size, with(BackupFormat) { digest.digest().toHex() })
     }
 
     /** Validates a backup and stages it; it is applied the next time the app starts. */

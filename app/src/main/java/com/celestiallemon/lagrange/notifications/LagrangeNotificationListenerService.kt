@@ -11,16 +11,14 @@ import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.celestiallemon.lagrange.LagrangeApplication
+import com.celestiallemon.lagrange.StartupFailedException
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 /**
  * Records notification metadata (never content) and, while it keeps the process warm, triggers a usage harvest each
@@ -34,7 +32,16 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
 
     private val graph get() = (application as LagrangeApplication).graph
     private var screenOffRegistered = false
-    private var reconcileRetry: Job? = null
+
+    private val retrier = ReconcileRetrier(
+        scope = scope,
+        main = Dispatchers.Main,
+        isConnected = { connected },
+        snapshot = ::snapshotActive,
+        clock = System::currentTimeMillis,
+        enqueue = { work.trySend(it) },
+        reconcile = { active, now, corroborated -> graph.notificationRecorder.reconcile(active, now, corroborated) },
+    )
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -49,7 +56,14 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         scope.launch {
-            graph.awaitReady()
+            try {
+                graph.awaitReady()
+            } catch (e: StartupFailedException) {
+                // Recovery failed: nothing may be written this process. Drop queued and future callbacks.
+                Log.e(TAG, "startup failed; notification recording is off until the next start", e)
+                work.cancel()
+                return@launch
+            }
             for (job in work) {
                 try {
                     job()
@@ -66,8 +80,8 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
         connected = true
         val now = System.currentTimeMillis()
         val active = snapshotActive()
-        work.trySend { graph.notificationRecorder.onConnected(active, now) }
-        if (active == null) scheduleReconcileRetry()
+        work.trySend { if (!graph.notificationRecorder.onConnected(active, now)) retrier.corroborateEmpty() }
+        if (active == null) retrier.schedule()
         if (!screenOffRegistered) {
             registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), RECEIVER_NOT_EXPORTED)
             screenOffRegistered = true
@@ -76,7 +90,7 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
 
     override fun onListenerDisconnected() {
         connected = false
-        reconcileRetry?.cancel()
+        retrier.cancel()
         val now = System.currentTimeMillis()
         work.trySend { graph.notificationRecorder.onDisconnected(now) }
         unregisterScreenOff()
@@ -96,7 +110,7 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
 
     override fun onDestroy() {
         unregisterScreenOff()
-        reconcileRetry?.cancel()
+        retrier.cancel()
         if (connected) {
             // Destroyed without a disconnect callback: close the coverage interval cleanly, not at a stale heartbeat.
             connected = false
@@ -119,21 +133,6 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
     } catch (e: RuntimeException) {
         Log.w(TAG, "active notifications unavailable", e)
         null
-    }
-
-    private fun scheduleReconcileRetry() {
-        reconcileRetry?.cancel()
-        reconcileRetry = scope.launch {
-            for (delayMs in RETRY_DELAYS_MS) {
-                delay(delayMs)
-                if (!connected) return@launch
-                val active = withContext(Dispatchers.Main) { snapshotActive() } ?: continue
-                val now = System.currentTimeMillis()
-                work.trySend { graph.notificationRecorder.reconcile(active, now) }
-                return@launch
-            }
-            Log.w(TAG, "active notifications never became available; open records stay as they were")
-        }
     }
 
     private fun unregisterScreenOff() {
@@ -168,6 +167,7 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
             dndOrSilent = dndOrSilent,
             parentChannelId = channel?.parentChannelId,
             isConversationChannel = channel?.conversationId != null,
+            channelClassKnown = ranked,
         )
     }
 
@@ -189,7 +189,6 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
 
     companion object {
         private const val TAG = "LagrangeNotifications"
-        private val RETRY_DELAYS_MS = listOf(2_000L, 5_000L, 15_000L, 60_000L, 300_000L)
 
         /** True while the system has this listener bound and connected in this process. */
         @Volatile
