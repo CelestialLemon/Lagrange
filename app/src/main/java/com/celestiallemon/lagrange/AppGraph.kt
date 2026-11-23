@@ -42,6 +42,7 @@ import com.celestiallemon.lagrange.system.DataReset
 import com.celestiallemon.lagrange.widget.SurfaceRefresher
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -80,6 +81,18 @@ class AppGraph(private val app: Application) {
      * [StartupFailedException] when it failed, so callers never touch data from a generation that wasn't recovered.
      */
     suspend fun awaitReady() = gate.awaitReady()
+
+    private val housekeepingDone = CompletableDeferred<Unit>()
+
+    /**
+     * [awaitReady], then waits for startup housekeeping too: friction live status read from disk, the widget/tile
+     * refresher started and the digest schedule checked once. Broadcast receivers await this before they finish, so
+     * the process isn't frozen with that work half done.
+     */
+    suspend fun awaitStarted() {
+        awaitReady()
+        housekeepingDone.await()
+    }
 
     /** First touched by [start] on the IO dispatcher; other callers come after [awaitReady]. */
     val database: LagrangeDatabase by lazy { openDatabase() }
@@ -190,6 +203,7 @@ class AppGraph(private val app: Application) {
             },
             lastHarvestAtMs = { database.ingestionStateDao().get(com.celestiallemon.lagrange.data.IngestionKeys.LAST_HARVEST_AT_MS) },
             claimCoverageAlert = preferences::claimCoverageAlert,
+            releaseCoverageAlert = preferences::releaseCoverageAlert,
         )
     }
 
@@ -224,8 +238,12 @@ class AppGraph(private val app: Application) {
             } catch (e: Exception) {
                 Log.e(TAG, "startup housekeeping failed", e)
             }
-            startDerivedPipeline()
-            startSurfacesAndDigests()
+            try {
+                startDerivedPipeline()
+                startSurfacesAndDigests()
+            } finally {
+                housekeepingDone.complete(Unit)
+            }
         }
     }
 
@@ -234,7 +252,7 @@ class AppGraph(private val app: Application) {
      * time changes all land here). Scheduling is idempotent: an already queued run for the same settings and zone
      * is kept, so a process started by WorkManager to run a digest never cancels it.
      */
-    private fun startSurfacesAndDigests() {
+    private suspend fun startSurfacesAndDigests() {
         try {
             digestNotifier.ensureChannels()
             surfaces.start()
@@ -242,6 +260,14 @@ class AppGraph(private val app: Application) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "surface refresher failed to start", e)
+        }
+        // Once synchronously, so [awaitStarted] covers it; the collector below then follows every change.
+        try {
+            DigestScheduler.ensureScheduled(app, DigestScheduler.Settings.of(preferences.current()))
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "digest scheduling failed", e)
         }
         applicationScope.launch(Dispatchers.IO) {
             preferences.prefs.map { DigestScheduler.Settings.of(it) }.distinctUntilChanged().collect { settings ->

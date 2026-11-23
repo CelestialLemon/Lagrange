@@ -151,6 +151,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     graph.timezoneTracker.check()
                     graph.heartbeatListenerIfConnected()
                 }
+                // Usage Access may have been revoked or the day rolled over while away: redraw the widget and tile.
+                graph.surfaces.requestRefresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

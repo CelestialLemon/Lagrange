@@ -8,11 +8,11 @@ class FocusBoostTileModelTest {
 
     @Test
     fun `subtitle follows boost, snooze, off and setup`() {
-        assertEquals(TileModel(active = true, unavailable = false, subtitle = "1h · 60m left"), FocusBoostTileModel.model(true, 60 * min, 0))
+        assertEquals(TileModel(active = true, subtitle = "1h · 60m left"), FocusBoostTileModel.model(true, 60 * min, 0))
         assertEquals("1h · 45m left", FocusBoostTileModel.model(true, 44 * min + 1, 0).subtitle)
         assertEquals("1h · 1m left", FocusBoostTileModel.model(true, 1_000, 0).subtitle)
-        assertEquals(TileModel(active = false, unavailable = false, subtitle = "Snoozed · 30m left"), FocusBoostTileModel.model(true, 0, 30 * min))
-        assertEquals(TileModel(active = false, unavailable = false, subtitle = "Off"), FocusBoostTileModel.model(true, 0, 0))
+        assertEquals(TileModel(active = false, subtitle = "Snoozed · 30m left"), FocusBoostTileModel.model(true, 0, 30 * min))
+        assertEquals(TileModel(active = false, subtitle = "Off"), FocusBoostTileModel.model(true, 0, 0))
         assertEquals("Set up friction", FocusBoostTileModel.model(false, 30 * min, 0).subtitle)
     }
 

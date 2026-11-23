@@ -1,5 +1,6 @@
 package com.celestiallemon.lagrange.digest
 
+import androidx.room3.withReadTransaction
 import com.celestiallemon.lagrange.data.AnalyticsContext
 import com.celestiallemon.lagrange.data.DerivedRepository
 import com.celestiallemon.lagrange.data.LabRepository
@@ -42,7 +43,7 @@ class DigestRepository(
      * chosen from the due instant, so a run delayed past the logical rollover still reports the intended day. When
      * the derived data stops short of the end of that day (or of now, for today so far) the day is a lower bound.
      */
-    suspend fun composeDaily(dueAtMs: Long? = null): Digest? = withContext(Dispatchers.IO) {
+    suspend fun composeDaily(dueAtMs: Long? = null): Digest? = read {
         val now = clock()
         val ctx = derived.analyticsContext()
         val anchor = dueAtMs?.coerceAtMost(now) ?: now
@@ -53,6 +54,7 @@ class DigestRepository(
         val days = days(ctx, DateRange(target, target))
         val tail = DigestComposer.unobservedTail(ctx.derivedThroughMs, minOf(now, targetEnd))
         val day = days[target]?.let { if (tail) it.copy(quality = DayQuality.PARTIAL) else it }
+        if (day == null || day.quality == DayQuality.NO_DATA) return@read null // nothing honest to say: skip the Lab
         val window = TrendWindow(WindowKind.CUSTOM, target, target)
         DigestComposer.daily(
             DailyDigestInput(
@@ -75,13 +77,14 @@ class DigestRepository(
      * the seven before those, keyed by the due day's ISO week, so a run delayed into the next week can't claim (and
      * suppress) that week's own digest.
      */
-    suspend fun composeWeekly(dueAtMs: Long? = null): Digest? = withContext(Dispatchers.IO) {
+    suspend fun composeWeekly(dueAtMs: Long? = null): Digest? = read {
         val now = clock()
         val ctx = derived.analyticsContext()
         val anchor = dueAtMs?.coerceAtMost(now) ?: now
         val anchorDate = ctx.zones.dateOf(anchor, ctx.rolloverHour)
         val (current, previous) = DigestComposer.weeklyRanges(anchorDate)
         val days = days(ctx, DateRange(previous.first(), current.last()))
+        if (current.none { days[it]?.covered == true }) return@read null // no fully covered day: nothing to say
         val window = TrendWindow(WindowKind.CUSTOM, current.first(), current.last())
         DigestComposer.weekly(
             WeeklyDigestInput(
@@ -93,6 +96,12 @@ class DigestRepository(
             ),
         )
     }
+
+    /**
+     * One read transaction for everything a digest reads (context, rollups, Lab), so a rebuild or rollover landing
+     * mid-compose can't mix two generations of derived data in one notification.
+     */
+    private suspend fun <T> read(block: suspend () -> T): T = withContext(Dispatchers.IO) { db.withReadTransaction { block() } }
 
     /** The days of [range] that have a rollup, with the same settled/covered judgement Trends uses. */
     private suspend fun days(ctx: AnalyticsContext, range: DateRange): Map<LocalDate, DigestDay> {
@@ -111,6 +120,8 @@ class DigestRepository(
             quality != DayQuality.IN_PROGRESS -> quality
             // A past day whose rebuild hasn't caught up yet may be clipped: report it as a lower bound, never as whole.
             date.isBefore(today) -> DayQuality.PARTIAL
+            // Unknown coverage or status (a newer writer, a corrupt row): never presented as whole.
+            DayCoverage.entries.none { it.name == row.coverageStatus } || DayStatus.entries.none { it.name == row.dayStatus } -> DayQuality.PARTIAL
             // Today so far, unless collection already had a gap today: then it is a lower bound too.
             DayQuality.of(
                 runCatching { DayCoverage.valueOf(row.coverageStatus) }.getOrNull(),

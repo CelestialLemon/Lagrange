@@ -410,6 +410,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
     }
 
     private fun handleUnlock(nowWall: Long, nowElapsed: Long) {
+        // The widget's own timer sleeps with the device: an unlock is when it must be current (rollover, boost end).
+        graph.surfaces.requestRefresh()
         if (!ready) return
         val effects = engine.onUserPresent(
             nowWallMs = nowWall,

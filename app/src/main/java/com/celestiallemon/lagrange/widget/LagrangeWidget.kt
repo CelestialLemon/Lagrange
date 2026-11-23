@@ -54,6 +54,8 @@ class LagrangeWidget : GlanceAppWidget() {
         val graph = (context.applicationContext as LagrangeApplication).graph
         val initial = try {
             graph.awaitReady()
+            // A launcher-driven update (placement, resize, APPWIDGET_UPDATE) also asks for a fresh computation.
+            graph.surfaces.requestRefreshIfOlderThan(60_000L)
             graph.surfaces.current()
         } catch (e: CancellationException) {
             throw e
@@ -109,7 +111,8 @@ private fun WidgetContent(s: WidgetState, context: Context) {
         Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
             Text(s.usedText, style = TextStyle(color = colors.onSurface, fontSize = if (compact) 22.sp else 26.sp, fontWeight = FontWeight.Bold), maxLines = 1)
             Spacer(GlanceModifier.width(6.dp))
-            Text(s.budgetText, style = TextStyle(color = colors.onSurfaceVariant, fontSize = 12.sp), maxLines = 1)
+            // Takes only the width left, ellipsized, so a long "≥ 1h 35m" never pushes the row off a narrow widget.
+            Text(s.budgetText, modifier = GlanceModifier.defaultWeight(), style = TextStyle(color = colors.onSurfaceVariant, fontSize = 12.sp), maxLines = 1)
         }
         if (!compact) {
             Spacer(GlanceModifier.height(6.dp))

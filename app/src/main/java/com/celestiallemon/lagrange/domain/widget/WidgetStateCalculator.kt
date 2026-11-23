@@ -72,7 +72,8 @@ data class WidgetState(
 object WidgetStateCalculator {
     /** "Near budget" from this share of the budget onward. */
     const val NEAR_BUDGET_RATIO = 0.8
-    private const val STALE_HARVEST_MS = DigestComposer.EVENING_THRESHOLD_MS * 4 // 48h, as the coverage alert
+    /** No harvest for this long is a coverage gap (the same 48 h as the coverage alert and the Today banner). */
+    private const val STALE_HARVEST_MS = 48 * 60 * 60_000L
 
     /**
      * Harvests run hourly; past this, today's tail is unobserved: totals become "≥", no "On track" verdict, and the
@@ -122,7 +123,7 @@ object WidgetStateCalculator {
                 harvestStale || dayGap || lastHarvest == null -> "Coverage gap"
                 else -> "As of ${clock(lastHarvest)}"
             }
-            WidgetStatus.NEAR_BUDGET -> "Near budget · ${DigestComposer.duration(budget - used)} left"
+            WidgetStatus.NEAR_BUDGET -> if (used >= budget) "At budget" else "Near budget · ${DigestComposer.duration(budget - used)} left"
             else -> if (budget > 0) "On track · ${DigestComposer.duration(budget - used)} left" else "On track"
         }
         val usedText = (if (gap) "≥ " else "") + DigestComposer.duration(used)
@@ -169,7 +170,7 @@ object WidgetStateCalculator {
 }
 
 /** The Quick Settings tile's look for one moment. */
-data class TileModel(val active: Boolean, val unavailable: Boolean, val subtitle: String)
+data class TileModel(val active: Boolean, val subtitle: String)
 
 enum class TileAction { ACTIVATE_BOOST, SNOOZE, CANCEL_SNOOZE, OPEN_SETUP }
 
@@ -180,10 +181,10 @@ enum class TileAction { ACTIVATE_BOOST, SNOOZE, CANCEL_SNOOZE, OPEN_SETUP }
  */
 object FocusBoostTileModel {
     fun model(frictionReady: Boolean, boostRemainingMs: Long, snoozeRemainingMs: Long): TileModel = when {
-        !frictionReady -> TileModel(active = false, unavailable = false, subtitle = "Set up friction")
-        boostRemainingMs > 0 -> TileModel(active = true, unavailable = false, subtitle = "1h · ${remaining(boostRemainingMs)} left")
-        snoozeRemainingMs > 0 -> TileModel(active = false, unavailable = false, subtitle = "Snoozed · ${remaining(snoozeRemainingMs)} left")
-        else -> TileModel(active = false, unavailable = false, subtitle = "Off")
+        !frictionReady -> TileModel(active = false, subtitle = "Set up friction")
+        boostRemainingMs > 0 -> TileModel(active = true, subtitle = "1h · ${remaining(boostRemainingMs)} left")
+        snoozeRemainingMs > 0 -> TileModel(active = false, subtitle = "Snoozed · ${remaining(snoozeRemainingMs)} left")
+        else -> TileModel(active = false, subtitle = "Off")
     }
 
     fun onClick(frictionReady: Boolean, boostRemainingMs: Long, snoozeRemainingMs: Long): TileAction = when {

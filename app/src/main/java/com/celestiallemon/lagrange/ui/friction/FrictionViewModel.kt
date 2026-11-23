@@ -116,7 +116,15 @@ class FrictionViewModel(app: Application) : AndroidViewModel(app) {
         // Fresh numbers first, as the scheduled digest does.
         runCatching { graph.harvestAndDerive(HarvestTrigger.MANUAL, recomputeInline = true) }
             .onFailure { if (it is CancellationException) throw it }
-        _digestMessage.value = when (graph.digests.sendTest(kind)) {
+        val outcome = try {
+            graph.digests.sendTest(kind)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            _digestMessage.value = "Couldn't compose the ${kind.label()} preview: ${e.message ?: e.javaClass.simpleName}"
+            return@launchIo
+        }
+        _digestMessage.value = when (outcome) {
             DigestService.Outcome.POSTED -> "Preview ${kind.label()} digest posted."
             DigestService.Outcome.NOTIFICATIONS_OFF -> "Notifications are off for Lagrange, so nothing was posted."
             DigestService.Outcome.NOTHING_TO_SAY -> when (kind) {

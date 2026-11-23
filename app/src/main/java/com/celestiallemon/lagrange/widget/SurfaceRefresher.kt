@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Keeps the home-screen widget and the Focus Boost tile in step with the data: today's rollup being rebuilt, a
@@ -48,6 +49,30 @@ class SurfaceRefresher(private val app: Application, private val graph: AppGraph
     /** Re-renders soon (coalesced). Safe from any thread. */
     fun requestRefresh() {
         kicks.trySend(Unit)
+    }
+
+    @Volatile private var computedAtMs = -1L
+
+    /**
+     * [requestRefresh] unless the state was computed in the last [maxAgeMs]: for launcher-driven widget sessions,
+     * which must not each trigger a refresh that starts the next session.
+     */
+    fun requestRefreshIfOlderThan(maxAgeMs: Long) {
+        if (computedAtMs < 0 || android.os.SystemClock.elapsedRealtime() - computedAtMs > maxAgeMs) requestRefresh()
+    }
+
+    /**
+     * Recomputes and pushes to the widget and tile now, returning once both were asked to redraw (bounded, and never
+     * throwing). Broadcast receivers await this before `finish()`, so a freeze right after can't drop the redraw.
+     */
+    suspend fun refresh() {
+        try {
+            withTimeoutOrNull(REFRESH_TIMEOUT_MS) { refreshNow() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "widget refresh failed", e)
+        }
     }
 
     /** The current state, computing it if nothing has been computed yet in this process. */
@@ -100,6 +125,7 @@ class SurfaceRefresher(private val app: Application, private val graph: AppGraph
     }
 
     private suspend fun compute(): WidgetState = withContext(Dispatchers.IO) {
+        computedAtMs = android.os.SystemClock.elapsedRealtime()
         val now = System.currentTimeMillis()
         val nowElapsed = android.os.SystemClock.elapsedRealtime()
         val prefs = graph.preferences.current()
@@ -140,6 +166,7 @@ class SurfaceRefresher(private val app: Application, private val graph: AppGraph
         const val DEBOUNCE_MS = 500L
         const val MIN_WAIT_MS = 1_000L
         const val MAX_IDLE_MS = 30 * 60_000L
+        const val REFRESH_TIMEOUT_MS = 5_000L
     }
 }
 
@@ -155,8 +182,8 @@ class BootRefreshReceiver : android.content.BroadcastReceiver() {
         val pending = goAsync()
         graph.applicationScope.launch {
             try {
-                graph.awaitReady()
-                graph.surfaces.requestRefresh()
+                graph.awaitStarted()
+                graph.surfaces.refresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

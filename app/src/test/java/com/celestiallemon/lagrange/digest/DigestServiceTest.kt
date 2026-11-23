@@ -39,6 +39,7 @@ class DigestServiceTest {
         poster = poster,
         lastHarvestAtMs = { lastHarvest },
         claimCoverageAlert = { at -> if (coverageClaim == at) false else true.also { coverageClaim = at } },
+        releaseCoverageAlert = { at -> if (coverageClaim == at) coverageClaim = null },
         clock = { now },
     )
 
@@ -119,5 +120,29 @@ class DigestServiceTest {
         val thrown = runCatching { s.runScheduled(DigestKind.DAILY) }.exceptionOrNull()
         assertTrue(thrown is IllegalStateException)
         assertTrue(claims.isEmpty())
+    }
+
+    @Test
+    fun `a coverage alert that couldn't be posted is not claimed`() = runBlocking {
+        val failing = object : DigestPoster {
+            override fun canPost() = true
+            override fun post(digest: Digest) = true
+            override fun postCoverageAlert(silentHours: Long) = false
+        }
+        lastHarvest = 0L
+        now = 50 * hour
+        val blocked = DigestService(
+            compose = { _, _ -> null },
+            claim = { _, _ -> true },
+            poster = failing,
+            lastHarvestAtMs = { lastHarvest },
+            claimCoverageAlert = { at -> if (coverageClaim == at) false else true.also { coverageClaim = at } },
+            releaseCoverageAlert = { at -> if (coverageClaim == at) coverageClaim = null },
+            clock = { now },
+        )
+        assertFalse(blocked.checkCoverage())
+        assertEquals(null, coverageClaim)
+        // Once notifications work again the same silence is still alerted.
+        assertTrue(service(Poster()).checkCoverage())
     }
 }

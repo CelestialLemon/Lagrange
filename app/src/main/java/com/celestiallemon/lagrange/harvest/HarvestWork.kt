@@ -147,13 +147,13 @@ class TimeChangeReceiver : BroadcastReceiver() {
         val pending = goAsync()
         graph.applicationScope.launch {
             try {
-                graph.awaitReady()
+                graph.awaitStarted()
                 graph.harvester.requestRescan()
                 WorkScheduler.enqueueHarvestNow(app, HarvestTrigger.TIME_CHANGED)
                 graph.timezoneTracker.check()
                 // The wall clock jumped: queued digests were timed against the old clock.
                 DigestScheduler.ensureScheduled(app, DigestScheduler.Settings.of(graph.preferences.current()), force = true)
-                graph.surfaces.requestRefresh()
+                graph.surfaces.refresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -177,11 +177,11 @@ class TimezoneChangeReceiver : BroadcastReceiver() {
         val pending = goAsync()
         graph.applicationScope.launch {
             try {
-                graph.awaitReady()
+                graph.awaitStarted()
                 graph.timezoneTracker.check()
                 // Digests are due at a local time: a new zone makes the queued run's delay stale.
                 DigestScheduler.ensureScheduled(context.applicationContext, DigestScheduler.Settings.of(graph.preferences.current()))
-                graph.surfaces.requestRefresh()
+                graph.surfaces.refresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

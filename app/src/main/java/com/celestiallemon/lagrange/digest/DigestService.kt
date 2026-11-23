@@ -26,6 +26,8 @@ class DigestService(
     private val poster: DigestPoster,
     private val lastHarvestAtMs: suspend () -> Long?,
     private val claimCoverageAlert: suspend (Long) -> Boolean,
+    /** Gives the coverage alert claim back when the alert couldn't be posted. */
+    private val releaseCoverageAlert: suspend (Long) -> Unit = {},
     private val clock: () -> Long = System::currentTimeMillis,
     private val gapAlertMs: Long = COVERAGE_GAP_ALERT_MS,
 ) {
@@ -68,7 +70,9 @@ class DigestService(
         val silent = clock() - last
         if (silent <= gapAlertMs || !poster.canPost()) return false
         if (!claimCoverageAlert(last)) return false
-        return poster.postCoverageAlert(silent / HOUR_MS)
+        if (poster.postCoverageAlert(silent / HOUR_MS)) return true
+        releaseCoverageAlert(last)
+        return false
     }
 
     companion object {

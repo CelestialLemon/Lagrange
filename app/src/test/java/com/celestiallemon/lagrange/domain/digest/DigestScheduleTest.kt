@@ -42,4 +42,14 @@ class DigestScheduleTest {
         assertTrue(d > 0)
         assertEquals(LocalDateTime.parse("2026-11-24T21:00"), local(now + d, kolkata))
     }
+
+    @Test
+    fun `a time repeated on the fall-back night runs once, at its first occurrence`() {
+        // Berlin falls back 03:00 CEST -> 02:00 CET on 2026-10-25: 02:30 happens twice.
+        val first = DigestSchedule.nextDaily(at("2026-10-25T01:00"), berlin, 2 * 60 + 30)
+        assertEquals(java.time.ZonedDateTime.parse("2026-10-25T02:30+02:00[Europe/Berlin]").toInstant().toEpochMilli(), first)
+        // Scheduling again right after the first run skips the repeat and lands on the next day.
+        val next = DigestSchedule.nextDaily(first, berlin, 2 * 60 + 30)
+        assertEquals(LocalDateTime.parse("2026-10-26T02:30"), local(next))
+    }
 }

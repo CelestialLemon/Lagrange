@@ -326,6 +326,8 @@ class LagrangePreferences(
 
     suspend fun releaseWeeklyDigest(isoWeek: String) = release(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
 
+    suspend fun releaseCoverageAlert(lastHarvestAtMs: Long) = release(LAST_COVERAGE_ALERT_HARVEST, lastHarvestAtMs.toString())
+
     private suspend fun release(key: Preferences.Key<String>, value: String) {
         store.edit { if (it[key] == value) it.remove(key) }
     }

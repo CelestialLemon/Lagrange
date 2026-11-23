@@ -84,9 +84,14 @@ class DataResetTest {
         WorkScheduler.schedulePeriodicHarvest(context)
         WorkScheduler.setWeeklyBackup(context, enabled = true)
         WorkScheduler.enqueueHarvestNow(context, HarvestTrigger.MANUAL)
-        WorkScheduler.cancelAllAndAwait(context)
+        com.celestiallemon.lagrange.digest.DigestScheduler.ensureScheduled(
+            context,
+            com.celestiallemon.lagrange.digest.DigestScheduler.Settings(true, 21 * 60, true, 7, 20 * 60),
+        )
         val wm = WorkManager.getInstance(context)
-        for (name in listOf(WorkScheduler.HARVEST_PERIODIC, WorkScheduler.HARVEST_NOW, WorkScheduler.WEEKLY_BACKUP)) {
+        assertTrue(WorkScheduler.DIGEST_WORK.all { name -> wm.getWorkInfosForUniqueWork(name).get().any { !it.state.isFinished } })
+        WorkScheduler.cancelAllAndAwait(context)
+        for (name in listOf(WorkScheduler.HARVEST_PERIODIC, WorkScheduler.HARVEST_NOW, WorkScheduler.WEEKLY_BACKUP) + WorkScheduler.DIGEST_WORK) {
             val infos = wm.getWorkInfosForUniqueWork(name).get()
             assertTrue("$name: $infos", infos.all { it.state == WorkInfo.State.CANCELLED || it.state.isFinished })
         }

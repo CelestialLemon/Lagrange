@@ -102,14 +102,29 @@ class FocusBoostTileService : TileService() {
             openApp(Destination.TODAY)
             return
         }
-        val live = graph.friction.liveStatus.value
-        val elapsed = SystemClock.elapsedRealtime()
-        when (FocusBoostTileModel.onClick(frictionReady(), live.focusBoostRemainingMs(elapsed), live.snoozeRemainingMs(elapsed))) {
-            TileAction.OPEN_SETUP -> openApp(Destination.FRICTION)
-            TileAction.ACTIVATE_BOOST -> runCommand { graph.friction.activateFocusBoost1h() }
-            // Snoozing ends the boost in the same engine step (one persisted state change, never both active).
-            TileAction.SNOOZE -> runCommand { graph.friction.activateSnooze1h() }
-            TileAction.CANCEL_SNOOZE -> runCommand { graph.friction.cancelSnooze() }
+        // Read the friction switch fresh: a newly bound tile may not have seen its first preference emission yet,
+        // and a stale "off" would misroute a boost tap to setup.
+        val service = this
+        graph.applicationScope.launch(Dispatchers.Main.immediate) {
+            val enabled = try {
+                graph.preferences.current().frictionEnabled
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "friction setting unreadable", e)
+                frictionEnabled
+            }
+            frictionEnabled = enabled
+            val live = graph.friction.liveStatus.value
+            val elapsed = SystemClock.elapsedRealtime()
+            val ready = enabled && LagrangeAccessibilityService.readyState.value
+            when (FocusBoostTileModel.onClick(ready, live.focusBoostRemainingMs(elapsed), live.snoozeRemainingMs(elapsed))) {
+                TileAction.OPEN_SETUP -> service.openApp(Destination.FRICTION)
+                TileAction.ACTIVATE_BOOST -> runCommand { graph.friction.activateFocusBoost1h() }
+                // Snoozing ends the boost in the same engine step (one persisted state change, never both active).
+                TileAction.SNOOZE -> runCommand { graph.friction.activateSnooze1h() }
+                TileAction.CANCEL_SNOOZE -> runCommand { graph.friction.cancelSnooze() }
+            }
         }
     }
 
@@ -137,11 +152,16 @@ class FocusBoostTileService : TileService() {
 
     @SuppressLint("StartActivityAndCollapseDeprecated")
     private fun openApp(destination: Destination) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            startActivityAndCollapse(destination.pendingIntent(this))
-        } else {
-            @Suppress("DEPRECATION")
-            startActivityAndCollapse(destination.intent(this))
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                startActivityAndCollapse(destination.pendingIntent(this))
+            } else {
+                @Suppress("DEPRECATION")
+                startActivityAndCollapse(destination.intent(this))
+            }
+        } catch (e: RuntimeException) {
+            // The tile was unbound in the meantime (shade closed): nothing to collapse into.
+            Log.w(TAG, "could not open $destination from the tile", e)
         }
     }
 
@@ -151,6 +171,7 @@ class FocusBoostTileService : TileService() {
         tile.icon = Icon.createWithResource(this, R.drawable.ic_tile_focus_boost)
         tile.state = Tile.STATE_INACTIVE
         tile.subtitle = if (failed) "Open Lagrange" else "Starting…"
+        tile.stateDescription = tile.subtitle
         tile.updateTile()
     }
 
