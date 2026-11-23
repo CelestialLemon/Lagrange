@@ -53,6 +53,21 @@
             </intent-filter>
         </service>
 
+        <!-- Real-time foreground detection and service-owned TYPE_ACCESSIBILITY_OVERLAY cards (no SYSTEM_ALERT_WINDOW).
+             Declares canRetrieveWindowContent="false" and isAccessibilityTool="false" honestly in XML metadata. -->
+        <service
+            android:name=".friction.LagrangeAccessibilityService"
+            android:exported="true"
+            android:label="@string/accessibility_service_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/lagrange_accessibility_service" />
+        </service>
+
         <!-- Both broadcasts are exempt from the implicit-broadcast limits, so manifest receivers still get them.
              They are protected broadcasts sent by the system, which reaches non-exported receivers; no other app can. -->
         <receiver

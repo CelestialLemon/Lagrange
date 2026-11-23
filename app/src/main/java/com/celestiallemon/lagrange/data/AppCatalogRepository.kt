@@ -4,18 +4,31 @@ import androidx.room3.withWriteTransaction
 import com.celestiallemon.lagrange.data.db.AppCategory
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.PackageEntity
+import com.celestiallemon.lagrange.data.db.SettingsHistoryEntity
+import com.celestiallemon.lagrange.domain.friction.AppFrictionOverride
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 
-/** One app as shown in the categorization review. */
+/** One app as shown in the categorization review and Friction tab. */
 data class CatalogApp(
     val packageName: String,
     val displayName: String,
     val category: AppCategory,
     val confirmed: Boolean,
     val recentOpens: Long,
-)
+    val frictionOverride: AppFrictionOverride? = null,
+) {
+    /** Whether friction will fire on this app when master friction is enabled. */
+    val isFrictionEligible: Boolean
+        get() = when (category) {
+            AppCategory.DISTRACTING -> frictionOverride?.enabled ?: true
+            AppCategory.NEUTRAL -> frictionOverride?.enabled ?: false
+            AppCategory.UTILITY, AppCategory.EXCLUDED, AppCategory.SELF_APP -> false
+        }
+}
 
 /** The app list used for categorization: every launchable app plus anything already seen in usage events. */
 class AppCatalogRepository(
@@ -70,6 +83,22 @@ class AppCatalogRepository(
         if (changed) DerivedDirty.mark(db.ingestionStateDao(), 0)
     }
 
+    /** Updates per-app friction override JSON (`packages.friction_override_json`) and records history. */
+    suspend fun setFrictionOverride(packageName: String, override: AppFrictionOverride?) = db.withWriteTransaction {
+        val encoded = override?.toJsonOrNull()
+        val now = clock()
+        val updated = db.packageDao().setFrictionOverride(packageName, encoded, now) > 0
+        if (updated) {
+            val payload = buildJsonObject {
+                put("package", JsonPrimitive(packageName))
+                put("override", JsonPrimitive(encoded ?: "default"))
+            }
+            db.settingsHistoryDao().insert(
+                SettingsHistoryEntity(timestampUtcMs = now, settingKey = "app_friction_override", valueJson = payload.toString()),
+            )
+        }
+    }
+
     /** Accepts the current (suggested or edited) category of every listed app as the user's choice. */
     suspend fun confirmAll(packageNames: Collection<String>) = db.withWriteTransaction {
         val ids = packageNames.mapNotNull { db.packageDao().idOf(it) }
@@ -82,5 +111,6 @@ class AppCatalogRepository(
         category = runCatching { AppCategory.valueOf(category) }.getOrDefault(AppCategory.NEUTRAL),
         confirmed = categoryConfirmed,
         recentOpens = opens,
+        frictionOverride = AppFrictionOverride.parse(frictionOverrideJson),
     )
 }

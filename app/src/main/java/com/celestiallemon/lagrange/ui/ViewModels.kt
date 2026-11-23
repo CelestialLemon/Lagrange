@@ -218,6 +218,10 @@ class CatalogViewModel(app: Application) : AndroidViewModel(app) {
         withContext(Dispatchers.IO) { graph.catalog.setCategory(packageName, category) }
     }
 
+    fun setFrictionOverride(packageName: String, override: com.celestiallemon.lagrange.domain.friction.AppFrictionOverride?) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { graph.catalog.setFrictionOverride(packageName, override) }
+    }
+
     fun confirmAndFinishOnboarding() = viewModelScope.launch {
         if (!_synced.value) return@launch
         withContext(Dispatchers.IO) {

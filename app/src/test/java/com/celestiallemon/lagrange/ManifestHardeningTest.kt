@@ -25,7 +25,21 @@ class ManifestHardeningTest {
         val requested = info.requestedPermissions.orEmpty().toSet()
         assertFalse("INTERNET must never be requested", "android.permission.INTERNET" in requested)
         assertFalse("android.permission.ACCESS_NETWORK_STATE" in requested)
+        assertFalse("SYSTEM_ALERT_WINDOW must never be requested (use TYPE_ACCESSIBILITY_OVERLAY)", "android.permission.SYSTEM_ALERT_WINDOW" in requested)
         assertEquals(0, info.applicationInfo!!.flags and ApplicationInfo.FLAG_ALLOW_BACKUP)
+    }
+
+    @Test
+    fun `accessibility service declares minimal window-only events and honest non-tool metadata`() {
+        val manifest = File("src/main/AndroidManifest.xml").readText()
+        assertTrue(manifest.contains("LagrangeAccessibilityService"))
+        assertTrue(manifest.contains("android.permission.BIND_ACCESSIBILITY_SERVICE"))
+        assertFalse(manifest.contains("android.permission.SYSTEM_ALERT_WINDOW"))
+
+        val xml = File("src/main/res/xml/lagrange_accessibility_service.xml").readText()
+        assertTrue(xml.contains("android:accessibilityEventTypes=\"typeWindowStateChanged\""))
+        assertTrue(xml.contains("android:canRetrieveWindowContent=\"false\""))
+        assertTrue(xml.contains("android:isAccessibilityTool=\"false\""))
     }
 
     @Test
