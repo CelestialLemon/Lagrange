@@ -71,10 +71,13 @@ class LagrangeBackups(
     /** Discards a staged restore under the backup lock, so it can't race a stage that is still being written. */
     suspend fun cancelStagedRestore() = exclusive { restore.cancelStaged() }
 
-    /** Writes a complete backup ZIP to [out] and returns its manifest. */
-    suspend fun writeBackup(out: OutputStream): BackupManifest = exclusive { writeBackupLocked(out) }
+    /**
+     * Writes a complete backup ZIP to [out] and returns its manifest. A [writeToken] is embedded in the first local
+     * header (see [BackupFormat.writeTokenExtra]) so a copy of this exact write can later be recognised.
+     */
+    suspend fun writeBackup(out: OutputStream, writeToken: String? = null): BackupManifest = exclusive { writeBackupLocked(out, writeToken) }
 
-    private suspend fun writeBackupLocked(out: OutputStream): BackupManifest = withSnapshot { snapshot, report ->
+    private suspend fun writeBackupLocked(out: OutputStream, writeToken: String? = null): BackupManifest = withSnapshot { snapshot, report ->
         val prefsBytes = preferences.exportJson().encodeToByteArray()
         val manifest = BackupManifest(
             schemaVersion = report.userVersion,
@@ -88,7 +91,9 @@ class LagrangeBackups(
             ),
         )
         val zip = ZipOutputStream(out.buffered())
-        zip.putNextEntry(ZipEntry(BackupFormat.DB_ENTRY))
+        zip.putNextEntry(ZipEntry(BackupFormat.DB_ENTRY).apply { if (writeToken != null) extra = BackupFormat.writeTokenExtra(writeToken) })
+        // Push the local header (and its token) out at once, so even a write killed early is identifiable.
+        zip.flush()
         snapshot.inputStream().use { it.copyTo(zip) }
         zip.closeEntry()
         zip.putNextEntry(ZipEntry(BackupFormat.PREFS_ENTRY))
@@ -141,7 +146,8 @@ class LagrangeBackups(
      *
      * Only backups this app recorded as complete count toward [keep] or are ever deleted: unrelated files and
      * half-written exports from a killed run are never mistaken for backups. A half-written file left by a killed
-     * run is recognised by the in-progress marker and removed on the next run.
+     * run is removed on the next run only if its bytes still begin with that run's random write token; otherwise
+     * (empty, replaced, or a record from an older build) the file is kept and only the record is cleared.
      */
     suspend fun backUpToFolder(folderFactory: () -> BackupFolder, automatic: Boolean, keep: Int = KEEP_WEEKLY): String = try {
         exclusive {
@@ -154,10 +160,11 @@ class LagrangeBackups(
             val name = BackupFormat.fileName(clock())
             val doc = folder.create(BackupFormat.MIME_ZIP, name) ?: throw BackupException("Couldn't create $name.")
             try {
-                preferences.setBackupInProgress(doc.id, doc.name ?: name)
+                val token = BackupFormat.newWriteToken()
+                preferences.setBackupInProgress(doc.id, doc.name ?: name, token)
                 val fingerprint = (folder.openOutput(doc) ?: throw BackupException("Couldn't open $name for writing.")).use { out ->
                     val sink = FingerprintingOutputStream(out)
-                    writeBackupLocked(sink)
+                    writeBackupLocked(sink, token)
                     sink.flush()
                     sink.fingerprint()
                 }
@@ -209,13 +216,17 @@ class LagrangeBackups(
         runCatching { folder.openInput(id)?.use(BackupFormat::fingerprint) == expected }.getOrDefault(false)
 
     /**
-     * A leftover in-progress document is deleted only if it is still the half-written file: listed under the name
-     * Lagrange created it with, and not a complete bundle (something replaced it, or it is someone else's file).
+     * A leftover in-progress document is deleted only when it is positively the interrupted write: listed under the
+     * name Lagrange created it with, its bytes beginning with that run's random write token, and not a complete
+     * bundle. Failing to parse as a bundle proves nothing on its own (a replaced or empty file fails too), so a
+     * record without a token, an empty file, or anything the token can't be found in is always kept.
      */
     private fun isOurPartialWrite(folder: BackupFolder, leftover: InProgressBackup): Boolean = runCatching {
+        val token = leftover.token ?: return@runCatching false
         val doc = folder.list().firstOrNull { it.id == leftover.id } ?: return@runCatching false
         if (leftover.name != null && doc.name != leftover.name) return@runCatching false
-        folder.openInput(leftover.id)?.use { !BackupFormat.isCompleteBundle(it) } ?: false
+        val tokenMatches = folder.openInput(leftover.id)?.use { BackupFormat.startsWithWriteToken(it, token) } ?: false
+        tokenMatches && folder.openInput(leftover.id)?.use { !BackupFormat.isCompleteBundle(it) } == true
     }.getOrDefault(false)
 
     /** Passes bytes through while measuring exactly what was written. */

@@ -43,9 +43,12 @@ data class BackupFingerprint(val size: Long, val sha256: String)
 @Serializable
 internal data class CompletedBackup(val id: String, val fingerprint: BackupFingerprint? = null)
 
-/** A folder backup being written: its document id and the name it was created with. */
+/**
+ * A folder backup being written: its document id, the name it was created with, and the random per-write token
+ * embedded at the start of its bytes (null for a record from a build that wrote none; such a file is never deleted).
+ */
 @Serializable
-data class InProgressBackup(val id: String, val name: String? = null)
+data class InProgressBackup(val id: String, val name: String? = null, val token: String? = null)
 
 /**
  * DataStore-backed preferences. Changes that affect how history is interpreted (the logical-day rollover) are also
@@ -91,11 +94,11 @@ class LagrangePreferences(
     /** The folder backup that was being written; set while writing, so a killed run can be cleaned up. */
     suspend fun backupInProgress(): InProgressBackup? = store.data.first()[BACKUP_IN_PROGRESS]?.let(::decodeInProgress)
 
-    suspend fun setBackupInProgress(documentId: String?, name: String? = null) = store.edit {
+    suspend fun setBackupInProgress(documentId: String?, name: String? = null, token: String? = null) = store.edit {
         if (documentId == null) {
             it.remove(BACKUP_IN_PROGRESS)
         } else {
-            it[BACKUP_IN_PROGRESS] = recordJson.encodeToString(InProgressBackup.serializer(), InProgressBackup(documentId, name))
+            it[BACKUP_IN_PROGRESS] = recordJson.encodeToString(InProgressBackup.serializer(), InProgressBackup(documentId, name, token))
         }
     }
 

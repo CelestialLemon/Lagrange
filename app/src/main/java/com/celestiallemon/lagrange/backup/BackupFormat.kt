@@ -103,6 +103,64 @@ object BackupFormat {
         false
     }
 
+    /** ZIP extra-field header id carrying a folder write's random token ("LG"); readers ignore unknown ids. */
+    const val WRITE_TOKEN_TAG = 0x474C
+    const val WRITE_TOKEN_BYTES = 16
+
+    fun newWriteToken(): String =
+        ByteArray(WRITE_TOKEN_BYTES).also { java.security.SecureRandom().nextBytes(it) }.toHex()
+
+    /** The extra field put on a bundle's first entry so its local header identifies the write that produced it. */
+    fun writeTokenExtra(token: String): ByteArray {
+        val bytes = token.hexToBytes()
+        require(bytes.size == WRITE_TOKEN_BYTES) { "bad write token" }
+        return byteArrayOf(
+            (WRITE_TOKEN_TAG and 0xFF).toByte(), (WRITE_TOKEN_TAG shr 8).toByte(),
+            (bytes.size and 0xFF).toByte(), (bytes.size shr 8).toByte(),
+        ) + bytes
+    }
+
+    /**
+     * True only when [input] begins with a ZIP local file header whose extra field carries exactly [token]: the
+     * positive proof that these bytes are the start of that particular write. Anything else (empty, truncated
+     * before the header, replaced, another tool's ZIP) is not provably ours.
+     */
+    fun startsWithWriteToken(input: InputStream, token: String): Boolean = try {
+        readsWriteToken(input, token)
+    } catch (_: Exception) {
+        false
+    }
+
+    private fun readsWriteToken(input: InputStream, token: String): Boolean {
+        val expected = runCatching { token.hexToBytes() }.getOrNull()?.takeIf { it.size == WRITE_TOKEN_BYTES } ?: return false
+        val fixed = ByteArray(30)
+        if (input.readNBytes(fixed, 0, fixed.size) != fixed.size) return false
+        if (u32(fixed, 0) != 0x04034b50L) return false
+        val nameLength = u16(fixed, 26)
+        val extraLength = u16(fixed, 28)
+        input.skipNBytes(nameLength.toLong()) // throws EOFException when truncated inside the name
+        val extra = ByteArray(extraLength)
+        if (input.readNBytes(extra, 0, extraLength) != extraLength) return false
+        var at = 0
+        while (at + 4 <= extra.size) {
+            val tag = u16(extra, at)
+            val size = u16(extra, at + 2)
+            if (at + 4 + size > extra.size) return false
+            if (tag == WRITE_TOKEN_TAG && extra.copyOfRange(at + 4, at + 4 + size).contentEquals(expected)) return true
+            at += 4 + size
+        }
+        return false
+    }
+
+    private fun u16(b: ByteArray, at: Int): Int = (b[at].toInt() and 0xFF) or ((b[at + 1].toInt() and 0xFF) shl 8)
+
+    private fun u32(b: ByteArray, at: Int): Long = (u16(b, at).toLong()) or (u16(b, at + 2).toLong() shl 16)
+
+    private fun String.hexToBytes(): ByteArray {
+        require(length % 2 == 0)
+        return ByteArray(length / 2) { i -> substring(2 * i, 2 * i + 2).toInt(16).toByte() }
+    }
+
     fun sha256(input: InputStream): String {
         val digest = MessageDigest.getInstance("SHA-256")
         val buffer = ByteArray(64 * 1024)

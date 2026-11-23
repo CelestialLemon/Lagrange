@@ -98,13 +98,70 @@ class BackupFolderTest {
         assertTrue(preferences.current().lastBackupStatus!!.startsWith("Automatic backup failed"))
     }
 
+    /** The bytes a backup run with [token] had written when its process was killed partway through. */
+    private suspend fun interruptedWrite(token: String): ByteArray {
+        Interner(db, FakeResolver()).packageId("com.kept")
+        val full = ByteArrayOutputStream().also { backups.writeBackup(it, token) }.toByteArray()
+        return full.copyOf(full.size / 2)
+    }
+
     @Test
     fun `a backup half-written by a killed process is cleaned up and never counted`() = runBlocking<Unit> {
-        val partial = File(dir, BackupFormat.fileName(5_000L)).apply { writeText("trunc") }
-        preferences.setBackupInProgress(partial.path, partial.name)
+        val token = BackupFormat.newWriteToken()
+        val partial = File(dir, BackupFormat.fileName(5_000L)).apply { writeBytes(interruptedWrite(token)) }
+        preferences.setBackupInProgress(partial.path, partial.name, token)
+        clock.now += 86_400_000L
         backUp()
         assertFalse(partial.exists())
         assertEquals(1, dir.list()!!.size)
+        assertNull(preferences.backupInProgress())
+    }
+
+    @Test
+    fun `an interrupted backup replaced at the same path with non-backup bytes is kept`() = runBlocking<Unit> {
+        val token = BackupFormat.newWriteToken()
+        val partial = File(dir, BackupFormat.fileName(5_000L)).apply { writeBytes(interruptedWrite(token)) }
+        preferences.setBackupInProgress(partial.path, partial.name, token)
+        // A user or sync tool puts its own file at the interrupted backup's path and name.
+        partial.writeText("someone else's file now")
+        clock.now += 86_400_000L
+        val name = backUp()
+
+        assertEquals("replaced file kept", "someone else's file now", partial.readText())
+        assertNull(preferences.backupInProgress())
+        val created = File(dir, name)
+        assertTrue(created.inputStream().use(BackupFormat::isCompleteBundle))
+        // The token in the first local header doesn't stop the new bundle from validating for restore.
+        created.inputStream().use { backups.stageRestore(it) }
+        backups.cancelStagedRestore()
+        assertEquals(setOf(created.path), preferences.completedBackups().keys)
+        assertEquals(setOf(partial.name, name), dir.list()!!.toSet())
+        assertEquals(LagrangePreferences.STATUS_OK, preferences.current().lastBackupStatus)
+    }
+
+    @Test
+    fun `an interrupted backup that can't be identified by its token is kept`() = runBlocking<Unit> {
+        val token = BackupFormat.newWriteToken()
+        // Empty (nothing reached the provider before the kill): can't be told apart from a file put there since.
+        val empty = File(dir, BackupFormat.fileName(5_000L)).apply { writeBytes(ByteArray(0)) }
+        preferences.setBackupInProgress(empty.path, empty.name, token)
+        clock.now += 86_400_000L
+        backUp()
+        assertTrue(empty.exists())
+
+        // Another run's partial bytes (a different token) are not this run's write either.
+        val other = File(dir, BackupFormat.fileName(6_000L)).apply { writeBytes(interruptedWrite(BackupFormat.newWriteToken())) }
+        preferences.setBackupInProgress(other.path, other.name, token)
+        clock.now += 86_400_000L
+        backUp()
+        assertTrue(other.exists())
+
+        // A record from a build that stored no token never authorises a delete.
+        val legacy = File(dir, BackupFormat.fileName(7_000L)).apply { writeBytes(interruptedWrite(token)) }
+        preferences.setBackupInProgress(legacy.path, legacy.name)
+        clock.now += 86_400_000L
+        backUp()
+        assertTrue(legacy.exists())
         assertNull(preferences.backupInProgress())
     }
 
@@ -147,8 +204,9 @@ class BackupFolderTest {
         assertNull(preferences.backupInProgress())
 
         // A partial left under a different name than the one recorded is not touched either.
-        val renamed = File(dir, "renamed.zip").apply { writeText("trunc") }
-        preferences.setBackupInProgress(renamed.path, "lagrange-backup-other.zip")
+        val token = BackupFormat.newWriteToken()
+        val renamed = File(dir, "renamed.zip").apply { writeBytes(interruptedWrite(token)) }
+        preferences.setBackupInProgress(renamed.path, "lagrange-backup-other.zip", token)
         clock.now += 86_400_000L
         backUp()
         assertTrue(renamed.exists())
