@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Backup
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.DeleteForever
 import androidx.compose.material.icons.outlined.HealthAndSafety
 import androidx.compose.material.icons.outlined.Info
@@ -36,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -69,6 +71,7 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
     val staged by data.restoreStaged.collectAsStateWithLifecycle()
     val probe by data.probe.collectAsStateWithLifecycle()
     var confirmReset by remember { mutableStateOf(false) }
+    var inspecting by rememberSaveable { mutableStateOf(false) }
     val now = System.currentTimeMillis()
     val status = LocalStatusColors.current
 
@@ -83,6 +86,11 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
     }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let(data::setBackupFolder)
+    }
+
+    if (inspecting) {
+        TimelineInspector(padding, onClose = { inspecting = false })
+        return
     }
 
     LagrangeScreen(
@@ -148,6 +156,17 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
                         }
                     }
                 }
+            }
+        }
+
+        item("inspector") {
+            SectionCard(title = "Timeline Inspector", eyebrow = "Debug", icon = Icons.Outlined.BugReport) {
+                Text(
+                    "Raw usage events and notifications for any day, side by side with the sessions Lagrange reconstructed from them. Export a day as a JSON fixture to replay it in tests.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                FilledTonalButton(onClick = { inspecting = true }) { Text("Open inspector") }
             }
         }
 

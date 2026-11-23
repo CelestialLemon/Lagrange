@@ -69,6 +69,24 @@ class TimezoneAndPreferencesTest {
     }
 
     @Test
+    fun `daily budget defaults to an hour, is range-checked and every change is kept in history`() = runBlocking {
+        val p = prefs()
+        assertEquals(60 * 60_000L, p.current().dailyBudgetMs)
+        p.setDailyBudgetMs(60 * 60_000L) // unchanged: no history row
+        p.setDailyBudgetMs(45 * 60_000L)
+        assertEquals(45 * 60_000L, p.current().dailyBudgetMs)
+        val rows = db.settingsHistoryDao().byKey(LagrangePreferences.HISTORY_DAILY_BUDGET_MS)
+        assertEquals(listOf("${45 * 60_000L}"), rows.map { it.valueJson })
+        assertTrue(runCatching { p.setDailyBudgetMs(60_000L) }.isFailure)
+        assertTrue(runCatching { p.setDailyBudgetMs(13 * 3_600_000L) }.isFailure)
+        assertEquals(45 * 60_000L, p.current().dailyBudgetMs)
+
+        val b = prefs()
+        b.importJson(p.exportJson())
+        assertEquals(45 * 60_000L, b.current().dailyBudgetMs)
+    }
+
+    @Test
     fun `portable preferences round-trip and reject unknown formats`() = runBlocking {
         val a = prefs()
         a.setRolloverHour(3)

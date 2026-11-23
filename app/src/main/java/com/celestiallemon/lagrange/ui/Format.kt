@@ -34,3 +34,40 @@ fun formatBytes(bytes: Long): String = when {
 }
 
 fun formatHour(hour: Int): String = String.format(Locale.US, "%02d:00", hour)
+
+private val clock = DateTimeFormatter.ofLocalizedTime(FormatStyle.SHORT)
+private val clockSeconds = DateTimeFormatter.ofPattern("HH:mm:ss", Locale.US)
+private val dayLabel = DateTimeFormatter.ofPattern("EEE d MMM", Locale.getDefault())
+
+/** Wall-clock time, e.g. "14:05" or "2:05 PM". */
+fun formatClock(ms: Long, zone: ZoneId = ZoneId.systemDefault()): String = clock.format(Instant.ofEpochMilli(ms).atZone(zone))
+
+fun formatClockSeconds(ms: Long, zone: ZoneId = ZoneId.systemDefault()): String = clockSeconds.format(Instant.ofEpochMilli(ms).atZone(zone))
+
+fun formatDay(date: java.time.LocalDate): String = dayLabel.format(date)
+
+/** A compact duration: "45s", "12m", "1h 05m". */
+fun formatDuration(ms: Long): String {
+    val totalSec = (ms.coerceAtLeast(0) + 500) / 1000
+    val h = totalSec / 3600
+    val m = (totalSec % 3600) / 60
+    val s = totalSec % 60
+    return when {
+        h > 0 -> String.format(Locale.US, "%dh %02dm", h, m)
+        m > 0 -> "${m}m"
+        else -> "${s}s"
+    }
+}
+
+/** A rounded duration in words for headlines: "1h 5m", "23m", "under a minute". */
+fun formatDurationShort(ms: Long): String {
+    val totalMin = (ms.coerceAtLeast(0) + 30_000) / 60_000
+    val h = totalMin / 60
+    val m = totalMin % 60
+    return when {
+        h > 0 && m > 0 -> "${h}h ${m}m"
+        h > 0 -> "${h}h"
+        m > 0 -> "${m}m"
+        else -> "<1m"
+    }
+}

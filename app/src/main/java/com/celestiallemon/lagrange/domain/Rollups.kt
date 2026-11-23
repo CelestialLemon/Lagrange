@@ -1,0 +1,433 @@
+package com.celestiallemon.lagrange.domain
+
+import com.celestiallemon.lagrange.data.db.AppCategory
+import com.celestiallemon.lagrange.data.db.Archetype
+import com.celestiallemon.lagrange.data.db.CoverageStatus
+import com.celestiallemon.lagrange.data.db.DayCoverage
+import com.celestiallemon.lagrange.data.db.DayStatus
+import com.celestiallemon.lagrange.data.db.ServiceKind
+import java.time.DayOfWeek
+import java.time.Instant
+import java.time.LocalDate
+import java.time.ZoneId
+import java.time.temporal.ChronoUnit
+
+/**
+ * Which zone applied when, from `tz_history`. Every instant is resolved with the zone rules in force at that instant,
+ * so a DST change or a trip never shifts history recorded before it.
+ */
+class ZoneTimeline(entries: List<Pair<Long, ZoneId>>, private val fallback: ZoneId) {
+    private val sorted = entries.sortedBy { it.first }
+
+    fun zoneAt(ms: Long): ZoneId {
+        var zone: ZoneId? = null
+        for ((from, z) in sorted) if (from <= ms) zone = z else break
+        return zone ?: sorted.firstOrNull()?.second ?: fallback
+    }
+
+    fun dateOf(ms: Long, rolloverHour: Int): LocalDate = LogicalDay.dateOf(ms, rolloverHour, zoneAt(ms))
+
+    /** When the logical day [date] begins. A rollover hour inside a DST gap resolves forward. */
+    fun dayStartMs(date: LocalDate, rolloverHour: Int): Long {
+        val local = date.atTime(rolloverHour, 0)
+        val guess = local.atZone(zoneAt(local.atZone(fallback).toInstant().toEpochMilli())).toInstant().toEpochMilli()
+        return local.atZone(zoneAt(guess)).toInstant().toEpochMilli()
+    }
+
+    fun window(date: LocalDate, rolloverHour: Int): DayWindow {
+        val start = dayStartMs(date, rolloverHour)
+        val end = dayStartMs(date.plusDays(1), rolloverHour).coerceAtLeast(start)
+        return DayWindow(date, start, end, zoneAt(start))
+    }
+
+    companion object {
+        fun fixed(zone: ZoneId) = ZoneTimeline(emptyList(), zone)
+    }
+}
+
+/** One logical day: `[startMs, endMs)`, 23, 24 or 25 hours long. */
+data class DayWindow(val date: LocalDate, val startMs: Long, val endMs: Long, val zone: ZoneId) {
+    val isWeekend: Boolean get() = date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY
+}
+
+/** Hour slots inside a logical day: 0..23 by local clock hour counted from the rollover, 24 for a repeated fall-back hour. */
+object HourSlots {
+    fun slotOf(ms: Long, rolloverHour: Int, zone: ZoneId): Int {
+        val z = Instant.ofEpochMilli(ms).atZone(zone)
+        if (z.offset != z.withEarlierOffsetAtOverlap().offset) return REPEATED_SLOT
+        return (z.hour - rolloverHour + 24) % 24
+    }
+
+    /** The next local hour boundary after [ms] (instant arithmetic, so DST and half-hour zones are exact). */
+    fun nextHourBoundary(ms: Long, zone: ZoneId): Long =
+        Instant.ofEpochMilli(ms).atZone(zone).truncatedTo(ChronoUnit.HOURS).plusHours(1).toInstant().toEpochMilli()
+
+    /** The ordinary slot the repeated (slot 24) hour shares a wall-clock hour with on this day, or null when nothing repeats. */
+    fun repeatedSlot(window: DayWindow, rolloverHour: Int): Int? {
+        val t = window.zone.rules.nextTransition(Instant.ofEpochMilli(window.startMs)) ?: return null
+        if (!t.isOverlap || t.instant.toEpochMilli() >= window.endMs) return null
+        return (t.dateTimeAfter.hour - rolloverHour + 24) % 24
+    }
+
+    const val REPEATED_SLOT = 24
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// Daily rollups.
+// -----------------------------------------------------------------------------------------------------------------
+
+/** Plain mirror of a `daily_rollups` row. */
+data class DayRollup(
+    val logicalDate: LocalDate,
+    val coverage: DayCoverage,
+    val notifCoverageRatio: Double,
+    val frictionCoverageRatio: Double,
+    val usageCoverageRatio: Double,
+    val totalScreenMs: Long,
+    val activeUsageMs: Long,
+    val distractingMs: Long,
+    val neutralMs: Long,
+    val utilityMs: Long,
+    val excludedMs: Long,
+    val selfAppMs: Long,
+    val episodeCount: Int,
+    val physicalPickupCount: Int,
+    val glanceCount: Int,
+    val microCheckCount: Int,
+    val rabbitHoleCount: Int,
+    val blockedAttemptCount: Int,
+    val notificationCount: Int,
+    val longestFocusGapMs: Long,
+    val overnightGapMs: Long?,
+    val firstPickupMs: Long?,
+    val lastActivityMs: Long?,
+    val budgetTargetMs: Long?,
+    /** Usage collection was continuous for the day: it can count toward baselines (zero use included). */
+    val baselineEligible: Boolean,
+    val baselineMedianMs: Long? = null,
+    val dayStatus: DayStatus = if (baselineEligible) DayStatus.INSUFFICIENT_BASELINE else DayStatus.UNCERTAIN_COVERAGE,
+)
+
+data class AppDay(
+    val logicalDate: LocalDate,
+    val pkgId: Long,
+    val totalMs: Long,
+    val openCount: Int,
+    val blockedAttemptCount: Int,
+    val sessionCount: Int,
+    val rabbitHoleContributionMs: Long,
+)
+
+data class HourCell(val logicalDate: LocalDate, val hourSlot: Int, val pkgId: Long, val durationMs: Long, val openCount: Int)
+
+data class DayResult(val rollup: DayRollup, val apps: List<AppDay>, val hourly: List<HourCell>)
+
+data class RollupInput(
+    val windows: List<DayWindow>,
+    /** Every episode that overlaps the windows, plus the evening before the first one (for the overnight gap). */
+    val episodes: List<Episode>,
+    val apps: Map<Long, AppInfo>,
+    val coverage: List<CoverageSpan>,
+    val notifications: List<NotificationMeta>,
+    val rolloverHour: Int,
+    /** The ledger is complete up to here; today's figures stop at this instant. */
+    val dataEndMs: Long,
+    val budgetFor: (LocalDate) -> Long? = { null },
+)
+
+data class RollupRules(
+    /** Below this share of harvested time a day is "uncertain" and never feeds a baseline. */
+    val minUsageCoverage: Double = 0.95,
+    val minNotifCoverage: Double = 0.90,
+    val nightBeforeRolloverMs: Long = 6 * HOUR_MS,
+    val nightAfterRolloverMs: Long = 10 * HOUR_MS,
+    val minOvernightGapMs: Long = 2 * HOUR_MS,
+)
+
+/**
+ * Builds `daily_rollups`, `daily_app_rollups` and `hourly_app_usage` from reconstructed episodes (spec §3.1, §3.3).
+ * Episodes are *counted* on the logical day they start; *durations* are split exactly across logical-day and local
+ * hour boundaries, so a 23:45–00:40 binge stays one session on that night's timeline while every minute lands in
+ * the hour it happened (23- and 25-hour DST days included).
+ */
+object RollupEngine {
+    private val ACTIVE = setOf(AppCategory.DISTRACTING, AppCategory.NEUTRAL, AppCategory.UTILITY)
+
+    fun compute(input: RollupInput, rules: RollupRules = RollupRules()): List<DayResult> {
+        val nonGlance = input.episodes.filter { !it.isGlanceOnly }.sortedBy { it.startMs }
+        return input.windows.mapNotNull { w -> computeDay(w, input, nonGlance, rules) }
+    }
+
+    private fun computeDay(w: DayWindow, input: RollupInput, nonGlance: List<Episode>, rules: RollupRules): DayResult? {
+        val clip = minOf(w.endMs, input.dataEndMs)
+        if (clip <= w.startMs) return null
+        val len = (clip - w.startMs).toDouble()
+        fun spansOf(kind: ServiceKind, vararg status: CoverageStatus) =
+            input.coverage.filter { it.kind == kind && it.status in status }.map { it.span }
+
+        val usageCov = Spans.coveredMs(spansOf(ServiceKind.USAGE_HARVEST, CoverageStatus.ACTIVE, CoverageStatus.BACKFILL), w.startMs, clip) / len
+        val gap = spansOf(ServiceKind.USAGE_HARVEST, CoverageStatus.GAP).any { it.overlapMs(w.startMs, clip) > 0 }
+        val backfill = spansOf(ServiceKind.USAGE_HARVEST, CoverageStatus.BACKFILL).any { it.overlapMs(w.startMs, clip) > 0 }
+        val notifCov = Spans.coveredMs(spansOf(ServiceKind.NOTIFICATION_LISTENER, CoverageStatus.ACTIVE), w.startMs, clip) / len
+        val frictionCov = Spans.coveredMs(spansOf(ServiceKind.ACCESSIBILITY, CoverageStatus.ACTIVE), w.startMs, clip) / len
+        val eligible = usageCov >= rules.minUsageCoverage && !gap
+        val coverage = when {
+            backfill -> DayCoverage.BACKFILL
+            !eligible -> DayCoverage.PARTIAL_HARVEST
+            notifCov < rules.minNotifCoverage -> DayCoverage.NO_NOTIF_COVERAGE
+            else -> DayCoverage.COMPLETE
+        }
+
+        // Durations, split by day and hour.
+        var screen = 0L
+        var totals = CategoryTotals()
+        val appMs = HashMap<Long, Long>()
+        val appRabbit = HashMap<Long, Long>()
+        val hourly = HashMap<Pair<Int, Long>, LongArray>() // (slot, pkg) -> [ms, opens]
+        for (ep in input.episodes) {
+            if (ep.endMs <= w.startMs || ep.startMs >= w.endMs) continue
+            for (s in ep.activeSpans) screen += s.overlapMs(w.startMs, clip)
+            for (seg in ep.segments) {
+                val cat = input.apps[seg.pkgId]?.category ?: AppCategory.NEUTRAL
+                for (piece in seg.effectiveSpans()) {
+                    val part = piece.clip(w.startMs, clip) ?: continue
+                    totals = totals.plus(cat, part.durationMs)
+                    appMs.merge(seg.pkgId, part.durationMs, Long::plus)
+                    if (ep.isRabbitHole) appRabbit.merge(seg.pkgId, part.durationMs, Long::plus)
+                    forEachHour(part, w.zone, input.rolloverHour) { slot, ms ->
+                        hourly.getOrPut(slot to seg.pkgId) { LongArray(2) }[0] += ms
+                    }
+                }
+            }
+        }
+
+        // Counts, on the day each episode (or open) starts.
+        val starting = input.episodes.filter { it.startMs >= w.startMs && it.startMs < w.endMs }
+        val startingUnlocked = starting.filter { !it.isGlanceOnly }
+        val appOpens = HashMap<Long, Int>()
+        val appBlocked = HashMap<Long, Int>()
+        val appSessions = HashMap<Long, Int>()
+        for (ep in startingUnlocked) {
+            val pkgs = HashSet<Long>()
+            for (seg in ep.segments) {
+                if (seg.isBlockedAttempt) appBlocked.merge(seg.pkgId, 1, Int::plus)
+                if (seg.effectiveMs > 0) pkgs += seg.pkgId
+            }
+            pkgs.forEach { appSessions.merge(it, 1, Int::plus) }
+        }
+        // Opens are attributed where the open happened, which can be the next day for a session crossing midnight.
+        for (ep in input.episodes) {
+            if (ep.isGlanceOnly) continue
+            for (seg in ep.segments) {
+                if (seg.isBlockedAttempt || isTransient(input.apps[seg.pkgId]) || seg.effectiveMs == 0L) continue
+                val at = seg.effectiveSpans().firstOrNull()?.startMs ?: continue
+                if (at < w.startMs || at >= w.endMs) continue
+                appOpens.merge(seg.pkgId, 1, Int::plus)
+                val slot = HourSlots.slotOf(at, input.rolloverHour, w.zone)
+                hourly.getOrPut(slot to seg.pkgId) { LongArray(2) }[1] += 1
+            }
+        }
+
+        val firstPickup = startingUnlocked.minOfOrNull { it.startMs }
+        val lastActivity = startingUnlocked.maxOfOrNull { it.endMs }
+        val overnight = overnightGap(nonGlance, w, clip, rules)
+        val sortedDay = startingUnlocked.sortedBy { it.startMs }
+        var longest = 0L
+        for (i in 1 until sortedDay.size) {
+            val g = sortedDay[i].startMs - sortedDay[i - 1].endMs
+            if (g > longest && !(overnight != null && g == overnight.second && sortedDay[i].startMs == overnight.first)) longest = g
+        }
+
+        val rollup = DayRollup(
+            logicalDate = w.date,
+            coverage = coverage,
+            notifCoverageRatio = notifCov.coerceIn(0.0, 1.0),
+            frictionCoverageRatio = frictionCov.coerceIn(0.0, 1.0),
+            usageCoverageRatio = usageCov.coerceIn(0.0, 1.0),
+            totalScreenMs = screen,
+            activeUsageMs = totals.distractingMs + totals.neutralMs + totals.utilityMs,
+            distractingMs = totals.distractingMs,
+            neutralMs = totals.neutralMs,
+            utilityMs = totals.utilityMs,
+            excludedMs = totals.excludedMs,
+            selfAppMs = totals.selfAppMs,
+            episodeCount = startingUnlocked.size,
+            physicalPickupCount = startingUnlocked.sumOf { it.physicalPickupCount },
+            glanceCount = starting.count { it.isGlanceOnly },
+            microCheckCount = startingUnlocked.count { it.archetype == Archetype.MICRO_CHECK },
+            rabbitHoleCount = startingUnlocked.count { it.isRabbitHole },
+            blockedAttemptCount = startingUnlocked.sumOf { it.blockedAttemptCount },
+            notificationCount = input.notifications.count { it.isTriggerEligible && it.postedAtMs >= w.startMs && it.postedAtMs < w.endMs },
+            longestFocusGapMs = longest,
+            overnightGapMs = overnight?.second,
+            firstPickupMs = firstPickup,
+            lastActivityMs = lastActivity,
+            budgetTargetMs = input.budgetFor(w.date),
+            baselineEligible = eligible,
+        )
+        val pkgs = appMs.keys + appOpens.keys + appBlocked.keys
+        val apps = pkgs.map { p ->
+            AppDay(w.date, p, appMs[p] ?: 0, appOpens[p] ?: 0, appBlocked[p] ?: 0, appSessions[p] ?: 0, appRabbit[p] ?: 0)
+        }.sortedBy { it.pkgId }
+        val cells = hourly.map { (k, v) -> HourCell(w.date, k.first, k.second, v[0], v[1].toInt()) }
+            .sortedWith(compareBy({ it.hourSlot }, { it.pkgId }))
+        return DayResult(rollup, apps, cells)
+    }
+
+    /** Active categories (counted in Active Phone Time): everything but EXCLUDED and SELF_APP. */
+    fun isActiveCategory(c: AppCategory) = c in ACTIVE
+
+    private fun isTransient(app: AppInfo?) = app?.isSystemSurface == true
+
+    /**
+     * Sleep proxy: the longest phone-free stretch between two unlocked episodes that overlaps the night around this
+     * day's rollover (by default 22:00 → 14:00) and has already ended. Returns (end, length).
+     */
+    private fun overnightGap(sorted: List<Episode>, w: DayWindow, clip: Long, rules: RollupRules): Pair<Long, Long>? {
+        val nightFrom = w.startMs - rules.nightBeforeRolloverMs
+        val nightTo = w.startMs + rules.nightAfterRolloverMs
+        var best: Pair<Long, Long>? = null
+        var prevEnd = Long.MIN_VALUE
+        for (ep in sorted) {
+            if (prevEnd != Long.MIN_VALUE) {
+                val gapStart = prevEnd
+                val gapEnd = ep.startMs
+                val len = gapEnd - gapStart
+                if (gapEnd <= clip && len >= rules.minOvernightGapMs && gapEnd > nightFrom && gapStart < nightTo) {
+                    if (best == null || len > best.second) best = gapEnd to len
+                }
+            }
+            prevEnd = maxOf(prevEnd, ep.endMs)
+        }
+        return best
+    }
+
+    /** Splits [span] at local hour boundaries, reporting each piece with its slot. */
+    inline fun forEachHour(span: Span, zone: ZoneId, rolloverHour: Int, action: (slot: Int, ms: Long) -> Unit) {
+        var t = span.startMs
+        while (t < span.endMs) {
+            val next = minOf(span.endMs, HourSlots.nextHourBoundary(t, zone))
+            action(HourSlots.slotOf(t, rolloverHour, zone), next - t)
+            t = next
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------------------------------------------
+// Baselines and day status.
+// -----------------------------------------------------------------------------------------------------------------
+
+/** What a day contributes to baselines. */
+data class BaselinePoint(val date: LocalDate, val eligible: Boolean, val activeMs: Long, val distractingMs: Long, val budgetMs: Long?)
+
+data class Baseline(val medianMs: Long?, val coveredDays: Int, val matchedDays: List<LocalDate>)
+
+data class BaselineRules(
+    val windowDays: Int = 28,
+    /** Baselines stay hidden until this many covered days exist in the window. */
+    val minCoveredDays: Int = 7,
+    /** ...and at least this many of them match the day's weekday/weekend type. */
+    val minMatchedDays: Int = 3,
+    val spikeRatio: Double = 1.4,
+    val spikeMinMs: Long = 30 * MINUTE_MS,
+    val goodRatio: Double = 0.75,
+    val goodMinMs: Long = 20 * MINUTE_MS,
+    val partialSpikeMinMs: Long = 15 * MINUTE_MS,
+    val partialGoodMinMs: Long = 10 * MINUTE_MS,
+)
+
+/**
+ * Fair comparisons (spec §4.2 A/C): a day is measured against the median of the previous 28 days *of the same kind*
+ * (weekday vs weekend), counting only days whose collection was continuous. Confirmed zero-use days count; uncertain
+ * days never do.
+ */
+object Baselines {
+    /** Covered days a baseline needs before it is shown at all. */
+    val MIN_COVERED_DAYS get() = BaselineRules().minCoveredDays
+
+    fun isWeekend(date: LocalDate) = date.dayOfWeek == DayOfWeek.SATURDAY || date.dayOfWeek == DayOfWeek.SUNDAY
+
+    fun baseline(date: LocalDate, points: Map<LocalDate, BaselinePoint>, rules: BaselineRules = BaselineRules()): Baseline {
+        val prior = (1..rules.windowDays).mapNotNull { points[date.minusDays(it.toLong())] }.filter { it.eligible }
+        val matched = prior.filter { isWeekend(it.date) == isWeekend(date) }
+        val median = if (prior.size >= rules.minCoveredDays && matched.size >= rules.minMatchedDays) median(matched.map { it.activeMs }) else null
+        return Baseline(median, prior.size, matched.map { it.date })
+    }
+
+    /** Status of a finished day. */
+    fun status(point: BaselinePoint, baseline: Baseline, rules: BaselineRules = BaselineRules()): DayStatus {
+        if (!point.eligible) return DayStatus.UNCERTAIN_COVERAGE
+        val m = baseline.medianMs ?: return DayStatus.INSUFFICIENT_BASELINE
+        val a = point.activeMs
+        return when {
+            a >= m * rules.spikeRatio && a - m >= rules.spikeMinMs -> DayStatus.SPIKE
+            a <= m * rules.goodRatio && m - a >= rules.goodMinMs -> DayStatus.GOOD_DAY
+            point.budgetMs != null && point.distractingMs <= point.budgetMs && a <= m -> DayStatus.GOOD_DAY
+            else -> DayStatus.NORMAL
+        }
+    }
+
+    /** Status of today so far, against the same time-of-day slice of comparable days. */
+    fun partialStatus(eligible: Boolean, todayMs: Long, sliceMedianMs: Long?, rules: BaselineRules = BaselineRules()): DayStatus {
+        if (!eligible) return DayStatus.UNCERTAIN_COVERAGE
+        val m = sliceMedianMs ?: return DayStatus.INSUFFICIENT_BASELINE
+        return when {
+            todayMs >= m * rules.spikeRatio && todayMs - m >= rules.partialSpikeMinMs -> DayStatus.SPIKE
+            todayMs <= m * rules.goodRatio && m - todayMs >= rules.partialGoodMinMs -> DayStatus.GOOD_DAY
+            else -> DayStatus.NORMAL
+        }
+    }
+
+    fun median(values: List<Long>): Long? {
+        if (values.isEmpty()) return null
+        val s = values.sorted()
+        val mid = s.size / 2
+        return if (s.size % 2 == 1) s[mid] else (s[mid - 1] + s[mid]) / 2
+    }
+}
+
+/** Where "now" sits inside today, by local wall-clock hour counted from the rollover. */
+data class SliceCutoff(val slot: Int, val fraction: Double)
+
+data class SliceBaseline(val todayMs: Long, val medianMs: Long?, val days: Int, val cutoff: SliceCutoff)
+
+/**
+ * Today-in-progress comparison (spec §4.2 C): usage so far today vs. the same time-of-day slice of prior eligible
+ * weekday/weekend days, built from their hourly buckets (the current hour pro-rated).
+ */
+object PartialDayBaseline {
+    fun cutoff(nowMs: Long, rolloverHour: Int, zone: ZoneId): SliceCutoff {
+        val z = Instant.ofEpochMilli(nowMs).atZone(zone)
+        val slot = (z.hour - rolloverHour + 24) % 24
+        val fraction = (z.minute * 60 + z.second) / 3600.0
+        return SliceCutoff(slot, fraction)
+    }
+
+    /** Usage in [slots] (slot → ms) before [cutoff]; slot 24 counts where its repeated wall-clock hour falls. */
+    fun sliceMs(slots: Map<Int, Long>, cutoff: SliceCutoff, repeatedSlot: Int?): Long {
+        var total = 0.0
+        for ((slot, ms) in slots) {
+            val wall = if (slot == HourSlots.REPEATED_SLOT) repeatedSlot ?: continue else slot
+            total += when {
+                wall < cutoff.slot -> ms.toDouble()
+                wall == cutoff.slot -> ms * cutoff.fraction
+                else -> 0.0
+            }
+        }
+        return total.toLong()
+    }
+
+    fun compare(
+        today: LocalDate,
+        todayMs: Long,
+        cutoff: SliceCutoff,
+        priorSlices: Map<LocalDate, Long>,
+        points: Map<LocalDate, BaselinePoint>,
+        rules: BaselineRules = BaselineRules(),
+    ): SliceBaseline {
+        val base = Baselines.baseline(today, points, rules)
+        val slices = base.matchedDays.mapNotNull { priorSlices[it] }
+        val median = if (base.medianMs != null && slices.size >= rules.minMatchedDays) Baselines.median(slices) else null
+        return SliceBaseline(todayMs, median, slices.size, cutoff)
+    }
+}

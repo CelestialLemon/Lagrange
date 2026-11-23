@@ -57,6 +57,13 @@ interface ClassDao {
 
     @Query("SELECT COUNT(*) FROM classes WHERE class_name = ''")
     suspend fun emptyClassRows(): Int
+
+    /** Chrome (and other browsers') Custom Tab activities. */
+    @Query("SELECT id FROM classes WHERE class_name LIKE '%CustomTabActivity'")
+    suspend fun customTabIds(): List<Long>
+
+    @Query("SELECT id AS id, class_name AS name FROM classes WHERE id IN (:ids)")
+    suspend fun namesOf(ids: List<Long>): List<NameId>
 }
 
 /** Per-type event counts, for probes and diagnostics. */
@@ -94,7 +101,28 @@ interface RawUsageEventDao {
 
     @Query("SELECT * FROM raw_usage_events ORDER BY timestamp_utc_ms, id")
     suspend fun allForTest(): List<RawUsageEventEntity>
+
+    /** The ledger slice `[fromMs, toMs)` in source order. */
+    @Query("SELECT * FROM raw_usage_events WHERE timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs ORDER BY timestamp_utc_ms, id")
+    suspend fun between(fromMs: Long, toMs: Long): List<RawUsageEventEntity>
+
+    @Query("SELECT MIN(timestamp_utc_ms) FROM raw_usage_events")
+    suspend fun earliest(): Long?
+
+    @Query("SELECT MAX(timestamp_utc_ms) FROM raw_usage_events")
+    suspend fun latest(): Long?
+
+    /** The ledger slice with names resolved, for the Debug Timeline Inspector. */
+    @Query(
+        "SELECT e.id AS id, e.timestamp_utc_ms AS timestampMs, e.event_type AS eventType, p.package_name AS packageName, " +
+            "c.class_name AS className FROM raw_usage_events e JOIN packages p ON p.id = e.pkg_id JOIN classes c ON c.id = e.cls_id " +
+            "WHERE e.timestamp_utc_ms >= :fromMs AND e.timestamp_utc_ms < :toMs ORDER BY e.timestamp_utc_ms, e.id",
+    )
+    suspend fun namedBetween(fromMs: Long, toMs: Long): List<NamedUsageEvent>
 }
+
+/** A raw usage event with its package and class names. */
+data class NamedUsageEvent(val id: Long, val timestampMs: Long, val eventType: Int, val packageName: String, val className: String)
 
 @Dao
 interface RawNotificationDao {
@@ -119,6 +147,23 @@ interface RawNotificationDao {
 
     @Query("SELECT * FROM raw_notifications ORDER BY id")
     suspend fun all(): List<RawNotificationEntity>
+
+    @Query("SELECT * FROM raw_notifications WHERE id = :id")
+    suspend fun byId(id: Long): RawNotificationEntity?
+
+    /** Trigger-eligible notifications alive at some point in `[fromMs, toMs)` (posted before its end, not removed before its start). */
+    @Query(
+        "SELECT * FROM raw_notifications WHERE posted_at_ms < :toMs AND (removed_at_ms IS NULL OR removed_at_ms >= :fromMs) " +
+            "AND is_ongoing = 0 AND is_foreground_service = 0 AND is_group_summary = 0 ORDER BY posted_at_ms, id",
+    )
+    suspend fun eligibleAlive(fromMs: Long, toMs: Long): List<RawNotificationEntity>
+
+    /** Every notification posted or removed in `[fromMs, toMs)`, for the inspector. */
+    @Query(
+        "SELECT * FROM raw_notifications WHERE (posted_at_ms >= :fromMs AND posted_at_ms < :toMs) " +
+            "OR (removed_at_ms >= :fromMs AND removed_at_ms < :toMs) ORDER BY posted_at_ms, id",
+    )
+    suspend fun touching(fromMs: Long, toMs: Long): List<RawNotificationEntity>
 }
 
 @Dao
@@ -158,6 +203,9 @@ interface CoverageDao {
 
     @Query("SELECT * FROM service_coverage_intervals ORDER BY start_ms, id")
     suspend fun all(): List<CoverageIntervalEntity>
+
+    @Query("SELECT * FROM service_coverage_intervals WHERE start_ms < :toMs AND (end_ms IS NULL OR end_ms > :fromMs) ORDER BY start_ms, id")
+    suspend fun overlapping(fromMs: Long, toMs: Long): List<CoverageIntervalEntity>
 }
 
 @Dao
@@ -182,9 +230,15 @@ interface SettingsHistoryDao {
 
     @Query("SELECT * FROM settings_history ORDER BY timestamp_utc_ms, id")
     suspend fun all(): List<SettingsHistoryEntity>
+
+    @Query("SELECT * FROM settings_history WHERE setting_key = :key ORDER BY timestamp_utc_ms, id")
+    suspend fun byKey(key: String): List<SettingsHistoryEntity>
 }
 
-/** Writes for user-authored and derived tables. Phase 1 only needs these for schema tests; later phases extend it. */
+/** An existing self-report, read before a rebuild replaces the derived rows it lives on. */
+data class RatingRow(val episodeKey: String, val startMs: Long, val endMs: Long, val worthItRating: Int)
+
+/** Reads and writes for user-authored and derived tables. */
 @Dao
 interface DerivedDao {
     @Upsert
@@ -222,4 +276,87 @@ interface DerivedDao {
 
     @Upsert
     suspend fun upsertHourly(row: HourlyAppUsageEntity)
+
+    // -- Rebuilds ---------------------------------------------------------------------------------------------------
+
+    @Query("SELECT * FROM friction_events WHERE timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs ORDER BY timestamp_utc_ms, id")
+    suspend fun frictionBetween(fromMs: Long, toMs: Long): List<FrictionEventEntity>
+
+    @Query(
+        "SELECT episode_key AS episodeKey, start_ms AS startMs, end_ms AS endMs, worth_it_rating AS worthItRating FROM sessions " +
+            "WHERE start_ms >= :fromMs AND start_ms < :toMs AND worth_it_rating IS NOT NULL",
+    )
+    suspend fun ratingsStartingIn(fromMs: Long, toMs: Long): List<RatingRow>
+
+    /** Segments go with their sessions (ON DELETE CASCADE). */
+    @Query("DELETE FROM sessions WHERE start_ms >= :fromMs AND start_ms < :toMs")
+    suspend fun deleteSessionsStartingIn(fromMs: Long, toMs: Long): Int
+
+    @Insert
+    suspend fun insertSegments(rows: List<SessionSegmentEntity>)
+
+    @Query("DELETE FROM daily_app_rollups WHERE logical_date >= :fromDate AND logical_date <= :toDate")
+    suspend fun deleteAppRollups(fromDate: String, toDate: String)
+
+    @Query("DELETE FROM hourly_app_usage WHERE logical_date >= :fromDate AND logical_date <= :toDate")
+    suspend fun deleteHourly(fromDate: String, toDate: String)
+
+    @Insert
+    suspend fun insertAppRollups(rows: List<DailyAppRollupEntity>)
+
+    @Insert
+    suspend fun insertHourly(rows: List<HourlyAppUsageEntity>)
+
+    @Query("SELECT * FROM daily_rollups WHERE logical_date >= :fromDate AND logical_date <= :toDate ORDER BY logical_date")
+    suspend fun dailyRollupsBetween(fromDate: String, toDate: String): List<DailyRollupEntity>
+
+    @Query("SELECT * FROM daily_rollups WHERE logical_date = :date")
+    suspend fun dailyRollup(date: String): DailyRollupEntity?
+
+    @Query("UPDATE daily_rollups SET baseline_median_ms = :medianMs, day_status = :status WHERE logical_date = :date")
+    suspend fun updateBaseline(date: String, medianMs: Long?, status: String)
+
+    @Query("SELECT * FROM hourly_app_usage WHERE logical_date IN (:dates)")
+    suspend fun hourlyFor(dates: List<String>): List<HourlyAppUsageEntity>
+
+    // -- Today & inspector ------------------------------------------------------------------------------------------
+
+    @Query("SELECT * FROM daily_rollups WHERE logical_date = :date")
+    fun observeDailyRollup(date: String): Flow<DailyRollupEntity?>
+
+    @Query("SELECT * FROM sessions WHERE logical_date = :date ORDER BY start_ms")
+    fun observeSessions(date: String): Flow<List<SessionEntity>>
+
+    @Query(
+        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id WHERE s.logical_date = :date " +
+            "ORDER BY g.session_id, g.seq_index",
+    )
+    fun observeSegments(date: String): Flow<List<SessionSegmentEntity>>
+
+    @Query("SELECT * FROM sessions WHERE logical_date = :date ORDER BY start_ms")
+    suspend fun sessionsFor(date: String): List<SessionEntity>
+
+    @Query(
+        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id WHERE s.logical_date = :date " +
+            "ORDER BY g.session_id, g.seq_index",
+    )
+    suspend fun segmentsFor(date: String): List<SessionSegmentEntity>
+
+    @Query("SELECT * FROM sessions ORDER BY start_ms")
+    suspend fun allSessions(): List<SessionEntity>
+
+    @Query("UPDATE sessions SET worth_it_rating = :rating WHERE id = :sessionId")
+    suspend fun setRating(sessionId: Long, rating: Int?): Int
+
+    @Query("SELECT * FROM daily_notes WHERE logical_date = :date")
+    fun observeNote(date: String): Flow<DailyNoteEntity?>
+
+    @Query("DELETE FROM daily_notes WHERE logical_date = :date")
+    suspend fun deleteNote(date: String)
+
+    @Query("SELECT * FROM daily_app_rollups WHERE logical_date = :date ORDER BY total_ms DESC")
+    fun observeAppRollups(date: String): Flow<List<DailyAppRollupEntity>>
+
+    @Query("SELECT * FROM friction_events WHERE pkg_id = :pkgId AND timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs ORDER BY timestamp_utc_ms")
+    suspend fun frictionFor(pkgId: Long, fromMs: Long, toMs: Long): List<FrictionEventEntity>
 }

@@ -11,11 +11,14 @@ import com.celestiallemon.lagrange.backup.RestoreCoordinator
 import com.celestiallemon.lagrange.data.AndroidPackageMetaResolver
 import com.celestiallemon.lagrange.data.AppCatalogRepository
 import com.celestiallemon.lagrange.data.CoverageRepository
+import com.celestiallemon.lagrange.data.DerivedRepository
+import com.celestiallemon.lagrange.data.DerivedSettings
 import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.data.TimezoneTracker
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
+import com.celestiallemon.lagrange.harvest.HarvestResult
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import com.celestiallemon.lagrange.harvest.UsageStatsHarvester
 import com.celestiallemon.lagrange.notifications.NotificationRecorder
@@ -27,6 +30,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -85,6 +93,13 @@ class AppGraph(private val app: Application) {
 
     val timezoneTracker by lazy { TimezoneTracker(database) }
 
+    /** Sessions, segments and rollups, rebuilt from the raw ledger whenever something they depend on changes. */
+    val derived by lazy {
+        DerivedRepository(database, settings = { preferences.current().let { DerivedSettings(it.rolloverHour, it.dailyBudgetMs) } })
+    }
+
+    private val recomputeKicks = Channel<Unit>(Channel.CONFLATED)
+
     val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages, packageResolver) }
 
     val backups by lazy {
@@ -121,14 +136,94 @@ class AppGraph(private val app: Application) {
             } catch (e: Exception) {
                 Log.e(TAG, "startup housekeeping failed", e)
             }
+            startDerivedPipeline()
         }
+    }
+
+    /** Asks for a rebuild of whatever is marked dirty. Coalesced: bursts of requests run once. */
+    fun requestRecompute() {
+        recomputeKicks.trySend(Unit)
+    }
+
+    private suspend fun startDerivedPipeline() {
+        try {
+            derived.ensureAlgorithmVersion()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "derived version check failed", e)
+        }
+        applicationScope.launch(Dispatchers.IO) {
+            for (kick in recomputeKicks) {
+                delay(RECOMPUTE_DEBOUNCE_MS)
+                try {
+                    derived.runPending()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "derived recompute failed; it stays queued", e)
+                }
+            }
+        }
+        // A new rollover hour moves every day boundary, so every derived row is rebuilt.
+        applicationScope.launch {
+            preferences.prefs.map { it.rolloverHour }.distinctUntilChanged().drop(1).collect {
+                derived.markAllDirty()
+                requestRecompute()
+            }
+        }
+        // A new budget changes today's target (past days keep the budget that applied then).
+        applicationScope.launch {
+            preferences.prefs.map { it.dailyBudgetMs }.distinctUntilChanged().drop(1).collect {
+                derived.markDirty(System.currentTimeMillis() - DAY_MS)
+                requestRecompute()
+            }
+        }
+        // Recategorizing an app changes every total it ever contributed to. New apps showing up do not.
+        applicationScope.launch {
+            var previous: Map<Long, String>? = null
+            database.packageDao().observeAll().map { rows -> rows.associate { it.id to it.category } }.distinctUntilChanged().collect { now ->
+                val before = previous
+                previous = now
+                if (before != null && now.any { (id, cat) -> before[id] != null && before[id] != cat }) {
+                    derived.markAllDirty()
+                    requestRecompute()
+                }
+            }
+        }
+        if (derived.hasPending()) requestRecompute()
+    }
+
+    /**
+     * Harvests, then queues a rebuild of the stretch the new events touch. The window reaches back far enough to
+     * pick up episodes that were still open at the previous harvest and late notification metadata.
+     */
+    suspend fun harvestAndDerive(trigger: HarvestTrigger, recomputeInline: Boolean = false): HarvestResult {
+        val result = harvester.harvest(trigger)
+        if (result is HarvestResult.Success) {
+            val now = System.currentTimeMillis()
+            derived.markDirty(minOf(result.fromMs - DerivedRepository.LOOKBACK_MS, now - DIRTY_TRAIL_MS))
+            if (!recomputeInline) {
+                requestRecompute()
+            } else {
+                try {
+                    derived.runPending()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // The harvest itself succeeded; the range stays queued for the next run.
+                    Log.e(TAG, "inline derived recompute failed", e)
+                }
+            }
+        }
+        return result
     }
 
     fun harvestInBackground(trigger: HarvestTrigger) {
         applicationScope.launch {
             try {
                 awaitReady()
-                harvester.harvest(trigger)
+                harvestAndDerive(trigger)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -192,5 +287,9 @@ class AppGraph(private val app: Application) {
 
     private companion object {
         const val TAG = "Lagrange"
+        const val RECOMPUTE_DEBOUNCE_MS = 1_500L
+        const val DAY_MS = 24L * 60 * 60 * 1000
+        /** Every harvest also refreshes the last ~day so in-progress and late-closing episodes settle. */
+        const val DIRTY_TRAIL_MS = 28L * 60 * 60 * 1000
     }
 }
