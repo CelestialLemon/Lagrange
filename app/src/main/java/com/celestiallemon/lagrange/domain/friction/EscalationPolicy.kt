@@ -65,7 +65,13 @@ object EscalationPolicy {
         val showIntentionChips = tier >= 2
         val showBudgetComparison = tier >= 3
 
-        val validRedirect = redirectTarget?.takeIf { it.packageName != app.packageName }
+        val validRedirect = redirectTarget?.takeIf {
+            it.packageName != app.packageName &&
+                it.isInstalled &&
+                !it.isFrictionEligible &&
+                it.category != com.celestiallemon.lagrange.data.db.AppCategory.DISTRACTING &&
+                it.category != com.celestiallemon.lagrange.data.db.AppCategory.SELF_APP
+        }
 
         return LaunchDecision.ShowPause(
             LaunchPausePlan(

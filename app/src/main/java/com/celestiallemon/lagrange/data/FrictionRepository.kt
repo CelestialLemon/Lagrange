@@ -17,13 +17,12 @@ import com.celestiallemon.lagrange.domain.friction.FrictionSchedule
 import com.celestiallemon.lagrange.domain.friction.FrictionSettings
 import com.celestiallemon.lagrange.domain.friction.TodayUsageSnapshot
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 
@@ -38,9 +37,9 @@ sealed interface FrictionControlCommand {
 /**
  * Persistence and live state bridge for the Gentle Friction engine:
  * - CRUD for `friction_schedules` (with `settings_history` logging),
- * - transactional writes to `friction_events` + marking the logical day dirty for `SessionReconstructor`,
- * - real-time `TodayUsageSnapshot` combining materialized rollups with recent unharvested real opens,
- * - monotonic `FrictionRuntimeSnapshot` persistence and shared `liveStatus` for UI / Quick Settings tile.
+ * - FK-safe transactional writes to `friction_events` + marking the logical day dirty for `SessionReconstructor`,
+ * - real-time `TodayUsageSnapshot` using UTC day windows consistent with `DerivedRepository`,
+ * - serialized monotonic runtime state & live control dispatch with zero lost commands during bind/teardown.
  */
 class FrictionRepository(
     private val db: LagrangeDatabase,
@@ -53,11 +52,15 @@ class FrictionRepository(
     private val elapsedClock: () -> Long = android.os.SystemClock::elapsedRealtime,
     private val bootCountProvider: () -> Int = { 0 },
 ) {
+    private val runtimeMutex = Mutex()
+    /**
+     * Live service command sink. Returns `true` when the bound service applied the command to its engine, or
+     * `false` when it is not able to (e.g. tearing down), in which case the command falls back to offline persistence.
+     */
+    private var liveCommandHandler: (suspend (FrictionControlCommand) -> Boolean)? = null
+
     private val _liveStatus = MutableStateFlow(FrictionLiveStatus())
     val liveStatus: StateFlow<FrictionLiveStatus> = _liveStatus.asStateFlow()
-
-    private val _commands = MutableSharedFlow<FrictionControlCommand>(extraBufferCapacity = 8)
-    val commands: SharedFlow<FrictionControlCommand> = _commands.asSharedFlow()
 
     // -- Schedules CRUD -----------------------------------------------------------------------------------------------
 
@@ -109,16 +112,21 @@ class FrictionRepository(
     /**
      * Writes a friction event and marks the affected time range dirty in `ingestion_state` within the same
      * write transaction so Phase 2's `SessionReconstructor` scrubs blocked attempts cleanly.
+     *
+     * Resolves [FrictionEventRecord.scheduleId] inside the transaction so deleting a schedule while an overlay is
+     * open never trips the foreign-key constraint or drops the blocked-attempt record.
      */
     suspend fun recordEvent(record: FrictionEventRecord): Long {
         val id = db.withWriteTransaction {
-            val inserted = db.derivedDao().insertFrictionEvent(
+            val dao = db.derivedDao()
+            val validScheduleId = record.scheduleId?.takeIf { dao.scheduleById(it) != null }
+            val inserted = dao.insertFrictionEvent(
                 FrictionEventEntity(
                     timestampUtcMs = record.timestampUtcMs,
                     logicalDate = record.logicalDate,
                     pkgId = record.pkgId,
                     eventKind = record.eventKind,
-                    scheduleId = record.scheduleId,
+                    scheduleId = validScheduleId,
                     escalationTier = record.escalationTier,
                     pauseDurationSec = record.pauseDurationSec,
                     postCountdownReactionMs = record.postCountdownReactionMs,
@@ -148,6 +156,8 @@ class FrictionRepository(
             category = AppCategory.NEUTRAL,
             override = null,
             isSystemSurface = false,
+            categoryConfirmed = false,
+            isInstalled = true,
         )
     }
 
@@ -155,9 +165,8 @@ class FrictionRepository(
         db.packageDao().all().associate { it.packageName to it.toAppPolicy() }
 
     /**
-     * Computes today's real opens for [pkgId] (excluding blocked attempts) and today's distracting time.
-     * Combines materialized `daily_rollups` / `daily_app_rollups` with `CONTINUED` launch pauses logged after the
-     * last derived cutoff plus live unsynced distracting milliseconds so escalation is accurate within a session.
+     * Computes today's real opens for [pkgId] (excluding blocked attempts) and today's distracting time using the
+     * logical day's UTC window (consistent with [DerivedRepository] across rollover/timezone changes).
      */
     suspend fun todayUsageSnapshot(
         pkgId: Long,
@@ -165,15 +174,22 @@ class FrictionRepository(
         unsyncedDistractingMs: Long = 0L,
     ): TodayUsageSnapshot {
         val prefs = preferences.current()
-        val logicalDate = derived.dateOf(nowMs).toString()
+        val date = derived.dateOf(nowMs)
+        val logicalDate = date.toString()
+        val window = derived.windowOf(date)
         val dao = db.derivedDao()
         val dayRollup = dao.dailyRollup(logicalDate)
         val appRollup = dao.appRollup(logicalDate, pkgId)
         val derivedEndMs = db.ingestionStateDao().get(IngestionKeys.DERIVED_DATA_END_MS) ?: 0L
-        val recentContinued = dao.continuedLaunchPausesSince(logicalDate, pkgId, derivedEndMs)
+        val sinceMs = maxOf(window.startMs, derivedEndMs)
+        val recentContinued = if (sinceMs < window.endMs) {
+            dao.continuedLaunchPausesBetween(sinceMs, window.endMs, pkgId)
+        } else {
+            0
+        }
         val realOpensToday = (appRollup?.openCount ?: 0) + recentContinued
         val distractingMs = (dayRollup?.distractingMs ?: 0L) + unsyncedDistractingMs.coerceAtLeast(0L)
-        val promptsToday = dao.launchPauseCountOn(logicalDate)
+        val promptsToday = dao.launchPauseCountBetween(window.startMs, window.endMs)
         return TodayUsageSnapshot(
             logicalDate = logicalDate,
             appRealOpensToday = realOpensToday,
@@ -183,7 +199,7 @@ class FrictionRepository(
         )
     }
 
-    // -- Live status & monotonic runtime controls ---------------------------------------------------------------------
+    // -- Live status & serialized monotonic runtime controls ----------------------------------------------------------
 
     fun publishLiveStatus(status: FrictionLiveStatus) {
         _liveStatus.value = status
@@ -195,14 +211,34 @@ class FrictionRepository(
         preferences.saveFrictionRuntime(snapshot)
     }
 
+    /**
+     * Runs [restoreAndRegister] under [runtimeMutex], loading the persisted monotonic snapshot and registering
+     * the live service's command handler atomically so no UI command can ever be dropped or race restore.
+     */
+    suspend fun attachLiveService(
+        handler: suspend (FrictionControlCommand) -> Boolean,
+        restoreFromDisk: suspend (FrictionRuntimeSnapshot?) -> Unit,
+    ) = runtimeMutex.withLock {
+        val saved = preferences.loadFrictionRuntime()
+        restoreFromDisk(saved)
+        liveCommandHandler = handler
+    }
+
+    suspend fun detachLiveService(handler: suspend (FrictionControlCommand) -> Boolean) = runtimeMutex.withLock {
+        if (liveCommandHandler === handler) {
+            liveCommandHandler = null
+        }
+    }
+
     /** Hydrates [liveStatus] from persisted monotonic state (used at startup or when service isn't running). */
-    suspend fun refreshLiveStatusFromDisk() {
+    suspend fun refreshLiveStatusFromDisk() = runtimeMutex.withLock {
+        if (liveCommandHandler != null) return@withLock
         val boot = bootCountProvider()
         val nowElapsed = elapsedClock()
         val saved = preferences.loadFrictionRuntime()
         if (saved == null || saved.bootCount != boot || nowElapsed < saved.savedAtElapsedMs) {
             _liveStatus.value = FrictionLiveStatus()
-            return
+            return@withLock
         }
         val snooze = saved.snoozeUntilElapsedMs?.takeIf { it > nowElapsed }
         val boost = saved.focusBoostUntilElapsedMs?.takeIf { it > nowElapsed }
@@ -218,25 +254,30 @@ class FrictionRepository(
         )
     }
 
-    /** Activates 1-hour snooze from the UI / Quick Settings tile, persisting monotonically and notifying any live service. */
-    suspend fun activateSnooze1h(serviceConnected: Boolean) {
-        if (serviceConnected) {
-            _commands.emit(FrictionControlCommand.ActivateSnooze1h)
-            return
-        }
+    /** Activates 1-hour snooze, serialized across live service and offline disk persistence. */
+    suspend fun activateSnooze1h() = runtimeMutex.withLock {
+        if (liveCommandHandler?.invoke(FrictionControlCommand.ActivateSnooze1h) == true) return@withLock
         val nowWall = wallClock()
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val expiry = nowElapsed + FrictionSettings.SNOOZE_DURATION_MS
         val base = validSavedOrFresh(boot, nowElapsed)
+        val clearExpiredTimer = base.activeTimerRemainingMs != null && base.activeTimerRemainingMs <= 0L
         val updated = base.copy(
             bootCount = boot,
             savedAtElapsedMs = nowElapsed,
             snoozeUntilElapsedMs = expiry,
             focusBoostUntilElapsedMs = null,
+            activeTimerRemainingMs = if (clearExpiredTimer) null else base.activeTimerRemainingMs,
+            activeTimerInitialMin = if (clearExpiredTimer) null else base.activeTimerInitialMin,
         )
         preferences.saveFrictionRuntime(updated)
-        _liveStatus.value = _liveStatus.value.copy(snoozeUntilElapsedMs = expiry, focusBoostUntilElapsedMs = null)
+        _liveStatus.value = _liveStatus.value.copy(
+            snoozeUntilElapsedMs = expiry,
+            focusBoostUntilElapsedMs = null,
+            activeTimerRemainingMs = updated.activeTimerRemainingMs,
+            activeTimerInitialMin = updated.activeTimerInitialMin,
+        )
         val pkgId = interner.packageId(ownPackage)
         recordEvent(
             FrictionEventRecord(
@@ -256,11 +297,8 @@ class FrictionRepository(
         )
     }
 
-    suspend fun cancelSnooze(serviceConnected: Boolean) {
-        if (serviceConnected) {
-            _commands.emit(FrictionControlCommand.CancelSnooze)
-            return
-        }
+    suspend fun cancelSnooze() = runtimeMutex.withLock {
+        if (liveCommandHandler?.invoke(FrictionControlCommand.CancelSnooze) == true) return@withLock
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val base = validSavedOrFresh(boot, nowElapsed)
@@ -268,11 +306,8 @@ class FrictionRepository(
         _liveStatus.value = _liveStatus.value.copy(snoozeUntilElapsedMs = null)
     }
 
-    suspend fun activateFocusBoost1h(serviceConnected: Boolean) {
-        if (serviceConnected) {
-            _commands.emit(FrictionControlCommand.ActivateFocusBoost1h)
-            return
-        }
+    suspend fun activateFocusBoost1h() = runtimeMutex.withLock {
+        if (liveCommandHandler?.invoke(FrictionControlCommand.ActivateFocusBoost1h) == true) return@withLock
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val expiry = nowElapsed + FrictionSettings.FOCUS_BOOST_DURATION_MS
@@ -287,11 +322,8 @@ class FrictionRepository(
         _liveStatus.value = _liveStatus.value.copy(focusBoostUntilElapsedMs = expiry, snoozeUntilElapsedMs = null)
     }
 
-    suspend fun cancelFocusBoost(serviceConnected: Boolean) {
-        if (serviceConnected) {
-            _commands.emit(FrictionControlCommand.CancelFocusBoost)
-            return
-        }
+    suspend fun cancelFocusBoost() = runtimeMutex.withLock {
+        if (liveCommandHandler?.invoke(FrictionControlCommand.CancelFocusBoost) == true) return@withLock
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val base = validSavedOrFresh(boot, nowElapsed)
@@ -354,6 +386,8 @@ class FrictionRepository(
             category = runCatching { AppCategory.valueOf(category) }.getOrDefault(AppCategory.NEUTRAL),
             override = AppFrictionOverride.parse(frictionOverrideJson),
             isSystemSurface = isLauncherOrSystemUi,
+            categoryConfirmed = categoryConfirmed,
+            isInstalled = isInstalled,
         )
     }
 }

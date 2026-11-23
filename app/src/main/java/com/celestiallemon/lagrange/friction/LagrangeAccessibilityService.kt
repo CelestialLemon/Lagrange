@@ -1,15 +1,18 @@
 package com.celestiallemon.lagrange.friction
 
 import android.accessibilityservice.AccessibilityService
+import android.app.KeyguardManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.res.Configuration
+import android.os.PowerManager
 import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import androidx.room3.useReaderConnection
 import com.celestiallemon.lagrange.LagrangeApplication
 import com.celestiallemon.lagrange.StartupFailedException
 import com.celestiallemon.lagrange.data.FrictionControlCommand
@@ -21,10 +24,12 @@ import com.celestiallemon.lagrange.data.db.FrictionVocab
 import com.celestiallemon.lagrange.data.db.IntentionTag
 import com.celestiallemon.lagrange.data.db.ServiceKind
 import com.celestiallemon.lagrange.domain.LogicalDay
+import com.celestiallemon.lagrange.domain.friction.ActiveOverlay
 import com.celestiallemon.lagrange.domain.friction.FrictionAppPolicy
 import com.celestiallemon.lagrange.domain.friction.FrictionEffect
 import com.celestiallemon.lagrange.domain.friction.FrictionEngine
 import com.celestiallemon.lagrange.domain.friction.FrictionSchedule
+import com.celestiallemon.lagrange.domain.friction.RedirectLaunchResult
 import com.celestiallemon.lagrange.domain.friction.TodayUsageSnapshot
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import java.time.ZoneId
@@ -36,6 +41,9 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -62,19 +70,40 @@ class LagrangeAccessibilityService : AccessibilityService() {
 
     private var screenReceiverRegistered = false
     private var ready = false
+    private var coverageOpened = false
     private var currentPrefs: UserPrefs = UserPrefs()
     private var currentSchedules: List<FrictionSchedule> = emptyList()
     private var appPoliciesByPackage: Map<String, FrictionAppPolicy> = emptyMap()
 
-    // In-memory cache of today's materialized usage so launch-pause decisions never block the main thread.
+    // Live usage cache reconciled against DERIVED_DATA_END_MS so non-harvest derived recomputes never drop
+    // accrued live minutes and newer Main-thread opens are never overwritten by an older IO refresh.
     private var cachedLogicalDate: String = ""
+    private var cachedWindowStartMs: Long = Long.MIN_VALUE
+    private var cachedWindowEndMs: Long = Long.MAX_VALUE
+    private var cachedDerivedDataEndMs: Long = 0L
     private var cachedRollupDistractingMs: Long = 0L
-    private var cachedAppRealOpens: MutableMap<Long, Int> = HashMap()
-    private var cachedPromptsShownToday: Int = 0
-    private var sessionDistractingAtLastCacheRefreshMs: Long = 0L
+    private var cachedAppRollupOpens: Map<Long, Int> = emptyMap()
+    private var accruedAtLastDerivedAdvanceMs: Long = 0L
+    private val recentLiveOpens = ArrayList<TimestampedOpen>()
+    private val recentLivePrompts = ArrayList<Long>()
 
     private var observersJob: Job? = null
     private var tickerJob: Job? = null
+    private var unlockFallbackJob: Job? = null
+
+    /** True once [FrictionEngine.restore] ran for this connection; commands are applied from then on (before [ready]). */
+    private var engineRestored = false
+
+    private val liveCommandHandler: suspend (FrictionControlCommand) -> Boolean = { cmd ->
+        withContext(Dispatchers.Main.immediate) {
+            if (engineRestored) {
+                handleControlCommand(cmd)
+                true
+            } else {
+                false
+            }
+        }
+    }
 
     private val screenReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -82,24 +111,24 @@ class LagrangeAccessibilityService : AccessibilityService() {
             val nowElapsed = SystemClock.elapsedRealtime()
             when (intent.action) {
                 Intent.ACTION_SCREEN_OFF -> {
-                    val effects = engine.onScreenOff(nowWall, nowElapsed)
-                    applyEffects(effects)
-                    work.trySend { graph.coverage.heartbeat(ServiceKind.ACCESSIBILITY, nowWall) }
+                    if (ready) {
+                        val effects = engine.onScreenOff(nowWall, nowElapsed)
+                        applyEffects(effects)
+                        work.trySend { graph.coverage.heartbeat(ServiceKind.ACCESSIBILITY, nowWall) }
+                    } else if (::overlayController.isInitialized) {
+                        overlayController.dismiss()
+                    }
                     graph.harvestInBackground(HarvestTrigger.SCREEN_OFF)
                 }
+                Intent.ACTION_SCREEN_ON -> {
+                    // When the device has no lockscreen (Screen Lock = None), Android never sends ACTION_USER_PRESENT.
+                    val km = getSystemService(KeyguardManager::class.java)
+                    if (km == null || !km.isKeyguardLocked) {
+                        handleUnlock(nowWall, nowElapsed)
+                    }
+                }
                 Intent.ACTION_USER_PRESENT -> {
-                    if (!ready) return
-                    val effects = engine.onUserPresent(
-                        nowWallMs = nowWall,
-                        nowElapsedMs = nowElapsed,
-                        zone = ZoneId.systemDefault(),
-                        settings = currentPrefs.toFrictionSettings(),
-                        schedules = currentSchedules,
-                        resolveApp = ::resolvePolicyCached,
-                        loadUsage = { app -> buildUsageSnapshot(app, nowWall) },
-                        resolveRedirect = { pkg -> appPoliciesByPackage[pkg] },
-                    )
-                    applyEffects(effects)
+                    handleUnlock(nowWall, nowElapsed)
                 }
             }
         }
@@ -109,6 +138,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
         super.onCreate()
         classifier = AndroidWindowClassifier(this)
         engine = FrictionEngine(classifier)
+        val interactive = getSystemService(PowerManager::class.java)?.isInteractive ?: true
+        engine.setInitialScreenInteractive(interactive)
         overlayController = FrictionOverlayController(
             service = this,
             mainScope = mainScope,
@@ -139,10 +170,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
-        val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
         registerScreenReceiver()
-        work.trySend { graph.coverage.open(ServiceKind.ACCESSIBILITY, nowWall) }
         startObserversAndRestore(nowElapsed)
         startTicker()
     }
@@ -171,13 +200,19 @@ class LagrangeAccessibilityService : AccessibilityService() {
 
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
-        // Same-app activity recreation during rotation is automatically ignored by ForegroundAppStateMachine.
+        // Same-app activity recreation during rotation is ignored by ForegroundAppStateMachine.
     }
 
     override fun onInterrupt() {
-        val effects = engine.onServiceDisconnected(System.currentTimeMillis(), SystemClock.elapsedRealtime())
-        applyEffects(effects)
-        overlayController.dismiss()
+        unlockFallbackJob?.cancel()
+        unlockFallbackJob = null
+        if (ready && ::engine.isInitialized) {
+            val effects = engine.onServiceDisconnected(System.currentTimeMillis(), SystemClock.elapsedRealtime())
+            applyEffects(effects)
+        }
+        if (::overlayController.isInitialized) {
+            overlayController.dismiss()
+        }
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -193,20 +228,33 @@ class LagrangeAccessibilityService : AccessibilityService() {
     }
 
     private fun teardownConnection() {
+        // Persist disconnect state whenever this connection restored the engine (even if teardown beat `ready`).
+        val wasRestored = engineRestored
+        ready = false
+        engineRestored = false
+        _readyState.value = false
+        connected = false
+
         unregisterScreenReceiver()
+        unlockFallbackJob?.cancel()
+        unlockFallbackJob = null
         observersJob?.cancel()
         observersJob = null
         tickerJob?.cancel()
         tickerJob = null
-        if (::engine.isInitialized) {
+
+        if (wasRestored && ::engine.isInitialized) {
             val effects = engine.onServiceDisconnected(System.currentTimeMillis(), SystemClock.elapsedRealtime())
             applyEffects(effects)
         }
         if (::overlayController.isInitialized) {
             overlayController.dismiss()
         }
-        if (connected) {
-            connected = false
+        ioScope.launch {
+            runCatching { graph.friction.detachLiveService(liveCommandHandler) }
+        }
+        if (coverageOpened) {
+            coverageOpened = false
             val nowWall = System.currentTimeMillis()
             work.trySend { graph.coverage.close(ServiceKind.ACCESSIBILITY, nowWall) }
         }
@@ -221,21 +269,38 @@ class LagrangeAccessibilityService : AccessibilityService() {
                 return@launch
             }
 
-            // Initial snapshot load off main thread.
-            val (prefs, schedules, policies, savedRuntime) = withContext(Dispatchers.IO) {
+            // Load policies/settings and atomically restore persisted monotonic state + register command handler
+            // under FrictionRepository's runtime mutex so no UI command can ever be dropped during startup.
+            val (prefs, schedules, policies) = withContext(Dispatchers.IO) {
                 val p = graph.preferences.current()
                 val s = graph.friction.allSchedules()
                 val a = graph.friction.allAppPolicies()
-                val r = graph.friction.loadRuntimeSnapshot()
-                Quad(p, s, a, r)
+                Triple(p, s, a)
             }
             currentPrefs = prefs
             currentSchedules = schedules
             appPoliciesByPackage = policies
-            engine.restore(savedRuntime, currentBootCount(), connectedElapsedMs)
+
+            graph.friction.attachLiveService(
+                handler = liveCommandHandler,
+                restoreFromDisk = { saved ->
+                    withContext(Dispatchers.Main.immediate) {
+                        engine.restore(saved, currentBootCount(), connectedElapsedMs)
+                        engineRestored = true
+                    }
+                },
+            )
+
             refreshUsageCache()
-            publishStatus(connectedElapsedMs)
+
+            // Open ACCESSIBILITY coverage only once the engine is genuinely ready.
+            val nowWall = System.currentTimeMillis()
+            coverageOpened = true
+            work.trySend { graph.coverage.open(ServiceKind.ACCESSIBILITY, nowWall) }
+
             ready = true
+            _readyState.value = true
+            publishStatus(SystemClock.elapsedRealtime())
 
             launch {
                 graph.preferences.prefs.collect { p ->
@@ -257,11 +322,6 @@ class LagrangeAccessibilityService : AccessibilityService() {
             launch {
                 graph.database.ingestionStateDao().observe(IngestionKeys.DERIVED_LAST_RUN_AT_MS).collect {
                     refreshUsageCache()
-                }
-            }
-            launch {
-                graph.friction.commands.collect { cmd ->
-                    handleControlCommand(cmd)
                 }
             }
         }
@@ -297,57 +357,120 @@ class LagrangeAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun handleUnlock(nowWall: Long, nowElapsed: Long) {
+        if (!ready) return
+        val effects = engine.onUserPresent(
+            nowWallMs = nowWall,
+            nowElapsedMs = nowElapsed,
+            zone = ZoneId.systemDefault(),
+            settings = currentPrefs.toFrictionSettings(),
+            schedules = currentSchedules,
+            resolveApp = ::resolvePolicyCached,
+            loadUsage = { app -> buildUsageSnapshot(app, nowWall) },
+            resolveRedirect = { pkg -> appPoliciesByPackage[pkg] },
+        )
+        applyEffects(effects)
+    }
+
     private suspend fun refreshUsageCache() {
         val nowWall = System.currentTimeMillis()
         val snapshot = withContext(Dispatchers.IO) {
-            val logicalDate = graph.derived.dateOf(nowWall).toString()
-            val dao = graph.database.derivedDao()
-            val dayRollup = dao.dailyRollup(logicalDate)
-            val derivedEndMs = graph.database.ingestionStateDao().get(IngestionKeys.DERIVED_DATA_END_MS) ?: 0L
-            val allEventsToday = dao.frictionOn(logicalDate)
-            val opensMap = HashMap<Long, Int>()
-            for (row in dao.appRollupsOn(logicalDate)) {
-                if (row.openCount > 0) opensMap[row.pkgId] = row.openCount
+            val date = graph.derived.dateOf(nowWall)
+            val logicalDate = date.toString()
+            val window = graph.derived.windowOf(date)
+            // Read rollups, cutoff, and today's friction events in a single read transaction for snapshot consistency.
+            graph.database.useReaderConnection {
+                val dao = graph.database.derivedDao()
+                val dayRollup = dao.dailyRollup(logicalDate)
+                val derivedEndMs = graph.database.ingestionStateDao().get(IngestionKeys.DERIVED_DATA_END_MS) ?: 0L
+                val rollupOpens = dao.appRollupsOn(logicalDate)
+                    .filter { it.openCount > 0 }
+                    .associate { it.pkgId to it.openCount }
+                val eventsInWindow = dao.frictionBetween(window.startMs, window.endMs)
+                val continuedAfterDerived = eventsInWindow
+                    .filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE && it.outcome == FrictionVocab.OUTCOME_CONTINUED && it.timestampUtcMs >= derivedEndMs }
+                    .map { TimestampedOpen(it.pkgId, it.timestampUtcMs) }
+                val promptsInWindow = eventsInWindow
+                    .filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
+                    .map { it.timestampUtcMs }
+                UsageCacheSnapshot(
+                    logicalDate = logicalDate,
+                    windowStartMs = window.startMs,
+                    windowEndMs = window.endMs,
+                    derivedDataEndMs = derivedEndMs,
+                    rollupDistractingMs = dayRollup?.distractingMs ?: 0L,
+                    rollupOpensByPkg = rollupOpens,
+                    dbContinuedAfterDerived = continuedAfterDerived,
+                    dbPromptTimestamps = promptsInWindow,
+                )
             }
-            for (ev in allEventsToday) {
-                if (ev.eventKind == FrictionVocab.LAUNCH_PAUSE && ev.outcome == FrictionVocab.OUTCOME_CONTINUED &&
-                    ev.timestampUtcMs >= derivedEndMs
-                ) {
-                    opensMap[ev.pkgId] = (opensMap[ev.pkgId] ?: 0) + 1
-                }
-            }
-            val prompts = allEventsToday.count { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
-            UsageCache(logicalDate, dayRollup?.distractingMs ?: 0L, opensMap, prompts)
         }
-        cachedLogicalDate = snapshot.logicalDate
-        cachedRollupDistractingMs = snapshot.distractingMs
-        cachedAppRealOpens = snapshot.opensByPkg
-        cachedPromptsShownToday = snapshot.promptsShown
-        sessionDistractingAtLastCacheRefreshMs = engine.accumulatedSessionDistractingMs
+
+        val dayChanged = snapshot.logicalDate != cachedLogicalDate
+        val derivedAdvanced = snapshot.derivedDataEndMs > cachedDerivedDataEndMs
+        if (dayChanged) {
+            cachedLogicalDate = snapshot.logicalDate
+            recentLiveOpens.clear()
+            recentLivePrompts.clear()
+            accruedAtLastDerivedAdvanceMs = engine.totalAccruedDistractingMs
+        } else if (derivedAdvanced) {
+            // Only rebase live distracting time when DERIVED_DATA_END_MS actually moved forward with new harvest data,
+            // never on a non-harvest derived recompute triggered by logging a friction event!
+            accruedAtLastDerivedAdvanceMs = engine.totalAccruedDistractingMs
+        }
+
+        cachedWindowStartMs = snapshot.windowStartMs
+        cachedWindowEndMs = snapshot.windowEndMs
+        cachedDerivedDataEndMs = snapshot.derivedDataEndMs
+        cachedRollupDistractingMs = snapshot.rollupDistractingMs
+        cachedAppRollupOpens = snapshot.rollupOpensByPkg
+
+        // Reconcile timestamped opens/prompts: keep anything strictly newer than derivedDataEndMs, merging DB + local.
+        recentLiveOpens.removeAll { it.wallMs < snapshot.windowStartMs || it.wallMs < snapshot.derivedDataEndMs }
+        for (ev in snapshot.dbContinuedAfterDerived) {
+            if (recentLiveOpens.none { it.pkgId == ev.pkgId && kotlin.math.abs(it.wallMs - ev.wallMs) < 1_000L }) {
+                recentLiveOpens += ev
+            }
+        }
+        recentLivePrompts.removeAll { it < snapshot.windowStartMs }
+        for (ts in snapshot.dbPromptTimestamps) {
+            if (recentLivePrompts.none { kotlin.math.abs(it - ts) < 1_000L }) {
+                recentLivePrompts += ts
+            }
+        }
     }
 
     private fun buildUsageSnapshot(app: FrictionAppPolicy, nowWallMs: Long): TodayUsageSnapshot {
-        val logicalDate = LogicalDay.dateOf(nowWallMs, currentPrefs.rolloverHour, ZoneId.systemDefault()).toString()
-        if (logicalDate != cachedLogicalDate) {
-            cachedLogicalDate = logicalDate
-            cachedRollupDistractingMs = 0L
-            cachedAppRealOpens.clear()
-            cachedPromptsShownToday = 0
-            sessionDistractingAtLastCacheRefreshMs = engine.accumulatedSessionDistractingMs
+        val logicalDate = if (cachedLogicalDate.isNotEmpty() && nowWallMs in cachedWindowStartMs until cachedWindowEndMs) {
+            cachedLogicalDate
+        } else {
+            val fresh = LogicalDay.dateOf(nowWallMs, currentPrefs.rolloverHour, ZoneId.systemDefault()).toString()
+            if (fresh != cachedLogicalDate) {
+                cachedLogicalDate = fresh
+                cachedRollupDistractingMs = 0L
+                cachedAppRollupOpens = emptyMap()
+                recentLiveOpens.clear()
+                recentLivePrompts.clear()
+                accruedAtLastDerivedAdvanceMs = engine.totalAccruedDistractingMs
+                mainScope.launch { refreshUsageCache() }
+            }
+            fresh
         }
-        val unsyncedSessionDelta = (engine.accumulatedSessionDistractingMs - sessionDistractingAtLastCacheRefreshMs).coerceAtLeast(0L)
+
+        val unsyncedDistractingDelta = (engine.totalAccruedDistractingMs - accruedAtLastDerivedAdvanceMs).coerceAtLeast(0L)
+        val liveOpensForApp = recentLiveOpens.count { it.pkgId == app.pkgId && it.wallMs >= cachedDerivedDataEndMs }
         return TodayUsageSnapshot(
             logicalDate = logicalDate,
-            appRealOpensToday = cachedAppRealOpens[app.pkgId] ?: 0,
-            distractingMsToday = cachedRollupDistractingMs + unsyncedSessionDelta,
-            promptsShownToday = cachedPromptsShownToday,
+            appRealOpensToday = (cachedAppRollupOpens[app.pkgId] ?: 0) + liveOpensForApp,
+            distractingMsToday = cachedRollupDistractingMs + unsyncedDistractingDelta,
+            promptsShownToday = recentLivePrompts.size,
             budgetMs = currentPrefs.dailyBudgetMs,
         )
     }
 
     private fun resolvePolicyCached(packageName: String): FrictionAppPolicy {
         appPoliciesByPackage[packageName]?.let { return it }
-        // Unknown package not yet interned: intern asynchronously for future events, treat as non-distracting NEUTRAL now.
+        // Unknown package not yet interned: intern asynchronously for future events, treat as unconfirmed NEUTRAL now.
         work.trySend {
             val resolved = graph.friction.resolveAppPolicy(packageName)
             mainScope.launch {
@@ -361,13 +484,15 @@ class LagrangeAccessibilityService : AccessibilityService() {
             category = AppCategory.NEUTRAL,
             override = null,
             isSystemSurface = false,
+            categoryConfirmed = false,
+            isInstalled = true,
         )
     }
 
     private fun handleControlCommand(cmd: FrictionControlCommand) {
         val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
-        val logicalDate = LogicalDay.dateOf(nowWall, currentPrefs.rolloverHour, ZoneId.systemDefault()).toString()
+        val logicalDate = currentLogicalDate(nowWall)
         val effects = when (cmd) {
             FrictionControlCommand.ActivateSnooze1h -> {
                 val ownPkgId = appPoliciesByPackage[packageName]?.pkgId ?: 0L
@@ -381,19 +506,52 @@ class LagrangeAccessibilityService : AccessibilityService() {
     }
 
     private fun applyEffects(effects: List<FrictionEffect>) {
+        val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
         for (effect in effects) {
             when (effect) {
-                is FrictionEffect.ShowOverlay -> overlayController.show(effect.overlay)
+                is FrictionEffect.ShowOverlay -> {
+                    val shown = overlayController.show(effect.overlay)
+                    if (!shown) {
+                        val recovery = engine.onOverlayAttachFailed(nowWall, nowElapsed)
+                        applyEffects(recovery)
+                        return
+                    }
+                }
                 FrictionEffect.DismissOverlay -> overlayController.dismiss()
-                FrictionEffect.PerformGoHome -> performGoHomeSafely()
-                is FrictionEffect.LaunchRedirect -> launchRedirectSafely(effect.packageName)
+                is FrictionEffect.ScheduleUnlockFallback -> {
+                    unlockFallbackJob?.cancel()
+                    unlockFallbackJob = mainScope.launch {
+                        delay(effect.delayMs)
+                        if (!ready) return@launch
+                        val w = System.currentTimeMillis()
+                        val e = SystemClock.elapsedRealtime()
+                        val fallbackEffects = engine.onUnlockFallbackTimeout(
+                            nowWallMs = w,
+                            nowElapsedMs = e,
+                            zone = ZoneId.systemDefault(),
+                            settings = currentPrefs.toFrictionSettings(),
+                            schedules = currentSchedules,
+                            resolveApp = ::resolvePolicyCached,
+                            loadUsage = { app -> buildUsageSnapshot(app, w) },
+                            resolveRedirect = { pkg -> appPoliciesByPackage[pkg] },
+                        )
+                        applyEffects(fallbackEffects)
+                    }
+                }
+                FrictionEffect.CancelUnlockFallback -> {
+                    unlockFallbackJob?.cancel()
+                    unlockFallbackJob = null
+                }
+                is FrictionEffect.RecordUnpromptedOpen -> {
+                    recentLiveOpens += TimestampedOpen(effect.pkgId, effect.wallMs)
+                }
                 is FrictionEffect.LogEvent -> {
                     val rec = effect.record
                     if (rec.eventKind == FrictionVocab.LAUNCH_PAUSE) {
-                        cachedPromptsShownToday += 1
+                        recentLivePrompts += rec.timestampUtcMs
                         if (rec.outcome == FrictionVocab.OUTCOME_CONTINUED && rec.pkgId > 0L) {
-                            cachedAppRealOpens[rec.pkgId] = (cachedAppRealOpens[rec.pkgId] ?: 0) + 1
+                            recentLiveOpens += TimestampedOpen(rec.pkgId, rec.timestampUtcMs)
                         }
                     }
                     work.trySend {
@@ -409,34 +567,41 @@ class LagrangeAccessibilityService : AccessibilityService() {
         publishStatus(nowElapsed)
     }
 
-    private fun performGoHomeSafely() {
+    private fun performGoHomeSafely(): Boolean {
         val ok = runCatching { performGlobalAction(GLOBAL_ACTION_HOME) }.getOrDefault(false)
-        if (!ok) {
-            Log.w(TAG, "GLOBAL_ACTION_HOME returned false; falling back to HOME intent")
-            runCatching {
-                startActivity(
-                    Intent(Intent.ACTION_MAIN)
-                        .addCategory(Intent.CATEGORY_HOME)
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-                )
-            }.onFailure { Log.w(TAG, "HOME intent fallback failed", it) }
-        }
+        if (ok) return true
+        Log.w(TAG, "GLOBAL_ACTION_HOME returned false; falling back to HOME intent")
+        return runCatching {
+            startActivity(
+                Intent(Intent.ACTION_MAIN)
+                    .addCategory(Intent.CATEGORY_HOME)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            true
+        }.onFailure { Log.w(TAG, "HOME intent fallback failed", it) }.getOrDefault(false)
     }
 
-    private fun launchRedirectSafely(targetPackage: String) {
+    private fun launchRedirectSafely(targetPackage: String): RedirectLaunchResult {
         val launch = packageManager.getLaunchIntentForPackage(targetPackage)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (launch != null) {
-            runCatching { startActivity(launch) }
-                .onFailure {
-                    Log.w(TAG, "redirect launch failed for $targetPackage; going home", it)
-                    performGoHomeSafely()
-                }
+            val launched = runCatching {
+                startActivity(launch)
+                true
+            }.onFailure { Log.w(TAG, "redirect launch failed for $targetPackage; falling back to home", it) }.getOrDefault(false)
+            if (launched) return RedirectLaunchResult.LAUNCHED_REDIRECT
         } else {
-            Log.w(TAG, "no launch intent for redirect app $targetPackage; going home")
-            performGoHomeSafely()
+            Log.w(TAG, "no launch intent for redirect app $targetPackage; falling back to home")
         }
+        return if (performGoHomeSafely()) RedirectLaunchResult.FELL_BACK_HOME else RedirectLaunchResult.FAILED
     }
+
+    private fun currentLogicalDate(nowWallMs: Long): String =
+        if (cachedLogicalDate.isNotEmpty() && nowWallMs in cachedWindowStartMs until cachedWindowEndMs) {
+            cachedLogicalDate
+        } else {
+            LogicalDay.dateOf(nowWallMs, currentPrefs.rolloverHour, ZoneId.systemDefault()).toString()
+        }
 
     private fun publishStatus(nowElapsedMs: Long) {
         if (ready) {
@@ -456,11 +621,17 @@ class LagrangeAccessibilityService : AccessibilityService() {
         }
 
         override fun onPauseGoHome() {
-            applyEffects(engine.onPauseGoHome(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+            // Navigate BEFORE dismissing overlay/audio focus so media doesn't bleed through and failures aren't mislogged.
+            val navigated = performGoHomeSafely()
+            applyEffects(engine.onPauseGoHome(System.currentTimeMillis(), SystemClock.elapsedRealtime(), navigatedHome = navigated))
         }
 
         override fun onPauseRedirect() {
-            applyEffects(engine.onPauseRedirect(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+            val target = (engine.activeOverlay as? ActiveOverlay.LaunchPause)?.plan?.redirectPackageName
+            val result = if (target != null) launchRedirectSafely(target) else {
+                if (performGoHomeSafely()) RedirectLaunchResult.FELL_BACK_HOME else RedirectLaunchResult.FAILED
+            }
+            applyEffects(engine.onPauseRedirect(System.currentTimeMillis(), SystemClock.elapsedRealtime(), result))
         }
 
         override fun onPauseContinue() {
@@ -470,21 +641,23 @@ class LagrangeAccessibilityService : AccessibilityService() {
         override fun onPauseSnooze1h() {
             val nowWall = System.currentTimeMillis()
             val nowElapsed = SystemClock.elapsedRealtime()
-            val logicalDate = LogicalDay.dateOf(nowWall, currentPrefs.rolloverHour, ZoneId.systemDefault()).toString()
             val ownPkgId = appPoliciesByPackage[packageName]?.pkgId ?: 0L
-            applyEffects(engine.activateSnooze1h(nowWall, nowElapsed, logicalDate, ownPkgId))
+            applyEffects(engine.activateSnooze1h(nowWall, nowElapsed, currentLogicalDate(nowWall), ownPkgId))
         }
 
         override fun onPauseBackPressed() {
-            applyEffects(engine.onPauseBackPressed(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+            val navigated = performGoHomeSafely()
+            applyEffects(engine.onPauseBackPressed(System.currentTimeMillis(), SystemClock.elapsedRealtime(), navigatedHome = navigated))
         }
 
         override fun onTimerGoHome() {
-            applyEffects(engine.onTimerGoHome(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+            val navigated = performGoHomeSafely()
+            applyEffects(engine.onTimerGoHome(System.currentTimeMillis(), SystemClock.elapsedRealtime(), navigatedHome = navigated))
         }
 
         override fun onTimerBackPressed() {
-            applyEffects(engine.onTimerBackPressed(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+            val navigated = performGoHomeSafely()
+            applyEffects(engine.onTimerBackPressed(System.currentTimeMillis(), SystemClock.elapsedRealtime(), navigatedHome = navigated))
         }
 
         override fun onTimerExtend5m() {
@@ -498,12 +671,18 @@ class LagrangeAccessibilityService : AccessibilityService() {
         override fun onNudgeDismissed(userTapped: Boolean) {
             applyEffects(engine.onNudgeDismissed(userTapped))
         }
+
+        override fun onOverlayUnexpectedlyDetached() {
+            if (!ready) return
+            applyEffects(engine.onOverlayAttachFailed(System.currentTimeMillis(), SystemClock.elapsedRealtime()))
+        }
     }
 
     private fun registerScreenReceiver() {
         if (screenReceiverRegistered) return
         val filter = IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_OFF)
+            addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         }
         registerReceiver(screenReceiver, filter, RECEIVER_NOT_EXPORTED)
@@ -519,13 +698,17 @@ class LagrangeAccessibilityService : AccessibilityService() {
     private fun currentBootCount(): Int =
         runCatching { Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT, 0) }.getOrDefault(0)
 
-    private data class Quad<A, B, C, D>(val a: A, val b: B, val c: C, val d: D)
+    private data class TimestampedOpen(val pkgId: Long, val wallMs: Long)
 
-    private data class UsageCache(
+    private data class UsageCacheSnapshot(
         val logicalDate: String,
-        val distractingMs: Long,
-        val opensByPkg: MutableMap<Long, Int>,
-        val promptsShown: Int,
+        val windowStartMs: Long,
+        val windowEndMs: Long,
+        val derivedDataEndMs: Long,
+        val rollupDistractingMs: Long,
+        val rollupOpensByPkg: Map<Long, Int>,
+        val dbContinuedAfterDerived: List<TimestampedOpen>,
+        val dbPromptTimestamps: List<Long>,
     )
 
     companion object {
@@ -533,9 +716,14 @@ class LagrangeAccessibilityService : AccessibilityService() {
         private const val TICK_INTERVAL_MS = 1_000L
         private const val HEARTBEAT_INTERVAL_MS = 15 * 60_000L
 
-        /** True while Android has this AccessibilityService bound and connected in this process. */
+        /** True while Android has this AccessibilityService bound in this process. */
         @Volatile
         var connected: Boolean = false
             private set
+
+        private val _readyState = MutableStateFlow(false)
+
+        /** True only once the service is bound, startup recovery passed, runtime state restored, and commands wired. */
+        val readyState: StateFlow<Boolean> = _readyState.asStateFlow()
     }
 }

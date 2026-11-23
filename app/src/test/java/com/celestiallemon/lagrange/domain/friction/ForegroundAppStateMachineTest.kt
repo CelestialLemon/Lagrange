@@ -10,6 +10,7 @@ class ForegroundAppStateMachineTest {
         "com.reddit.frontpage" to "com.reddit.launch.main.MainActivity",
         "com.reddit.frontpage" to "com.reddit.detail.DetailActivity",
         "com.google.android.youtube" to "com.google.android.youtube.HomeActivity",
+        "com.google.android.gm" to "com.google.android.gm.ConversationListActivity",
         "com.android.chrome" to "com.google.android.apps.chrome.Main",
         "com.celestiallemon.lagrange" to "com.celestiallemon.lagrange.MainActivity",
         "com.google.android.apps.nexuslauncher" to "com.google.android.apps.nexuslauncher.NexusLauncherActivity",
@@ -29,33 +30,27 @@ class ForegroundAppStateMachineTest {
     fun `ignores IME, SystemUI, dialogs, toasts, and own overlay windows`() {
         val sm = ForegroundAppStateMachine(classifier)
 
-        // Enter Reddit.
         val enter = sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 1_000)
         assertEquals(ForegroundTransition.AppEntered("com.reddit.frontpage", null), enter)
 
-        // Keyboard opens -> ignored, Reddit stays foreground.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.IME),
             sm.onWindowStateChanged("com.google.android.inputmethod.latin", "com.android.inputmethod.latin.LatinIME", 2_000),
         )
-        // Notification shade / volume panel -> ignored.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.SYSTEM_UI),
             sm.onWindowStateChanged("com.android.systemui", "android.widget.FrameLayout", 3_000),
         )
-        // Dialog / toast / non-Activity pane -> ignored.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.NON_ACTIVITY),
             sm.onWindowStateChanged("com.reddit.frontpage", "android.app.AlertDialog", 4_000),
         )
-        // Own TYPE_ACCESSIBILITY_OVERLAY window -> ignored (never triggers a loop).
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.OWN_NON_ACTIVITY),
             sm.onWindowStateChanged("com.celestiallemon.lagrange", "android.widget.FrameLayout", 5_000),
         )
         assertEquals("com.reddit.frontpage", sm.currentPackage)
 
-        // Returning focus to Reddit after shade closes -> same app, no re-trigger.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.SAME_APP),
             sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 6_000),
@@ -66,12 +61,10 @@ class ForegroundAppStateMachineTest {
     fun `rotation and in-app activity navigation never re-trigger launch pause`() {
         val sm = ForegroundAppStateMachine(classifier)
         sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 1_000)
-        // Screen rotation recreates MainActivity.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.SAME_APP),
             sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 2_000),
         )
-        // Navigating to DetailActivity inside Reddit stays same app.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.SAME_APP),
             sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.detail.DetailActivity", 3_000),
@@ -79,14 +72,13 @@ class ForegroundAppStateMachineTest {
     }
 
     @Test
-    fun `debounces brief launcher bounce unless last exit was blocked`() {
+    fun `emits BounceResumed on brief launcher bounce unless last exit was blocked`() {
         val sm = ForegroundAppStateMachine(classifier, ForegroundConfig(briefBounceDebounceMs = 1_500L))
         sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 1_000)
 
-        // Brief accidental swipe to launcher and back within 800ms -> debounced.
         assertTrue(sm.onWindowStateChanged("com.google.android.apps.nexuslauncher", "com.google.android.apps.nexuslauncher.NexusLauncherActivity", 10_000) is ForegroundTransition.LeftToHome)
         assertEquals(
-            ForegroundTransition.Ignored(IgnoreReason.TRANSIENT_BOUNCE),
+            ForegroundTransition.BounceResumed("com.reddit.frontpage"),
             sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 10_800),
         )
 
@@ -97,7 +89,7 @@ class ForegroundAppStateMachineTest {
             sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 22_000),
         )
 
-        // When user chose Go Home on a launch pause (blocked), immediate reopen within 500ms MUST trigger!
+        // Blocked exit -> immediate reopen within 500ms MUST trigger AppEntered, never BounceResumed!
         sm.markLastExitBlocked()
         sm.onWindowStateChanged("com.google.android.apps.nexuslauncher", "com.google.android.apps.nexuslauncher.NexusLauncherActivity", 22_100)
         assertEquals(
@@ -107,32 +99,52 @@ class ForegroundAppStateMachineTest {
     }
 
     @Test
-    fun `micro-lock continues seamlessly while long lock unlocks into fresh app entry`() {
+    fun `micro-lock reconciles post-wake app changes and long lock avoids phantom pauses on notification taps`() {
         val sm = ForegroundAppStateMachine(classifier)
         sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 1_000)
 
-        // Micro-lock: 5s screen off -> resumes Reddit seamlessly without re-triggering pause.
+        // Micro-lock with same app -> MicroLockResumed.
         sm.onScreenOff(10_000)
-        assertEquals(
-            ForegroundTransition.Ignored(IgnoreReason.SCREEN_OFF),
-            sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 12_000),
-        )
         assertEquals(ForegroundTransition.MicroLockResumed("com.reddit.frontpage"), sm.onUserPresent(15_000))
-        assertEquals(
-            ForegroundTransition.Ignored(IgnoreReason.SAME_APP),
-            sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 15_100),
-        )
 
-        // Real screen off: 30s -> unlocking straight into Reddit fires AppEntered(fromUnlock = true).
+        // Micro-lock where a lockscreen notification launches Gmail before USER_PRESENT -> enters Gmail instead of Reddit!
         sm.onScreenOff(20_000)
         assertEquals(
-            ForegroundTransition.AppEntered("com.reddit.frontpage", null, fromUnlock = true),
-            sm.onUserPresent(50_000),
+            ForegroundTransition.Ignored(IgnoreReason.SCREEN_OFF),
+            sm.onWindowStateChanged("com.google.android.gm", "com.google.android.gm.ConversationListActivity", 24_000),
         )
-        // Follow-up window event from Android right after unlock is ignored as SAME_APP.
+        assertEquals(
+            ForegroundTransition.AppEntered("com.google.android.gm", "com.reddit.frontpage", fromUnlock = false),
+            sm.onUserPresent(25_000),
+        )
+
+        // Long lock (>=15s) from Reddit, user unlocks by tapping a Gmail notification arriving right AFTER USER_PRESENT:
+        // must NOT fire a phantom Reddit entry!
+        sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 30_000)
+        sm.onScreenOff(35_000)
+        assertEquals(
+            ForegroundTransition.UnlockAwaitingApp("com.reddit.frontpage"),
+            sm.onUserPresent(65_000),
+        )
+        assertEquals(
+            ForegroundTransition.AppEntered("com.google.android.gm", null, fromUnlock = true),
+            sm.onWindowStateChanged("com.google.android.gm", "com.google.android.gm.ConversationListActivity", 65_080),
+        )
+        // Fallback timeout after Gmail already arrived is a no-op.
+        assertEquals(ForegroundTransition.Ignored(IgnoreReason.EMPTY), sm.onUnlockFallbackTimeout())
+
+        // Long lock (>=15s) unlocking directly into already-resumed Reddit without a window event -> fallback triggers!
+        sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 70_000)
+        sm.onScreenOff(75_000)
+        assertEquals(ForegroundTransition.UnlockAwaitingApp("com.reddit.frontpage"), sm.onUserPresent(105_000))
+        assertEquals(
+            ForegroundTransition.AppEntered("com.reddit.frontpage", null, fromUnlock = true),
+            sm.onUnlockFallbackTimeout(),
+        )
+        // Duplicate window event right after fallback is ignored as SAME_APP.
         assertEquals(
             ForegroundTransition.Ignored(IgnoreReason.SAME_APP),
-            sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 50_050),
+            sm.onWindowStateChanged("com.reddit.frontpage", "com.reddit.launch.main.MainActivity", 105_400),
         )
     }
 

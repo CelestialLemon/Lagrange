@@ -5,7 +5,7 @@ package com.celestiallemon.lagrange.domain.friction
  */
 interface WindowClassifier {
     val ownPackage: String
-    /** True when `ComponentName(packageName, className)` resolves to a real Android Activity. */
+    /** True when `ComponentName.createRelative(packageName, className)` resolves to a real Android Activity. */
     fun isActivity(packageName: String, className: String): Boolean
     /** True when [packageName] is an enabled/active input method (keyboard). */
     fun isImePackage(packageName: String): Boolean
@@ -22,6 +22,8 @@ data class ForegroundConfig(
     val briefBounceDebounceMs: Long = 1_500L,
     /** Screen-off gaps shorter than this merge into the same session (matches ReconstructionRules.microLockMergeMs). */
     val microLockMergeMs: Long = FrictionSettings.MICRO_LOCK_MERGE_MS,
+    /** Wait briefly after unlock for Android's real top-activity event before falling back to the pre-lock app. */
+    val unlockConfirmDelayMs: Long = 350L,
 )
 
 enum class IgnoreReason {
@@ -32,17 +34,20 @@ enum class IgnoreReason {
     SYSTEM_UI,
     NON_ACTIVITY,
     SAME_APP,
-    TRANSIENT_BOUNCE,
 }
 
 sealed interface ForegroundTransition {
     data class Ignored(val reason: IgnoreReason) : ForegroundTransition
     data class AppEntered(val packageName: String, val previousPackage: String?, val fromUnlock: Boolean = false) : ForegroundTransition
+    /** Brief accidental bounce through Launcher (<1.5s) back into the same already-active app: resume tracking without prompting. */
+    data class BounceResumed(val packageName: String) : ForegroundTransition
     data class SelfAppEntered(val previousPackage: String?) : ForegroundTransition
     data class LeftToHome(val previousPackage: String?) : ForegroundTransition
     data class CallInterrupted(val packageName: String, val previousPackage: String?) : ForegroundTransition
     data class ScreenOff(val previousPackage: String?) : ForegroundTransition
     data class MicroLockResumed(val packageName: String?) : ForegroundTransition
+    /** Screen unlocked after >=15s without a verified post-wake app event yet; host may wait [unlockConfirmDelayMs] before fallback. */
+    data class UnlockAwaitingApp(val fallbackPackage: String?) : ForegroundTransition
 }
 
 /**
@@ -51,7 +56,7 @@ sealed interface ForegroundTransition {
  */
 class ForegroundAppStateMachine(
     private val classifier: WindowClassifier,
-    private val config: ForegroundConfig = ForegroundConfig(),
+    val config: ForegroundConfig = ForegroundConfig(),
 ) {
     var currentPackage: String? = null
         private set
@@ -61,18 +66,29 @@ class ForegroundAppStateMachine(
 
     private var appBeforeScreenOff: String? = null
     private var screenOffAtElapsedMs: Long? = null
+    /** Real non-SystemUI activity observed while screen was waking/locked (e.g., camera shortcut or lockscreen notification). */
+    private var postWakeObservedApp: String? = null
+    private var postWakeObservedLauncher: Boolean = false
+    /** Fallback candidate after a >=15s unlock when Android does not emit a fresh window event for an already-resumed app. */
+    private var pendingUnlockFallbackApp: String? = null
+
     private var lastRealAppBeforeHome: String? = null
     private var leftRealAppAtElapsedMs: Long? = null
     private var lastAppWasBlocked: Boolean = false
 
+    fun setInitialScreenInteractive(interactive: Boolean) {
+        isScreenInteractive = interactive
+    }
+
     /**
-     * Marks that the current app was exited via a launch-pause block (`CLOSED_GO_HOME`, `CLOSED_SYSTEM_NAV`,
-     * `REDIRECTED`), so immediately reopening the same app will never be debounced as an accidental bounce.
+     * Marks that the current app was exited via an unresolved launch pause or timer expiry (`CLOSED_GO_HOME`,
+     * `CLOSED_SYSTEM_NAV`, `REDIRECTED`), so neither a `<1.5s` Home bounce nor a `<15s` micro-lock can bypass it.
      */
     fun markLastExitBlocked() {
         lastAppWasBlocked = true
         lastRealAppBeforeHome = null
         leftRealAppAtElapsedMs = null
+        pendingUnlockFallbackApp = null
         currentPackage = null
     }
 
@@ -84,10 +100,27 @@ class ForegroundAppStateMachine(
         val pkg = packageName?.trim().orEmpty()
         val cls = className?.trim().orEmpty()
         if (pkg.isEmpty() || cls.isEmpty()) return ForegroundTransition.Ignored(IgnoreReason.EMPTY)
-        if (!isScreenInteractive) return ForegroundTransition.Ignored(IgnoreReason.SCREEN_OFF)
+
+        // While screen is non-interactive / on lockscreen, never fire overlays yet, but DO record verified
+        // post-wake activities (e.g., lockscreen notification launch or camera shortcut) so unlock reconciles accurately.
+        if (!isScreenInteractive) {
+            if (!classifier.isImePackage(pkg) && !classifier.isSystemUiPackage(pkg)) {
+                if (classifier.isCallOrDialerPackage(pkg) || classifier.isActivity(pkg, cls)) {
+                    if (classifier.isLauncherPackage(pkg)) {
+                        postWakeObservedApp = null
+                        postWakeObservedLauncher = true
+                    } else {
+                        postWakeObservedApp = pkg
+                        postWakeObservedLauncher = false
+                    }
+                }
+            }
+            return ForegroundTransition.Ignored(IgnoreReason.SCREEN_OFF)
+        }
 
         // Incoming calls / dialer take immediate priority so overlays never block answering a call.
         if (classifier.isCallOrDialerPackage(pkg)) {
+            pendingUnlockFallbackApp = null
             if (pkg == currentPackage) return ForegroundTransition.Ignored(IgnoreReason.SAME_APP)
             val prev = currentPackage
             currentPackage = pkg
@@ -106,6 +139,10 @@ class ForegroundAppStateMachine(
             val reason = if (pkg == classifier.ownPackage) IgnoreReason.OWN_NON_ACTIVITY else IgnoreReason.NON_ACTIVITY
             return ForegroundTransition.Ignored(reason)
         }
+
+        // Any verified post-unlock Activity resolves unlock ambiguity immediately.
+        val fromUnlock = pendingUnlockFallbackApp != null
+        pendingUnlockFallbackApp = null
 
         // Own package Activity (e.g. MainActivity): never triggers friction, clears overlays and pauses distracting timer.
         if (pkg == classifier.ownPackage) {
@@ -137,7 +174,8 @@ class ForegroundAppStateMachine(
             return ForegroundTransition.Ignored(IgnoreReason.SAME_APP)
         }
 
-        // Debounce a very brief launcher/recents bounce right back into the same already-active app.
+        // Debounce a very brief launcher/recents bounce right back into the same already-active app:
+        // emit BounceResumed (not Ignored!) so the engine restores currentAppPolicy and resumes timers/nudges!
         val bouncedFrom = lastRealAppBeforeHome
         val leftAt = leftRealAppAtElapsedMs
         if (!lastAppWasBlocked && currentPackage == null && bouncedFrom == pkg && leftAt != null &&
@@ -146,7 +184,7 @@ class ForegroundAppStateMachine(
             currentPackage = pkg
             lastRealAppBeforeHome = null
             leftRealAppAtElapsedMs = null
-            return ForegroundTransition.Ignored(IgnoreReason.TRANSIENT_BOUNCE)
+            return ForegroundTransition.BounceResumed(pkg)
         }
 
         val prev = currentPackage
@@ -154,43 +192,101 @@ class ForegroundAppStateMachine(
         lastRealAppBeforeHome = null
         leftRealAppAtElapsedMs = null
         lastAppWasBlocked = false
-        return ForegroundTransition.AppEntered(pkg, prev, fromUnlock = false)
+        return ForegroundTransition.AppEntered(pkg, prev, fromUnlock = fromUnlock)
     }
 
     fun onScreenOff(elapsedMs: Long): ForegroundTransition {
         val prev = currentPackage
         isScreenInteractive = false
         screenOffAtElapsedMs = elapsedMs
+        // If currentPackage was cleared via markLastExitBlocked(), appBeforeScreenOff stays null so a <15s
+        // micro-lock cannot bypass an unresolved pause.
         appBeforeScreenOff = prev
+        postWakeObservedApp = null
+        postWakeObservedLauncher = false
+        pendingUnlockFallbackApp = null
         lastRealAppBeforeHome = null
         leftRealAppAtElapsedMs = null
         return ForegroundTransition.ScreenOff(prev)
     }
 
     fun onUserPresent(elapsedMs: Long): ForegroundTransition {
+        if (isScreenInteractive && screenOffAtElapsedMs == null) {
+            return ForegroundTransition.Ignored(IgnoreReason.EMPTY)
+        }
         val offAt = screenOffAtElapsedMs
         val prevApp = appBeforeScreenOff
+        val observedApp = postWakeObservedApp
+        val observedLauncher = postWakeObservedLauncher
         isScreenInteractive = true
         screenOffAtElapsedMs = null
         appBeforeScreenOff = null
+        postWakeObservedApp = null
+        postWakeObservedLauncher = false
 
         val offDuration = if (offAt != null) (elapsedMs - offAt).coerceAtLeast(0L) else Long.MAX_VALUE
         if (offDuration < config.microLockMergeMs) {
-            // Brief micro-lock: continue seamlessly in the same app without re-triggering a launch pause.
+            // If a different app (e.g. lockscreen camera or notification target) opened before USER_PRESENT,
+            // transition to that app instead of resuming the stale pre-lock app.
+            if (observedLauncher) {
+                currentPackage = null
+                return ForegroundTransition.LeftToHome(prevApp)
+            }
+            if (observedApp != null && observedApp != prevApp) {
+                return resolveObservedAppOnUnlock(observedApp, prevApp, fromUnlock = false)
+            }
             currentPackage = prevApp
             return ForegroundTransition.MicroLockResumed(prevApp)
         }
 
-        // Genuine unlock after a real screen-off: if unlocking directly into a non-home, non-self, non-call app,
-        // fire an unlock entry right away (and set currentPackage so a duplicate window event right after is ignored).
+        // Genuine unlock after >=15s screen-off.
         currentPackage = null
         lastAppWasBlocked = false
-        if (prevApp != null && prevApp != classifier.ownPackage && !classifier.isLauncherPackage(prevApp) &&
-            !classifier.isSystemUiPackage(prevApp) && !classifier.isCallOrDialerPackage(prevApp)
-        ) {
-            currentPackage = prevApp
-            return ForegroundTransition.AppEntered(prevApp, previousPackage = null, fromUnlock = true)
+        if (observedLauncher) {
+            pendingUnlockFallbackApp = null
+            return ForegroundTransition.Ignored(IgnoreReason.EMPTY)
         }
-        return ForegroundTransition.Ignored(IgnoreReason.EMPTY)
+        if (observedApp != null) {
+            pendingUnlockFallbackApp = null
+            return resolveObservedAppOnUnlock(observedApp, previousPackage = null, fromUnlock = true)
+        }
+        // No post-wake Activity seen yet: defer briefly for Android's real top Activity event so a lockscreen
+        // notification tap into Gmail doesn't flash a phantom Reddit pause. If nothing arrives within
+        // unlockConfirmDelayMs, host calls onUnlockFallbackTimeout().
+        val candidate = prevApp?.takeIf {
+            it != classifier.ownPackage &&
+                !classifier.isLauncherPackage(it) &&
+                !classifier.isSystemUiPackage(it) &&
+                !classifier.isCallOrDialerPackage(it)
+        }
+        pendingUnlockFallbackApp = candidate
+        return ForegroundTransition.UnlockAwaitingApp(candidate)
+    }
+
+    /**
+     * Called by the host after [ForegroundConfig.unlockConfirmDelayMs] if no `TYPE_WINDOW_STATE_CHANGED`
+     * arrived after unlock, confirming the user unlocked straight back into the previously resumed app.
+     */
+    fun onUnlockFallbackTimeout(): ForegroundTransition {
+        val candidate = pendingUnlockFallbackApp ?: return ForegroundTransition.Ignored(IgnoreReason.EMPTY)
+        pendingUnlockFallbackApp = null
+        if (!isScreenInteractive || currentPackage != null) {
+            return ForegroundTransition.Ignored(IgnoreReason.EMPTY)
+        }
+        currentPackage = candidate
+        return ForegroundTransition.AppEntered(candidate, previousPackage = null, fromUnlock = true)
+    }
+
+    private fun resolveObservedAppOnUnlock(pkg: String, previousPackage: String?, fromUnlock: Boolean): ForegroundTransition {
+        if (classifier.isCallOrDialerPackage(pkg)) {
+            currentPackage = pkg
+            return ForegroundTransition.CallInterrupted(pkg, previousPackage)
+        }
+        if (pkg == classifier.ownPackage) {
+            currentPackage = pkg
+            return ForegroundTransition.SelfAppEntered(previousPackage)
+        }
+        currentPackage = pkg
+        return ForegroundTransition.AppEntered(pkg, previousPackage, fromUnlock = fromUnlock)
     }
 }

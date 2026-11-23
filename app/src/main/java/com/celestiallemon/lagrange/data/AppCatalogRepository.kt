@@ -24,7 +24,7 @@ data class CatalogApp(
     /** Whether friction will fire on this app when master friction is enabled. */
     val isFrictionEligible: Boolean
         get() = when (category) {
-            AppCategory.DISTRACTING -> frictionOverride?.enabled ?: true
+            AppCategory.DISTRACTING -> frictionOverride?.enabled ?: confirmed
             AppCategory.NEUTRAL -> frictionOverride?.enabled ?: false
             AppCategory.UTILITY, AppCategory.EXCLUDED, AppCategory.SELF_APP -> false
         }
@@ -53,11 +53,17 @@ class AppCatalogRepository(
             val installed = row.packageName in launchable || resolver.isInstalled(row.packageName)
             when {
                 installed == row.isInstalled -> null
-                installed -> row.copy(isInstalled = true, uninstalledAtMs = null, updatedAtMs = now)
-                else -> row.copy(isInstalled = false, uninstalledAtMs = now, updatedAtMs = now)
+                installed -> Triple(row.id, true, null as Long?)
+                else -> Triple(row.id, false, now as Long?)
             }
         }
-        if (changed.isNotEmpty()) db.withWriteTransaction { changed.forEach { dao.update(it) } }
+        if (changed.isNotEmpty()) {
+            db.withWriteTransaction {
+                changed.forEach { (id, installed, uninstalledAt) ->
+                    dao.setInstallState(id, installed, uninstalledAt, now)
+                }
+            }
+        }
     }
 
     fun observeReviewList(recentOpens: Flow<Map<Long, Long>> = flowOf(emptyMap())): Flow<List<CatalogApp>> =
@@ -83,19 +89,23 @@ class AppCatalogRepository(
         if (changed) DerivedDirty.mark(db.ingestionStateDao(), 0)
     }
 
-    /** Updates per-app friction override JSON (`packages.friction_override_json`) and records history. */
-    suspend fun setFrictionOverride(packageName: String, override: AppFrictionOverride?) = db.withWriteTransaction {
-        val encoded = override?.toJsonOrNull()
-        val now = clock()
-        val updated = db.packageDao().setFrictionOverride(packageName, encoded, now) > 0
-        if (updated) {
-            val payload = buildJsonObject {
-                put("package", JsonPrimitive(packageName))
-                put("override", JsonPrimitive(encoded ?: "default"))
+    /** Updates per-app friction override JSON (`packages.friction_override_json`) and records history when changed. */
+    suspend fun setFrictionOverride(packageName: String, override: AppFrictionOverride?) {
+        db.withWriteTransaction<Unit> {
+            val before = db.packageDao().byName(packageName) ?: return@withWriteTransaction
+            val encoded = override?.toJsonOrNull()
+            if (before.frictionOverrideJson == encoded) return@withWriteTransaction
+            val now = clock()
+            val updated = db.packageDao().setFrictionOverride(packageName, encoded, now) > 0
+            if (updated) {
+                val payload = buildJsonObject {
+                    put("package", JsonPrimitive(packageName))
+                    put("override", JsonPrimitive(encoded ?: "default"))
+                }
+                db.settingsHistoryDao().insert(
+                    SettingsHistoryEntity(timestampUtcMs = now, settingKey = "app_friction_override", valueJson = payload.toString()),
+                )
             }
-            db.settingsHistoryDao().insert(
-                SettingsHistoryEntity(timestampUtcMs = now, settingKey = "app_friction_override", valueJson = payload.toString()),
-            )
         }
     }
 

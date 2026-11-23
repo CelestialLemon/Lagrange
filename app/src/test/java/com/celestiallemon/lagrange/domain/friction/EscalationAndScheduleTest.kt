@@ -94,6 +94,18 @@ class EscalationAndScheduleTest {
         val forcedMaps = maps.copy(override = AppFrictionOverride(enabled = true))
         assertFalse(forcedMaps.isFrictionEligible)
 
+        // Unconfirmed auto-suggested distracting app does not gate by default until confirmed or explicitly opted in.
+        val unconfirmedReddit = reddit.copy(categoryConfirmed = false)
+        assertFalse(unconfirmedReddit.isFrictionEligible)
+        assertTrue(unconfirmedReddit.copy(override = AppFrictionOverride(enabled = true)).isFrictionEligible)
+
+        // Redirect revalidation rejects uninstalled, distracting, or friction-eligible neutral targets.
+        val uninstalledKindle = kindle.copy(isInstalled = false)
+        val noRedirect1 = EscalationPolicy.evaluateLaunch(reddit, usage(), enabledSettings, null, false, false, false, redirectTarget = uninstalledKindle) as LaunchDecision.ShowPause
+        assertNull(noRedirect1.plan.redirectPackageName)
+        val noRedirect2 = EscalationPolicy.evaluateLaunch(reddit, usage(), enabledSettings, null, false, false, false, redirectTarget = optedInChrome) as LaunchDecision.ShowPause
+        assertNull(noRedirect2.plan.redirectPackageName)
+
         // JSON round-trip.
         val raw = optedInChrome.override!!.toJsonOrNull()
         assertNotNull(raw)
@@ -156,5 +168,11 @@ class EscalationAndScheduleTest {
         assertEquals(2, effect.escalationBoost)
         assertTrue(effect.requireTimerPrompt)
         assertEquals(10, effect.nudgeIntervalMin)
+
+        // Equal-boost tie-breaker must deterministically select the lowest schedule ID regardless of input order.
+        val eqLow = FrictionSchedule(3, "Alpha", true, FrictionSchedule.MASK_EVERY_DAY, 9 * 60, 17 * 60, 1, false, null)
+        val eqHigh = FrictionSchedule(9, "Beta", true, FrictionSchedule.MASK_EVERY_DAY, 9 * 60, 17 * 60, 1, false, null)
+        assertEquals(3L, ScheduleMatcher.activeEffect(listOf(eqLow, eqHigh), atMs, zone)!!.primaryScheduleId)
+        assertEquals(3L, ScheduleMatcher.activeEffect(listOf(eqHigh, eqLow), atMs, zone)!!.primaryScheduleId)
     }
 }

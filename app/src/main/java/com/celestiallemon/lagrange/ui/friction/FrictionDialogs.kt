@@ -122,8 +122,9 @@ fun ScheduleEditorDialog(
                 Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
                     TimeStepperRow("Starts", startMin) { startMin = (startMin + it + 1440) % 1440 }
                     TimeStepperRow("Ends", endMin) { endMin = (endMin + it + 1440) % 1440 }
-                    if (wraps) {
-                        StatusPill("Wraps past midnight", MaterialTheme.colorScheme.primary)
+                    when {
+                        startMin == endMin -> StatusPill("All day (24 hours)", MaterialTheme.colorScheme.secondary)
+                        wraps -> StatusPill("Wraps past midnight", MaterialTheme.colorScheme.primary)
                     }
                 }
 
@@ -254,7 +255,7 @@ fun RedirectAppPickerDialog(
     var query by rememberSaveable { mutableStateOf("") }
     val candidates = remember(apps, query) {
         val q = query.trim()
-        apps.filter { it.category != AppCategory.SELF_APP && it.category != AppCategory.DISTRACTING }
+        apps.filter { it.category != AppCategory.SELF_APP && it.category != AppCategory.DISTRACTING && !it.isFrictionEligible }
             .filter { q.isEmpty() || it.displayName.contains(q, ignoreCase = true) || it.packageName.contains(q, ignoreCase = true) }
             .sortedBy { it.displayName.lowercase() }
     }

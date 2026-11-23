@@ -238,7 +238,7 @@ class FrictionRepositoryTest {
         assertFalse(policy.isFrictionEligible)
         assertEquals(6, policy.override?.fixedPauseSec)
 
-        repo.activateFocusBoost1h(serviceConnected = false)
+        repo.activateFocusBoost1h()
         assertTrue(repo.liveStatus.value.isFocusBoostActive(elapsed))
 
         // Simulate reboot (bootCount increments): live status clears on refresh.
@@ -246,5 +246,134 @@ class FrictionRepositoryTest {
         elapsed = 1_000L
         repo.refreshLiveStatusFromDisk()
         assertFalse(repo.liveStatus.value.isFocusBoostActive(elapsed))
+    }
+
+    @Test
+    fun `deleting a referenced schedule does not drop a blocked friction event or its dirty mark`() = runBlocking {
+        val redditId = interner.packageId("com.reddit.frontpage")
+        val scheduleId = repo.createSchedule(
+            FrictionScheduleEntity(
+                name = "Temp",
+                enabled = true,
+                daysOfWeekMask = FrictionSchedule.MASK_EVERY_DAY,
+                startMinuteOfDay = 0,
+                endMinuteOfDay = 1439,
+                escalationBoost = 1,
+                requireTimerPrompt = false,
+                nudgeIntervalMin = null,
+            ),
+        )
+        // Schedule is deleted before the in-flight overlay event reaches recordEvent.
+        repo.deleteSchedule(scheduleId)
+
+        val eventId = repo.recordEvent(
+            FrictionEventRecord(
+                timestampUtcMs = baseMs + 2_000,
+                logicalDate = "2026-11-23",
+                pkgId = redditId,
+                eventKind = FrictionVocab.LAUNCH_PAUSE,
+                scheduleId = scheduleId,
+                escalationTier = 1,
+                pauseDurationSec = 5,
+                postCountdownReactionMs = null,
+                intentionTag = null,
+                selectedTimerMin = null,
+                redirectPkgId = null,
+                outcome = FrictionVocab.OUTCOME_CLOSED_GO_HOME,
+            ),
+        )
+        val saved = db.derivedDao().frictionEvent(eventId)!!
+        assertNull("Stale scheduleId must be nulled out cleanly instead of failing FK", saved.scheduleId)
+        assertNotNull(db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_FROM_MS))
+    }
+
+    @Test
+    fun `importJson clears destination redirect, cap, and runtime state when restoring unset backup`() = runBlocking {
+        // Populate destination with cap, redirect, and live runtime snooze.
+        prefs.setFrictionEnabled(true)
+        prefs.setDailyPromptCap(20)
+        prefs.setRedirectPackageName("com.amazon.kindle")
+        prefs.saveFrictionRuntime(FrictionRuntimeSnapshot(bootCount = 1, savedAtElapsedMs = 1_000L, snoozeUntilElapsedMs = 3_601_000L))
+
+        // Export from a fresh install with default (null) cap and redirect.
+        val clean = LagrangePreferences(
+            PreferenceDataStoreFactory.create(scope = scope) { File(context.filesDir, "fp_clean_${System.nanoTime()}.preferences_pb") },
+            db,
+        )
+        val cleanJson = clean.exportJson()
+
+        // Importing the clean backup MUST clear destination cap, redirect, and monotonic runtime state.
+        prefs.importJson(cleanJson)
+        val restored = prefs.current()
+        assertFalse(restored.frictionEnabled)
+        assertNull(restored.dailyPromptCap)
+        assertNull(restored.redirectPackageName)
+        assertNull(prefs.loadFrictionRuntime())
+    }
+
+    @Test
+    fun `syncLaunchable preserves concurrent friction overrides and coverage heartbeat is monotonic`() = runBlocking {
+        var launchable = listOf("com.reddit.frontpage")
+        val catalog = AppCatalogRepository(db, interner, { launchable }, FakeResolver(), clock = { baseMs })
+        catalog.syncLaunchable()
+        val override = AppFrictionOverride(enabled = false, fixedPauseSec = 9)
+        catalog.setFrictionOverride("com.reddit.frontpage", override)
+        val historyBefore = db.settingsHistoryDao().byKey("app_friction_override").size
+        // No-op repeat does not spam settings_history.
+        catalog.setFrictionOverride("com.reddit.frontpage", override)
+        assertEquals(historyBefore, db.settingsHistoryDao().byKey("app_friction_override").size)
+
+        // Syncing install state must never clobber friction_override_json.
+        launchable = emptyList()
+        catalog.syncLaunchable()
+        assertEquals(override, repo.resolveAppPolicy("com.reddit.frontpage").override)
+
+        // Coverage heartbeat must never move last_seen_ms backwards.
+        val cov = CoverageRepository(db)
+        cov.open(com.celestiallemon.lagrange.data.db.ServiceKind.ACCESSIBILITY, 1_000L)
+        cov.heartbeat(com.celestiallemon.lagrange.data.db.ServiceKind.ACCESSIBILITY, 5_000L)
+        cov.heartbeat(com.celestiallemon.lagrange.data.db.ServiceKind.ACCESSIBILITY, 3_000L)
+        assertEquals(5_000L, db.coverageDao().open(com.celestiallemon.lagrange.data.db.ServiceKind.ACCESSIBILITY.name).single().lastSeenMs)
+
+        // Atomic timer preset toggle.
+        prefs.toggleTimerPreset(20)
+        assertTrue(20 in prefs.current().timerPresetsMin)
+        prefs.toggleTimerPreset(20)
+        assertFalse(20 in prefs.current().timerPresetsMin)
+    }
+
+    @Test
+    fun `live commands reach a restored service, fall back offline when it cannot apply them, and snooze clears pending expiry`() = runBlocking {
+        // A pending (0 ms) expiry persisted on disk from an earlier connection.
+        prefs.saveFrictionRuntime(
+            FrictionRuntimeSnapshot(bootCount = bootCount, savedAtElapsedMs = elapsed, activeTimerRemainingMs = 0L, activeTimerInitialMin = 10),
+        )
+
+        val received = ArrayList<FrictionControlCommand>()
+        var restored: FrictionRuntimeSnapshot? = null
+        var applies = true
+        val handler: suspend (FrictionControlCommand) -> Boolean = { cmd -> if (applies) { received += cmd; true } else false }
+        repo.attachLiveService(handler) { saved -> restored = saved }
+        assertEquals(0L, restored?.activeTimerRemainingMs)
+
+        // Bound + restored service applies the command; nothing is written offline behind its back.
+        repo.activateFocusBoost1h()
+        assertEquals(listOf<FrictionControlCommand>(FrictionControlCommand.ActivateFocusBoost1h), received)
+        assertNull(prefs.loadFrictionRuntime()?.focusBoostUntilElapsedMs)
+
+        // Service still attached but unable to apply (tearing down): the command is persisted offline, never lost.
+        applies = false
+        repo.activateSnooze1h()
+        val offline = prefs.loadFrictionRuntime()!!
+        assertNotNull(offline.snoozeUntilElapsedMs)
+        // Snoozing clears an unresolved expiry so the check-in cannot immediately re-fire.
+        assertNull(offline.activeTimerRemainingMs)
+        assertNull(offline.activeTimerInitialMin)
+
+        // After detach, commands use the offline path directly.
+        repo.detachLiveService(handler)
+        repo.cancelSnooze()
+        assertNull(prefs.loadFrictionRuntime()?.snoozeUntilElapsedMs)
+        assertEquals(1, received.size)
     }
 }

@@ -40,7 +40,7 @@ object PermissionHealthChecker {
         usageAccess = AndroidUsageEventSource.hasUsageAccess(context),
         notificationAccess = context.packageName in NotificationManagerCompat.getEnabledListenerPackages(context),
         accessibilityEnabled = isAccessibilityEnabled(context),
-        accessibilityConnected = LagrangeAccessibilityService.connected,
+        accessibilityConnected = LagrangeAccessibilityService.readyState.value,
         postNotifications = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
         hibernationExempt = hibernationExempt(context),
         advancedProtection = advancedProtection(context),

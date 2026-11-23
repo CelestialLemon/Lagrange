@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -213,6 +214,20 @@ class LagrangePreferences(
         store.edit { it[TIMER_PRESETS_MIN] = encoded }
     }
 
+    /** Atomically toggles a timer preset minute inside one DataStore transaction so rapid taps never race. */
+    suspend fun toggleTimerPreset(minutes: Int) {
+        require(minutes in 1..120) { "timer preset must be 1..120 minutes" }
+        var updatedList: List<Int>? = null
+        store.edit { prefs ->
+            val next = decodePresets(prefs[TIMER_PRESETS_MIN]).toMutableSet()
+            if (!next.add(minutes)) next.remove(minutes)
+            val sorted = next.sorted()
+            prefs[TIMER_PRESETS_MIN] = sorted.joinToString(",")
+            updatedList = sorted
+        }
+        updatedList?.let { recordSettingHistory(TIMER_PRESETS_MIN.name, "[${it.joinToString(",")}]") }
+    }
+
     suspend fun setDailyPromptCap(cap: Int?) {
         if (cap != null) require(cap in UserPrefs.DAILY_CAP_RANGE) { "daily cap must be within ${UserPrefs.DAILY_CAP_RANGE}" }
         if (current().dailyPromptCap != cap) {
@@ -311,39 +326,51 @@ class LagrangePreferences(
             put(GRACE_WINDOW_SEC.name, JsonPrimitive(p.graceWindowSec))
             put(NUDGE_INTERVAL_MIN.name, JsonPrimitive(p.nudgeIntervalMin))
             put(TIMER_PRESETS_MIN.name, JsonArray(p.timerPresetsMin.map { JsonPrimitive(it) }))
-            p.dailyPromptCap?.let { put(DAILY_PROMPT_CAP.name, JsonPrimitive(it)) }
-            p.redirectPackageName?.let { put(REDIRECT_PACKAGE_NAME.name, JsonPrimitive(it)) }
+            put(DAILY_PROMPT_CAP.name, p.dailyPromptCap?.let { JsonPrimitive(it) } ?: JsonNull)
+            put(REDIRECT_PACKAGE_NAME.name, p.redirectPackageName?.let { JsonPrimitive(it) } ?: JsonNull)
         }
         return obj.toString()
     }
 
     suspend fun importJson(text: String) {
         val obj = parsePortable(text)
+        val defaults = UserPrefs()
         store.edit { prefs ->
             (obj[ROLLOVER_HOUR.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in 0..23 }?.let { prefs[ROLLOVER_HOUR] = it }
             (obj[ONBOARDING_COMPLETE.name] as? JsonPrimitive)?.booleanOrNull?.let { prefs[ONBOARDING_COMPLETE] = it }
             (obj[USE_DYNAMIC_COLOR.name] as? JsonPrimitive)?.booleanOrNull?.let { prefs[USE_DYNAMIC_COLOR] = it }
             (obj[DAILY_BUDGET_MS.name] as? JsonPrimitive)?.longOrNull?.takeIf { it in UserPrefs.BUDGET_RANGE_MS }?.let { prefs[DAILY_BUDGET_MS] = it }
-            (obj[FRICTION_ENABLED.name] as? JsonPrimitive)?.booleanOrNull?.let { prefs[FRICTION_ENABLED] = it }
-            (obj[ESCALATION_ENABLED.name] as? JsonPrimitive)?.booleanOrNull?.let { prefs[ESCALATION_ENABLED] = it }
-            (obj[TIER0_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC }?.let { prefs[TIER0_PAUSE_SEC] = it }
-            (obj[TIER1_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC }?.let { prefs[TIER1_PAUSE_SEC] = it }
-            (obj[TIER2_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC }?.let { prefs[TIER2_PAUSE_SEC] = it }
-            (obj[TIER3_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC }?.let { prefs[TIER3_PAUSE_SEC] = it }
-            (obj[GRACE_WINDOW_SEC.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in UserPrefs.GRACE_WINDOW_RANGE_SEC }?.let { prefs[GRACE_WINDOW_SEC] = it }
-            (obj[NUDGE_INTERVAL_MIN.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in UserPrefs.NUDGE_INTERVAL_RANGE_MIN }?.let { prefs[NUDGE_INTERVAL_MIN] = it }
-            (obj[TIMER_PRESETS_MIN.name] as? JsonArray)?.let { arr ->
-                val list = arr.mapNotNull { (it as? JsonPrimitive)?.intOrNull }.filter { it in 1..120 }.distinct().sorted()
-                prefs[TIMER_PRESETS_MIN] = list.joinToString(",")
-            }
-            if (DAILY_PROMPT_CAP.name in obj) {
-                val cap = (obj[DAILY_PROMPT_CAP.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in UserPrefs.DAILY_CAP_RANGE }
-                if (cap == null) prefs.remove(DAILY_PROMPT_CAP) else prefs[DAILY_PROMPT_CAP] = cap
-            }
-            if (REDIRECT_PACKAGE_NAME.name in obj) {
-                val pkg = (obj[REDIRECT_PACKAGE_NAME.name] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
-                if (pkg == null) prefs.remove(REDIRECT_PACKAGE_NAME) else prefs[REDIRECT_PACKAGE_NAME] = pkg
-            }
+
+            // Reset friction settings to defaults when absent/null so a backup (including pre-friction backups)
+            // never inherits stale destination-only values.
+            prefs[FRICTION_ENABLED] = (obj[FRICTION_ENABLED.name] as? JsonPrimitive)?.booleanOrNull ?: defaults.frictionEnabled
+            prefs[ESCALATION_ENABLED] = (obj[ESCALATION_ENABLED.name] as? JsonPrimitive)?.booleanOrNull ?: defaults.escalationEnabled
+            prefs[TIER0_PAUSE_SEC] = (obj[TIER0_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC } ?: defaults.tier0PauseSec
+            prefs[TIER1_PAUSE_SEC] = (obj[TIER1_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC } ?: defaults.tier1PauseSec
+            prefs[TIER2_PAUSE_SEC] = (obj[TIER2_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC } ?: defaults.tier2PauseSec
+            prefs[TIER3_PAUSE_SEC] = (obj[TIER3_PAUSE_SEC.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in FrictionSettings.MIN_PAUSE_SEC..FrictionSettings.MAX_PAUSE_SEC } ?: defaults.tier3PauseSec
+            prefs[GRACE_WINDOW_SEC] = (obj[GRACE_WINDOW_SEC.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in UserPrefs.GRACE_WINDOW_RANGE_SEC } ?: defaults.graceWindowSec
+            prefs[NUDGE_INTERVAL_MIN] = (obj[NUDGE_INTERVAL_MIN.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in UserPrefs.NUDGE_INTERVAL_RANGE_MIN } ?: defaults.nudgeIntervalMin
+            val presets = (obj[TIMER_PRESETS_MIN.name] as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
+                ?.filter { it in 1..120 }?.distinct()?.sorted()
+                ?: defaults.timerPresetsMin
+            prefs[TIMER_PRESETS_MIN] = presets.joinToString(",")
+
+            val cap = (obj[DAILY_PROMPT_CAP.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in UserPrefs.DAILY_CAP_RANGE }
+            if (cap == null) prefs.remove(DAILY_PROMPT_CAP) else prefs[DAILY_PROMPT_CAP] = cap
+
+            val pkg = (obj[REDIRECT_PACKAGE_NAME.name] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
+            if (pkg == null) prefs.remove(REDIRECT_PACKAGE_NAME) else prefs[REDIRECT_PACKAGE_NAME] = pkg
+
+            // Always discard device-local monotonic runtime state when restoring a backup.
+            prefs.remove(FRICTION_RUNTIME_STATE)
         }
     }
 

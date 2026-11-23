@@ -123,6 +123,8 @@ class AppGraph(private val app: Application) {
 
     private val recomputeKicks = Channel<Unit>(Channel.CONFLATED)
 
+    private val lastScreenOffHarvestElapsedMs = java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
+
     val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages, packageResolver) }
 
     val backups by lazy {
@@ -237,6 +239,14 @@ class AppGraph(private val app: Application) {
     }
 
     fun harvestInBackground(trigger: HarvestTrigger) {
+        if (trigger == HarvestTrigger.SCREEN_OFF) {
+            // Both NotificationListenerService and AccessibilityService receive ACTION_SCREEN_OFF; coalesce
+            // simultaneous triggers so we never run two redundant harvests back-to-back on every screen lock.
+            val now = android.os.SystemClock.elapsedRealtime()
+            val prev = lastScreenOffHarvestElapsedMs.get()
+            if (prev != Long.MIN_VALUE && now - prev in 0 until SCREEN_OFF_HARVEST_COALESCE_MS) return
+            if (!lastScreenOffHarvestElapsedMs.compareAndSet(prev, now)) return
+        }
         applicationScope.launch {
             try {
                 awaitReady()
@@ -249,13 +259,13 @@ class AppGraph(private val app: Application) {
         }
     }
 
-    /** Extends live collector coverage (notification listener and accessibility), only while connected in this process. */
+    /** Extends live collector coverage (notification listener and accessibility), only while ready in this process. */
     suspend fun heartbeatListenerIfConnected() {
         val now = System.currentTimeMillis()
         if (LagrangeNotificationListenerService.connected) {
             withContext(Dispatchers.IO) { notificationRecorder.heartbeat(now) }
         }
-        if (LagrangeAccessibilityService.connected) {
+        if (LagrangeAccessibilityService.readyState.value) {
             withContext(Dispatchers.IO) { coverage.heartbeat(ServiceKind.ACCESSIBILITY, now) }
         }
     }
@@ -309,5 +319,6 @@ class AppGraph(private val app: Application) {
     private companion object {
         const val TAG = "Lagrange"
         const val RECOMPUTE_DEBOUNCE_MS = 1_500L
+        const val SCREEN_OFF_HARVEST_COALESCE_MS = 3_000L
     }
 }

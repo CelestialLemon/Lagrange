@@ -120,15 +120,18 @@ data class FrictionAppPolicy(
     val category: AppCategory,
     val override: AppFrictionOverride? = null,
     val isSystemSurface: Boolean = false,
+    val categoryConfirmed: Boolean = true,
+    val isInstalled: Boolean = true,
 ) {
     /**
      * Whether this app can trigger a launch pause.
      * `UTILITY`, `EXCLUDED`, `SELF_APP`, and system surfaces are never friction-gated (spec §5.1).
+     * Auto-suggested `DISTRACTING` categories wait for user confirmation (or explicit per-app opt-in) before gating.
      */
     val isFrictionEligible: Boolean
         get() = when {
             isSystemSurface -> false
-            category == AppCategory.DISTRACTING -> override?.enabled ?: true
+            category == AppCategory.DISTRACTING -> override?.enabled ?: categoryConfirmed
             category == AppCategory.NEUTRAL -> override?.enabled ?: false
             else -> false
         }
@@ -249,14 +252,24 @@ data class FrictionEventRecord(
     val outcome: String,
 )
 
+/** Outcome reported by the host after attempting to launch a healthy redirect target. */
+enum class RedirectLaunchResult {
+    LAUNCHED_REDIRECT,
+    FELL_BACK_HOME,
+    FAILED,
+}
+
 /** Side effects emitted by [FrictionEngine] for the Android host service to perform. */
 sealed interface FrictionEffect {
     data class ShowOverlay(val overlay: ActiveOverlay) : FrictionEffect
     data object DismissOverlay : FrictionEffect
-    data object PerformGoHome : FrictionEffect
-    data class LaunchRedirect(val packageName: String) : FrictionEffect
     data class LogEvent(val record: FrictionEventRecord) : FrictionEffect
     data class PersistState(val snapshot: FrictionRuntimeSnapshot) : FrictionEffect
+    /** Emitted when unlock occurs without a post-wake app event yet; host schedules a short fallback check. */
+    data class ScheduleUnlockFallback(val delayMs: Long) : FrictionEffect
+    data object CancelUnlockFallback : FrictionEffect
+    /** Emitted when an unprompted real open happens (grace window, snooze, daily cap) so live escalation stays accurate. */
+    data class RecordUnpromptedOpen(val pkgId: Long, val wallMs: Long) : FrictionEffect
 }
 
 /**
@@ -267,6 +280,7 @@ sealed interface FrictionEffect {
 data class FrictionRuntimeSnapshot(
     val bootCount: Int,
     val savedAtElapsedMs: Long,
+    /** Remaining soft timer ms (`0L` represents a pending expiry that has not been resolved yet). */
     val activeTimerRemainingMs: Long? = null,
     val activeTimerInitialMin: Int? = null,
     val snoozeUntilElapsedMs: Long? = null,
@@ -274,7 +288,8 @@ data class FrictionRuntimeSnapshot(
     val graceUntilByPackage: Map<String, Long> = emptyMap(),
     val sessionDistractingMs: Long = 0L,
     val sessionDistractingApps: List<String> = emptyList(),
-    val sessionLastNudgeMilestone: Int = 0,
+    /** Last notified time-blindness milestone in elapsed distracting minutes (independent of schedule interval changes). */
+    val sessionLastNudgeMinutes: Int = 0,
     val screenOffAtElapsedMs: Long? = null,
 ) {
     fun encode(): String = json.encodeToString(serializer(), this)

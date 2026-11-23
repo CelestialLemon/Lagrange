@@ -95,6 +95,7 @@ fun FrictionScreen(
     val schedules by vm.schedules.collectAsStateWithLifecycle()
     val liveStatus by vm.liveStatus.collectAsStateWithLifecycle()
     val blockedToday by vm.blockedToday.collectAsStateWithLifecycle()
+    val errorMessage by vm.errorMessage.collectAsStateWithLifecycle()
     val apps by catalog.apps.collectAsStateWithLifecycle()
 
     var nowElapsed by remember { mutableLongStateOf(SystemClock.elapsedRealtime()) }
@@ -188,10 +189,22 @@ fun FrictionScreen(
                             Icon(Icons.Outlined.GppMaybe, contentDescription = null, tint = MaterialTheme.colorScheme.onTertiaryContainer)
                             Spacer(Modifier.width(Space.s))
                             Text(
-                                "Android Advanced Protection is on. Sideloaded accessibility services may be restricted by Android until Advanced Protection is turned off. Analytics are unaffected.",
+                                "Android Advanced Protection is on. Android restricts accessibility access to verified accessibility tools while it is enabled, so gentle friction may be unavailable. Analytics are unaffected.",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onTertiaryContainer,
                             )
+                        }
+                    }
+                }
+
+                errorMessage?.let { err ->
+                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.errorContainer) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = Space.m, vertical = Space.s),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Text(err, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer, modifier = Modifier.weight(1f))
+                            TextButton(onClick = vm::clearError) { Text("Dismiss") }
                         }
                     }
                 }
@@ -215,18 +228,28 @@ fun FrictionScreen(
                     )
                 }
 
+                val timerValue = when (val rem = liveStatus.activeTimerRemainingMs) {
+                    null -> "None"
+                    0L -> "Due now"
+                    else -> formatDurationShort(rem)
+                }
+                val timerCaption = when {
+                    liveStatus.activeTimerRemainingMs == null -> "cross-app"
+                    liveStatus.activeTimerRemainingMs == 0L -> "check-in pending"
+                    else -> liveStatus.activeTimerInitialMin?.let { "${it}m session" } ?: "cross-app"
+                }
                 StatRow {
                     StatTile(
-                        label = "Paused today",
+                        label = "Blocked today",
                         value = blockedToday.toString(),
                         modifier = Modifier.weight(1f),
-                        caption = "chose to exit",
+                        caption = "exits & redirects",
                     )
                     StatTile(
                         label = "Active timer",
-                        value = liveStatus.activeTimerRemainingMs?.takeIf { it > 0 }?.let(::formatDurationShort) ?: "None",
+                        value = timerValue,
                         modifier = Modifier.weight(1f),
-                        caption = liveStatus.activeTimerInitialMin?.let { "${it}m session" } ?: "cross-app",
+                        caption = timerCaption,
                     )
                 }
 
@@ -320,7 +343,13 @@ fun FrictionScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
-                            listOf(0 to "Off", 60 to "1m", 120 to "2m", 300 to "5m").forEach { (sec, label) ->
+                            val graceOptions = listOf(0 to "Off", 60 to "1m", 120 to "2m", 300 to "5m")
+                            val allGrace = if (graceOptions.none { it.first == loadedPrefs.graceWindowSec }) {
+                                graceOptions + (loadedPrefs.graceWindowSec to formatDurationShort(loadedPrefs.graceWindowSec * 1_000L))
+                            } else {
+                                graceOptions
+                            }
+                            allGrace.forEach { (sec, label) ->
                                 FilterChip(
                                     selected = loadedPrefs.graceWindowSec == sec,
                                     onClick = { vm.setGraceWindowSec(sec) },
@@ -339,7 +368,13 @@ fun FrictionScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
-                            listOf(0 to "Off", 10 to "10m", 15 to "15m", 20 to "20m", 30 to "30m").forEach { (min, label) ->
+                            val nudgeOptions = listOf(0 to "Off", 10 to "10m", 15 to "15m", 20 to "20m", 30 to "30m")
+                            val allNudge = if (nudgeOptions.none { it.first == loadedPrefs.nudgeIntervalMin }) {
+                                nudgeOptions + (loadedPrefs.nudgeIntervalMin to "${loadedPrefs.nudgeIntervalMin}m")
+                            } else {
+                                nudgeOptions
+                            }
+                            allNudge.forEach { (min, label) ->
                                 FilterChip(
                                     selected = loadedPrefs.nudgeIntervalMin == min,
                                     onClick = { vm.setNudgeIntervalMin(min) },
@@ -358,7 +393,7 @@ fun FrictionScreen(
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
-                            listOf(2, 5, 10, 15, 20, 30).forEach { min ->
+                            (listOf(2, 5, 10, 15, 20, 30) + loadedPrefs.timerPresetsMin).distinct().sorted().forEach { min ->
                                 FilterChip(
                                     selected = min in loadedPrefs.timerPresetsMin,
                                     onClick = { vm.toggleTimerPreset(min) },
@@ -372,7 +407,13 @@ fun FrictionScreen(
                     Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
                         Text("Daily prompt cap", style = MaterialTheme.typography.titleSmall)
                         FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
-                            listOf<Pair<Int?, String>>(null to "No cap", 10 to "10/day", 20 to "20/day", 30 to "30/day").forEach { (cap, label) ->
+                            val capOptions = listOf<Pair<Int?, String>>(null to "No cap", 10 to "10/day", 20 to "20/day", 30 to "30/day")
+                            val allCaps = if (capOptions.none { it.first == loadedPrefs.dailyPromptCap }) {
+                                capOptions + (loadedPrefs.dailyPromptCap to "${loadedPrefs.dailyPromptCap}/day")
+                            } else {
+                                capOptions
+                            }
+                            allCaps.forEach { (cap, label) ->
                                 FilterChip(
                                     selected = loadedPrefs.dailyPromptCap == cap,
                                     onClick = { vm.setDailyPromptCap(cap) },
@@ -503,7 +544,11 @@ fun FrictionScreen(
                     app = app,
                     showFrictionControls = true,
                     onToggleFriction = { enabled ->
-                        val next = (app.frictionOverride ?: AppFrictionOverride()).copy(enabled = enabled)
+                        val matchesDefault = (app.category == AppCategory.DISTRACTING && enabled && app.confirmed) ||
+                            (app.category == AppCategory.NEUTRAL && !enabled)
+                        val next = (app.frictionOverride ?: AppFrictionOverride())
+                            .copy(enabled = if (matchesDefault) null else enabled)
+                            .takeUnless { it.isDefault }
                         catalog.setFrictionOverride(app.packageName, next)
                     },
                     onCustomizeFriction = { customizingApp = app },
@@ -558,9 +603,10 @@ fun FrictionScreen(
                 editingSchedule = null
             },
             onSave = { saved ->
-                creatingSchedule = false
-                editingSchedule = null
-                vm.saveSchedule(saved)
+                vm.saveSchedule(saved) {
+                    creatingSchedule = false
+                    editingSchedule = null
+                }
             },
         )
     }
@@ -584,9 +630,14 @@ private fun ScheduleRow(
     onEdit: () -> Unit,
     onDelete: () -> Unit,
 ) {
+    val allDay = schedule.startMinuteOfDay == schedule.endMinuteOfDay
     val wraps = schedule.startMinuteOfDay > schedule.endMinuteOfDay
-    val timeSummary = "${formatDaysMask(schedule.daysOfWeekMask)} · ${formatMinuteOfDay(schedule.startMinuteOfDay)}–${formatMinuteOfDay(schedule.endMinuteOfDay)}" +
-        if (wraps) " (overnight)" else ""
+    val timeSummary = if (allDay) {
+        "${formatDaysMask(schedule.daysOfWeekMask)} · All day"
+    } else {
+        "${formatDaysMask(schedule.daysOfWeekMask)} · ${formatMinuteOfDay(schedule.startMinuteOfDay)}–${formatMinuteOfDay(schedule.endMinuteOfDay)}" +
+            if (wraps) " (overnight)" else ""
+    }
     val traits = buildList {
         if (schedule.escalationBoost > 0) add("+${schedule.escalationBoost} tier")
         if (schedule.requireTimerPrompt) add("timer prompt")

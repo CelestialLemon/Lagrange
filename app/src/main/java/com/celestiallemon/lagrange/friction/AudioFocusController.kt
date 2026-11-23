@@ -14,9 +14,13 @@ class AudioFocusController(context: Context) {
     private val audioManager: AudioManager? = context.getSystemService(AudioManager::class.java)
     private var activeRequest: AudioFocusRequest? = null
 
-    fun requestTransient() {
-        val manager = audioManager ?: return
-        if (activeRequest != null) return
+    /**
+     * Best-effort request for transient audio focus. Returns `true` when granted or delayed; logs and returns
+     * `false` if the platform denies background audio focus (e.g. Android 15+/17 restrictions).
+     */
+    fun requestTransient(): Boolean {
+        val manager = audioManager ?: return false
+        if (activeRequest != null) return true
         val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
             .setAudioAttributes(
                 AudioAttributes.Builder()
@@ -26,13 +30,18 @@ class AudioFocusController(context: Context) {
             )
             .setOnAudioFocusChangeListener { /* Pause overlay never plays audio of its own. */ }
             .build()
-        try {
+        return try {
             val result = manager.requestAudioFocus(request)
             if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED || result == AudioManager.AUDIOFOCUS_REQUEST_DELAYED) {
                 activeRequest = request
+                true
+            } else {
+                Log.i(TAG, "transient audio focus denied by platform (result=$result)")
+                false
             }
         } catch (e: RuntimeException) {
             Log.w(TAG, "transient audio focus request failed", e)
+            false
         }
     }
 

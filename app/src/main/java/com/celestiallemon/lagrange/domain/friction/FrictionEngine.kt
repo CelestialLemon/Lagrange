@@ -10,7 +10,7 @@ import java.time.ZoneId
  * - escalating launch pauses (real opens only, schedule boosts, Focus Boost 1h, daily cap, per-app overrides),
  * - cross-app soft session timer (counts across all DISTRACTING apps, pauses on UTILITY/NEUTRAL/SELF_APP, clears on >15s lock),
  * - anti-fatigue 2-minute monotonic switch-back grace window,
- * - in-session time-blindness milestone nudges (default 15m, tracking app-hop chain),
+ * - in-session time-blindness milestone nudges (default 15m, tracking elapsed distracting minutes & app-hop chain),
  * - 1-hour safe snooze escape hatch (`SNOOZE_1H`),
  * - restart-safe monotonic state snapshot & reboot invalidation.
  */
@@ -23,6 +23,7 @@ class FrictionEngine(
     var activeOverlay: ActiveOverlay? = null
         private set
 
+    /** Remaining ms (`0L` = pending unresolved expiry; `null` = no active timer). */
     private var timerRemainingMs: Long? = null
     private var timerInitialMin: Int? = null
     private var timerRunning: Boolean = false
@@ -34,17 +35,26 @@ class FrictionEngine(
 
     private var sessionDistractingMs: Long = 0L
     private val sessionDistractingApps = ArrayList<String>()
-    private var sessionLastNudgeMilestone: Int = 0
+    /** Cumulative distracting minutes already nudged in this session (immune to mid-session interval changes). */
+    private var sessionLastNudgeMinutes: Int = 0
     private var screenOffAtElapsedMs: Long? = null
+    private var lastCheckpointElapsedMs: Long = Long.MIN_VALUE
 
     /** Policy of the currently foregrounded app, if any. */
     private var currentAppPolicy: FrictionAppPolicy? = null
-    private var currentLogicalDate: String? = null
     private var bootCount: Int = 0
+
+    /** Cumulative distracting ms accrued in-process since start (monotonically non-decreasing, for live usage delta). */
+    var totalAccruedDistractingMs: Long = 0L
+        private set
 
     val currentForegroundPackage: String? get() = foreground.currentPackage
 
     val accumulatedSessionDistractingMs: Long get() = sessionDistractingMs
+
+    fun setInitialScreenInteractive(interactive: Boolean) {
+        foreground.setInitialScreenInteractive(interactive)
+    }
 
     fun liveStatus(nowElapsedMs: Long): FrictionLiveStatus {
         pruneExpired(nowElapsedMs)
@@ -70,7 +80,7 @@ class FrictionEngine(
             graceUntilByPackage = graceUntilByPackage.toMap(),
             sessionDistractingMs = sessionDistractingMs,
             sessionDistractingApps = sessionDistractingApps.toList(),
-            sessionLastNudgeMilestone = sessionLastNudgeMilestone,
+            sessionLastNudgeMinutes = sessionLastNudgeMinutes,
             screenOffAtElapsedMs = screenOffAtElapsedMs,
         )
     }
@@ -81,6 +91,7 @@ class FrictionEngine(
      */
     fun restore(saved: FrictionRuntimeSnapshot?, currentBootCount: Int, nowElapsedMs: Long): Boolean {
         bootCount = currentBootCount
+        lastCheckpointElapsedMs = nowElapsedMs
         if (saved == null) return false
         if (saved.bootCount != currentBootCount || nowElapsedMs < saved.savedAtElapsedMs) {
             clearAllRuntimeState()
@@ -95,7 +106,8 @@ class FrictionEngine(
             clearSessionScopedState()
             screenOffAtElapsedMs = offAt
         } else {
-            timerRemainingMs = saved.activeTimerRemainingMs?.takeIf { it > 0L }
+            // Preserve 0L as well as positive values so an unresolved pending timer expiry survives restart.
+            timerRemainingMs = saved.activeTimerRemainingMs?.takeIf { it >= 0L }
             timerInitialMin = if (timerRemainingMs != null) saved.activeTimerInitialMin else null
             timerRunning = false
             graceUntilByPackage.clear()
@@ -105,7 +117,7 @@ class FrictionEngine(
             sessionDistractingMs = saved.sessionDistractingMs.coerceAtLeast(0L)
             sessionDistractingApps.clear()
             sessionDistractingApps.addAll(saved.sessionDistractingApps)
-            sessionLastNudgeMilestone = saved.sessionLastNudgeMilestone.coerceAtLeast(0)
+            sessionLastNudgeMinutes = saved.sessionLastNudgeMinutes.coerceAtLeast(0)
             screenOffAtElapsedMs = offAt
         }
         lastTickElapsedMs = nowElapsedMs
@@ -127,7 +139,13 @@ class FrictionEngine(
         val overlay = activeOverlay
         if (overlay != null) {
             activeOverlay = null
+            if (overlay is ActiveOverlay.TimerExpired) {
+                // Clearing an expired timer on snooze prevents it from immediately re-firing on the next tick.
+                clearTimer()
+            }
             effects += FrictionEffect.DismissOverlay
+        } else if (timerRemainingMs != null && timerRemainingMs!! <= 0L) {
+            clearTimer()
         }
         effects += FrictionEffect.LogEvent(
             FrictionEventRecord(
@@ -145,27 +163,56 @@ class FrictionEngine(
                 outcome = FrictionVocab.OUTCOME_SNOOZE_ACTIVATED,
             ),
         )
+        // If snoozed from a launch pause, the user is now continuing into the distracting app.
+        if (overlay is ActiveOverlay.LaunchPause) {
+            recordDistractingAppVisit(currentAppPolicy)
+            currentAppPolicy?.let { app ->
+                if (app.pkgId > 0L) effects += FrictionEffect.RecordUnpromptedOpen(app.pkgId, nowWallMs)
+            }
+        }
         resumeDistractingTrackingIfNeeded(nowElapsedMs)
-        effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+        effects += persist(nowElapsedMs)
         return effects
     }
 
     fun cancelSnooze(nowElapsedMs: Long): List<FrictionEffect> {
         if (snoozeUntilElapsedMs == null) return emptyList()
         snoozeUntilElapsedMs = null
-        return listOf(FrictionEffect.PersistState(snapshot(nowElapsedMs)))
+        return listOf(persist(nowElapsedMs))
     }
 
     fun activateFocusBoost1h(nowElapsedMs: Long): List<FrictionEffect> {
         focusBoostUntilElapsedMs = nowElapsedMs + FrictionSettings.FOCUS_BOOST_DURATION_MS
         snoozeUntilElapsedMs = null
-        return listOf(FrictionEffect.PersistState(snapshot(nowElapsedMs)))
+        return listOf(persist(nowElapsedMs))
     }
 
     fun cancelFocusBoost(nowElapsedMs: Long): List<FrictionEffect> {
         if (focusBoostUntilElapsedMs == null) return emptyList()
         focusBoostUntilElapsedMs = null
-        return listOf(FrictionEffect.PersistState(snapshot(nowElapsedMs)))
+        return listOf(persist(nowElapsedMs))
+    }
+
+    // -- Overlay lifecycle recovery -----------------------------------------------------------------------------------
+
+    /**
+     * Called when the Android host could not attach the overlay window (or Android detached it unexpectedly).
+     * Clears [activeOverlay] without logging a false blocked attempt and resumes normal tracking.
+     */
+    fun onOverlayAttachFailed(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+        val failed = activeOverlay ?: return emptyList()
+        activeOverlay = null
+        val effects = ArrayList<FrictionEffect>()
+        if (failed is ActiveOverlay.TimerExpired) {
+            clearTimer()
+        }
+        if (failed is ActiveOverlay.LaunchPause) {
+            recordDistractingAppVisit(currentAppPolicy)
+            if (failed.pkgId > 0L) effects += FrictionEffect.RecordUnpromptedOpen(failed.pkgId, nowWallMs)
+        }
+        resumeDistractingTrackingIfNeeded(nowElapsedMs)
+        effects += persist(nowElapsedMs)
+        return effects
     }
 
     // -- Window & lifecycle events ------------------------------------------------------------------------------------
@@ -194,12 +241,20 @@ class FrictionEngine(
 
     fun onScreenOff(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
         val effects = ArrayList<FrictionEffect>()
+        effects += FrictionEffect.CancelUnlockFallback
         advanceActiveClocks(nowElapsedMs)
         timerRunning = false
         screenOffAtElapsedMs = nowElapsedMs
+        // Dismiss unresolved blocking overlays and mark exit blocked BEFORE foreground.onScreenOff() so a
+        // subsequent <15s micro-lock cannot bypass an unresolved launch pause or timer expiry.
+        val hadBlocking = isBlockingOverlayShowing()
         dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = true, effects = effects)
+        if (hadBlocking) {
+            foreground.markLastExitBlocked()
+            currentAppPolicy = null
+        }
         foreground.onScreenOff(nowElapsedMs)
-        effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+        effects += persist(nowElapsedMs)
         return effects
     }
 
@@ -220,26 +275,44 @@ class FrictionEngine(
         val effects = ArrayList<FrictionEffect>()
         if (offDuration >= FrictionSettings.MICRO_LOCK_MERGE_MS) {
             clearSessionScopedState()
-            effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
         }
 
         val transition = foreground.onUserPresent(nowElapsedMs)
         effects += handleTransition(transition, nowWallMs, nowElapsedMs, zone, settings, schedules, resolveApp, loadUsage, resolveRedirect)
+        // Always persist the cleared screenOffAtElapsedMs marker (even on micro-lock resume!).
+        if (effects.none { it is FrictionEffect.PersistState }) {
+            effects += persist(nowElapsedMs)
+        }
         return effects
+    }
+
+    fun onUnlockFallbackTimeout(
+        nowWallMs: Long,
+        nowElapsedMs: Long,
+        zone: ZoneId,
+        settings: FrictionSettings,
+        schedules: List<FrictionSchedule>,
+        resolveApp: (String) -> FrictionAppPolicy,
+        loadUsage: (FrictionAppPolicy) -> TodayUsageSnapshot,
+        resolveRedirect: (String) -> FrictionAppPolicy? = { null },
+    ): List<FrictionEffect> {
+        val transition = foreground.onUnlockFallbackTimeout()
+        return handleTransition(transition, nowWallMs, nowElapsedMs, zone, settings, schedules, resolveApp, loadUsage, resolveRedirect)
     }
 
     fun onServiceDisconnected(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
         val effects = ArrayList<FrictionEffect>()
+        effects += FrictionEffect.CancelUnlockFallback
         advanceActiveClocks(nowElapsedMs)
         timerRunning = false
         dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = false, effects = effects)
-        effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+        effects += persist(nowElapsedMs)
         return effects
     }
 
     /**
      * Periodic tick (e.g. every second while in a distracting app) that advances the cross-app soft session
-     * timer and checks time-blindness nudge milestones.
+     * timer, checkpoints running monotonic state periodically, and checks time-blindness nudge milestones.
      */
     fun onTick(
         nowWallMs: Long,
@@ -264,48 +337,53 @@ class FrictionEngine(
 
         val effects = ArrayList<FrictionEffect>()
         val activeSchedule = ScheduleMatcher.activeEffect(schedules, nowWallMs, zone)
+        val snoozed = snoozeUntilElapsedMs?.let { nowElapsedMs < it } == true
 
-        // Conflict priority: soft session timer expiry takes highest priority.
+        // Conflict priority: soft session timer expiry takes highest priority, while honoring master switch & 1h snooze.
         if (timerRemainingMs != null && timerRemainingMs!! <= 0L) {
-            if (activeOverlay is ActiveOverlay.TimeBlindnessNudge) {
-                logAndDismissNudge(FrictionVocab.OUTCOME_NUDGE_IGNORED, effects)
+            if (settings.frictionEnabled && !snoozed) {
+                if (activeOverlay is ActiveOverlay.TimeBlindnessNudge) {
+                    logAndDismissNudge(FrictionVocab.OUTCOME_NUDGE_IGNORED, effects)
+                }
+                val usage = loadUsage(app)
+                val overlay = ActiveOverlay.TimerExpired(
+                    pkgId = app.pkgId,
+                    packageName = app.packageName,
+                    displayName = app.displayName,
+                    logicalDate = usage.logicalDate,
+                    timerMinutes = timerInitialMin ?: 5,
+                    distractingMsToday = usage.distractingMsToday,
+                    budgetMs = usage.budgetMs,
+                    shownAtWallMs = nowWallMs,
+                    shownAtElapsedMs = nowElapsedMs,
+                    scheduleId = activeSchedule?.primaryScheduleId,
+                    escalationTier = EscalationPolicy.baseTier(usage.appRealOpensToday, usage.distractingMsToday),
+                )
+                timerRunning = false
+                activeOverlay = overlay
+                effects += FrictionEffect.ShowOverlay(overlay)
+                effects += persist(nowElapsedMs)
+                return effects
+            } else {
+                // Friction disabled or snoozed: do not interrupt with a blocking timer check-in.
+                timerRunning = false
             }
-            val usage = loadUsage(app)
-            val overlay = ActiveOverlay.TimerExpired(
-                pkgId = app.pkgId,
-                packageName = app.packageName,
-                displayName = app.displayName,
-                logicalDate = usage.logicalDate,
-                timerMinutes = timerInitialMin ?: 5,
-                distractingMsToday = usage.distractingMsToday,
-                budgetMs = usage.budgetMs,
-                shownAtWallMs = nowWallMs,
-                shownAtElapsedMs = nowElapsedMs,
-                scheduleId = activeSchedule?.primaryScheduleId,
-                escalationTier = EscalationPolicy.baseTier(usage.appRealOpensToday, usage.distractingMsToday),
-            )
-            timerRunning = false
-            activeOverlay = overlay
-            effects += FrictionEffect.ShowOverlay(overlay)
-            effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
-            return effects
         }
 
         // Time-blindness milestone nudge (suppressed during snooze or when friction is disabled).
-        val snoozed = snoozeUntilElapsedMs?.let { nowElapsedMs < it } == true
         val effectiveIntervalMin = activeSchedule?.nudgeIntervalMin ?: settings.nudgeIntervalMin
         if (settings.frictionEnabled && !snoozed && effectiveIntervalMin > 0 && activeOverlay == null) {
             val intervalMs = effectiveIntervalMin * 60_000L
-            val milestone = (sessionDistractingMs / intervalMs).toInt()
-            if (milestone > sessionLastNudgeMilestone) {
-                sessionLastNudgeMilestone = milestone
-                val logicalDate = currentLogicalDate ?: loadUsage(app).logicalDate
+            val milestoneMinutes = (sessionDistractingMs / intervalMs).toInt() * effectiveIntervalMin
+            if (milestoneMinutes > sessionLastNudgeMinutes && milestoneMinutes > 0) {
+                sessionLastNudgeMinutes = milestoneMinutes
+                val usage = loadUsage(app)
                 val nudge = ActiveOverlay.TimeBlindnessNudge(
                     pkgId = app.pkgId,
                     packageName = app.packageName,
-                    logicalDate = logicalDate,
+                    logicalDate = usage.logicalDate,
                     continuousDistractingMs = sessionDistractingMs,
-                    milestoneMinutes = milestone * effectiveIntervalMin,
+                    milestoneMinutes = milestoneMinutes,
                     appsHopped = sessionDistractingApps.toList(),
                     shownAtWallMs = nowWallMs,
                     shownAtElapsedMs = nowElapsedMs,
@@ -313,8 +391,15 @@ class FrictionEngine(
                 )
                 activeOverlay = nudge
                 effects += FrictionEffect.ShowOverlay(nudge)
-                effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+                effects += persist(nowElapsedMs)
+                return effects
             }
+        }
+
+        // Bounded periodic checkpoint while a timer or distracting session is actively running so a sudden
+        // process death never rolls back a running timer by minutes.
+        if (nowElapsedMs - lastCheckpointElapsedMs >= TIMER_CHECKPOINT_INTERVAL_MS) {
+            effects += persist(nowElapsedMs)
         }
 
         return effects
@@ -332,8 +417,13 @@ class FrictionEngine(
         activeOverlay = current.copy(selectedTimerMin = minutes)
     }
 
-    fun onPauseGoHome(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+    /**
+     * Completes a "Go Home" tap on a launch pause after the host confirms navigation succeeded.
+     * When [navigatedHome] is `false`, the overlay stays up and nothing is falsely logged as blocked.
+     */
+    fun onPauseGoHome(nowWallMs: Long, nowElapsedMs: Long, navigatedHome: Boolean = true): List<FrictionEffect> {
         val pause = activeOverlay as? ActiveOverlay.LaunchPause ?: return emptyList()
+        if (!navigatedHome) return emptyList()
         activeOverlay = null
         foreground.markLastExitBlocked()
         currentAppPolicy = null
@@ -342,24 +432,38 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(pause.toRecord(FrictionVocab.OUTCOME_CLOSED_GO_HOME, reaction, redirectPkgId = null)),
-            FrictionEffect.PerformGoHome,
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
-    fun onPauseRedirect(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+    /**
+     * Completes a Healthy Redirect tap after the host attempts the launch. Logs the destination actually reached:
+     * `REDIRECTED` with `redirectPkgId` when the redirect launched, `CLOSED_GO_HOME` with `null` redirect when it
+     * fell back to Home, or leaves the pause active when both failed.
+     */
+    fun onPauseRedirect(
+        nowWallMs: Long,
+        nowElapsedMs: Long,
+        result: RedirectLaunchResult = RedirectLaunchResult.LAUNCHED_REDIRECT,
+    ): List<FrictionEffect> {
         val pause = activeOverlay as? ActiveOverlay.LaunchPause ?: return emptyList()
-        val redirectPkg = pause.plan.redirectPackageName ?: return onPauseGoHome(nowWallMs, nowElapsedMs)
+        if (result == RedirectLaunchResult.FAILED) return emptyList()
         activeOverlay = null
         foreground.markLastExitBlocked()
         currentAppPolicy = null
         timerRunning = false
         val reaction = reactionMsIfPastCountdown(pause, nowElapsedMs)
+        val record = when (result) {
+            RedirectLaunchResult.LAUNCHED_REDIRECT ->
+                pause.toRecord(FrictionVocab.OUTCOME_REDIRECTED, reaction, redirectPkgId = pause.plan.redirectPkgId)
+            RedirectLaunchResult.FELL_BACK_HOME ->
+                pause.toRecord(FrictionVocab.OUTCOME_CLOSED_GO_HOME, reaction, redirectPkgId = null)
+            RedirectLaunchResult.FAILED -> error("unreachable")
+        }
         return listOf(
             FrictionEffect.DismissOverlay,
-            FrictionEffect.LogEvent(pause.toRecord(FrictionVocab.OUTCOME_REDIRECTED, reaction, redirectPkgId = pause.plan.redirectPkgId)),
-            FrictionEffect.LaunchRedirect(redirectPkg),
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            FrictionEffect.LogEvent(record),
+            persist(nowElapsedMs),
         )
     }
 
@@ -391,12 +495,13 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(pause.toRecord(FrictionVocab.OUTCOME_CONTINUED, reaction, redirectPkgId = null)),
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
-    fun onPauseBackPressed(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+    fun onPauseBackPressed(nowWallMs: Long, nowElapsedMs: Long, navigatedHome: Boolean = true): List<FrictionEffect> {
         val pause = activeOverlay as? ActiveOverlay.LaunchPause ?: return emptyList()
+        if (!navigatedHome) return emptyList()
         activeOverlay = null
         foreground.markLastExitBlocked()
         currentAppPolicy = null
@@ -405,13 +510,13 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(pause.toRecord(FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV, reaction, redirectPkgId = null)),
-            FrictionEffect.PerformGoHome,
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
-    fun onTimerGoHome(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+    fun onTimerGoHome(nowWallMs: Long, nowElapsedMs: Long, navigatedHome: Boolean = true): List<FrictionEffect> {
         val expired = activeOverlay as? ActiveOverlay.TimerExpired ?: return emptyList()
+        if (!navigatedHome) return emptyList()
         activeOverlay = null
         clearTimer()
         foreground.markLastExitBlocked()
@@ -419,13 +524,13 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(expired.toRecord(FrictionVocab.OUTCOME_CLOSED_GO_HOME, selectedTimerMin = null)),
-            FrictionEffect.PerformGoHome,
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
-    fun onTimerBackPressed(nowWallMs: Long, nowElapsedMs: Long): List<FrictionEffect> {
+    fun onTimerBackPressed(nowWallMs: Long, nowElapsedMs: Long, navigatedHome: Boolean = true): List<FrictionEffect> {
         val expired = activeOverlay as? ActiveOverlay.TimerExpired ?: return emptyList()
+        if (!navigatedHome) return emptyList()
         activeOverlay = null
         clearTimer()
         foreground.markLastExitBlocked()
@@ -433,8 +538,7 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(expired.toRecord(FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV, selectedTimerMin = null)),
-            FrictionEffect.PerformGoHome,
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
@@ -447,7 +551,7 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(expired.toRecord(FrictionVocab.OUTCOME_EXTENDED_5M, selectedTimerMin = 5)),
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
@@ -459,7 +563,7 @@ class FrictionEngine(
         return listOf(
             FrictionEffect.DismissOverlay,
             FrictionEffect.LogEvent(expired.toRecord(FrictionVocab.OUTCOME_DISMISSED_SESSION, selectedTimerMin = null)),
-            FrictionEffect.PersistState(snapshot(nowElapsedMs)),
+            persist(nowElapsedMs),
         )
     }
 
@@ -490,26 +594,46 @@ class FrictionEngine(
         when (transition) {
             is ForegroundTransition.Ignored -> return emptyList()
             is ForegroundTransition.ScreenOff -> return emptyList()
+            is ForegroundTransition.UnlockAwaitingApp -> {
+                return if (transition.fallbackPackage != null) {
+                    listOf(FrictionEffect.ScheduleUnlockFallback(foreground.config.unlockConfirmDelayMs))
+                } else {
+                    emptyList()
+                }
+            }
             is ForegroundTransition.MicroLockResumed -> {
                 val app = transition.packageName?.let(resolveApp)
                 currentAppPolicy = app
                 resumeDistractingTrackingIfNeeded(nowElapsedMs)
                 return emptyList()
             }
+            is ForegroundTransition.BounceResumed -> {
+                val app = resolveApp(transition.packageName)
+                currentAppPolicy = app
+                resumeDistractingTrackingIfNeeded(nowElapsedMs)
+                return listOf(FrictionEffect.CancelUnlockFallback)
+            }
             is ForegroundTransition.LeftToHome,
             is ForegroundTransition.SelfAppEntered,
             is ForegroundTransition.CallInterrupted,
             -> {
                 val effects = ArrayList<FrictionEffect>()
+                effects += FrictionEffect.CancelUnlockFallback
                 advanceActiveClocks(nowElapsedMs)
                 timerRunning = false
                 currentAppPolicy = null
+                val hadBlocking = isBlockingOverlayShowing()
                 dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = true, effects = effects)
-                effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+                if (hadBlocking && transition is ForegroundTransition.LeftToHome) {
+                    // Prevent a <1.5s Home bounce from bypassing an unresolved launch pause or timer expiry.
+                    foreground.markLastExitBlocked()
+                }
+                effects += persist(nowElapsedMs)
                 return effects
             }
             is ForegroundTransition.AppEntered -> {
                 val effects = ArrayList<FrictionEffect>()
+                effects += FrictionEffect.CancelUnlockFallback
                 advanceActiveClocks(nowElapsedMs)
                 timerRunning = false
                 // If user navigated away from an active launch pause directly to another app, log CLOSED_SYSTEM_NAV.
@@ -521,16 +645,19 @@ class FrictionEngine(
                 if (!app.countsAsDistracting && !app.isFrictionEligible) {
                     // Utility / Neutral (without opt-in) / Excluded: timer stays paused, no friction.
                     lastTickElapsedMs = nowElapsedMs
-                    effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+                    effects += persist(nowElapsedMs)
                     return effects
                 }
 
                 val activeSchedule = ScheduleMatcher.activeEffect(schedules, nowWallMs, zone)
                 val usage = loadUsage(app)
-                currentLogicalDate = usage.logicalDate
+                val snoozed = snoozeUntilElapsedMs?.let { nowElapsedMs < it } == true
 
-                // Conflict priority (spec §5.4): an already-expired cross-app timer takes priority over a launch pause.
-                if (app.countsAsDistracting && timerRemainingMs != null && timerRemainingMs!! <= 0L) {
+                // Conflict priority (spec §5.4): an already-expired cross-app timer takes priority over a launch pause,
+                // while still respecting master frictionEnabled and 1h snooze.
+                if (settings.frictionEnabled && !snoozed && app.countsAsDistracting &&
+                    timerRemainingMs != null && timerRemainingMs!! <= 0L
+                ) {
                     val expired = ActiveOverlay.TimerExpired(
                         pkgId = app.pkgId,
                         packageName = app.packageName,
@@ -546,11 +673,10 @@ class FrictionEngine(
                     )
                     activeOverlay = expired
                     effects += FrictionEffect.ShowOverlay(expired)
-                    effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+                    effects += persist(nowElapsedMs)
                     return effects
                 }
 
-                val snoozed = snoozeUntilElapsedMs?.let { nowElapsedMs < it } == true
                 val focusBoost = focusBoostUntilElapsedMs?.let { nowElapsedMs < it } == true
                 val inGrace = graceUntilByPackage[app.packageName]?.let { nowElapsedMs < it } == true
                 val redirect = settings.redirectPackageName?.let(resolveRedirect)
@@ -578,10 +704,14 @@ class FrictionEngine(
                     }
                     is LaunchDecision.Suppress -> {
                         recordDistractingAppVisit(app)
+                        // Record unprompted real opens (grace, snooze, daily cap, disabled) so live escalation stays accurate.
+                        if (app.countsAsDistracting && app.pkgId > 0L) {
+                            effects += FrictionEffect.RecordUnpromptedOpen(app.pkgId, nowWallMs)
+                        }
                         resumeDistractingTrackingIfNeeded(nowElapsedMs)
                     }
                 }
-                effects += FrictionEffect.PersistState(snapshot(nowElapsedMs))
+                effects += persist(nowElapsedMs)
                 return effects
             }
         }
@@ -596,6 +726,7 @@ class FrictionEngine(
 
         val delta = nowElapsedMs - last
         sessionDistractingMs += delta
+        totalAccruedDistractingMs += delta
         if (timerRunning && timerRemainingMs != null) {
             timerRemainingMs = (timerRemainingMs!! - delta).coerceAtLeast(0L)
         }
@@ -661,7 +792,7 @@ class FrictionEngine(
         graceUntilByPackage.clear()
         sessionDistractingMs = 0L
         sessionDistractingApps.clear()
-        sessionLastNudgeMilestone = 0
+        sessionLastNudgeMinutes = 0
     }
 
     private fun clearAllRuntimeState() {
@@ -676,6 +807,11 @@ class FrictionEngine(
         if (snoozeUntilElapsedMs != null && nowElapsedMs >= snoozeUntilElapsedMs!!) snoozeUntilElapsedMs = null
         if (focusBoostUntilElapsedMs != null && nowElapsedMs >= focusBoostUntilElapsedMs!!) focusBoostUntilElapsedMs = null
         graceUntilByPackage.entries.removeIf { (_, expiry) -> nowElapsedMs >= expiry }
+    }
+
+    private fun persist(nowElapsedMs: Long): FrictionEffect.PersistState {
+        lastCheckpointElapsedMs = nowElapsedMs
+        return FrictionEffect.PersistState(snapshot(nowElapsedMs))
     }
 
     private fun reactionMsIfPastCountdown(pause: ActiveOverlay.LaunchPause, nowElapsedMs: Long): Long? =
@@ -732,4 +868,8 @@ class FrictionEngine(
         redirectPkgId = null,
         outcome = outcome,
     )
+
+    companion object {
+        const val TIMER_CHECKPOINT_INTERVAL_MS = 15_000L
+    }
 }

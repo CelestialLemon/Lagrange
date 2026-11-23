@@ -95,6 +95,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _health = MutableStateFlow(PermissionHealthChecker.check(app))
     val health: StateFlow<PermissionHealth> = _health
 
+    init {
+        viewModelScope.launch {
+            com.celestiallemon.lagrange.friction.LagrangeAccessibilityService.readyState.collect {
+                _health.value = PermissionHealthChecker.check(getApplication())
+            }
+        }
+    }
+
     val harvesting: StateFlow<Boolean> = graph.afterReady { harvester.running }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val lastHarvest: StateFlow<HarvestResult?> = graph.afterReady { harvester.lastResult }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 

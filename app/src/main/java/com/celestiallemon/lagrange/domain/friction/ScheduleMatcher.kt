@@ -45,7 +45,7 @@ object ScheduleMatcher {
         val local = Instant.ofEpochMilli(atUtcMs).atZone(zone)
         val matched = schedules.filter { matches(it, local) }
         if (matched.isEmpty()) return null
-        val primary = matched.maxWith(compareBy<FrictionSchedule> { it.escalationBoost }.thenByDescending { -it.id })
+        val primary = matched.maxWith(compareBy<FrictionSchedule> { it.escalationBoost }.thenByDescending { it.id })
         val maxBoost = matched.maxOf { it.escalationBoost }
         val requireTimer = matched.any { it.requireTimerPrompt }
         val tightestNudge = matched.mapNotNull { it.nudgeIntervalMin?.takeIf { m -> m > 0 } }.minOrNull()

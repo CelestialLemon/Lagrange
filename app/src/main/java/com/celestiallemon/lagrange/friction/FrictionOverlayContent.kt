@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
@@ -115,7 +116,8 @@ internal fun LaunchPauseOverlayContent(
                     center = Offset(size.width * 0.15f, size.height * 0.85f),
                 )
             }
-            .padding(horizontal = Space.l, vertical = Space.xl),
+            .safeDrawingPadding()
+            .padding(horizontal = Space.l, vertical = Space.m),
         contentAlignment = Alignment.Center,
     ) {
         Column(
@@ -365,13 +367,17 @@ internal fun TimerExpiredOverlayContent(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.95f))
-            .padding(horizontal = Space.l, vertical = Space.xl),
+            .safeDrawingPadding()
+            .padding(horizontal = Space.l, vertical = Space.m),
         contentAlignment = Alignment.Center,
     ) {
         Surface(
             shape = MaterialTheme.shapes.extraLarge,
             color = MaterialTheme.colorScheme.surfaceContainerLow,
-            modifier = Modifier.widthIn(max = 400.dp).fillMaxWidth(),
+            modifier = Modifier
+                .widthIn(max = 400.dp)
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState()),
         ) {
             Column(
                 modifier = Modifier.padding(Space.l),

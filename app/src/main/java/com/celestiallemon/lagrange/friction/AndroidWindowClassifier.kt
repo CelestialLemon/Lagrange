@@ -34,8 +34,10 @@ class AndroidWindowClassifier(
         val key = "$packageName/$className"
         activityCache.get(key)?.let { return it }
         val resolved = try {
-            val component = ComponentName(packageName, className)
-            pm.getActivityInfo(component, PackageManager.ComponentInfoFlags.of(0))
+            val component = ComponentName.createRelative(packageName, className)
+            // Int-flags overload: identical semantics with flags = 0, and also supported by Robolectric.
+            @Suppress("DEPRECATION")
+            pm.getActivityInfo(component, 0)
             true
         } catch (_: PackageManager.NameNotFoundException) {
             false

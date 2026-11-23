@@ -128,7 +128,7 @@ fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> 
             icon = Icons.Outlined.GppGood,
             title = "Advanced Protection",
             body = when (health.advancedProtection) {
-                Check.YES -> "On. Android restricts sideloaded accessibility tools, so gentle friction may be unavailable. Collection is unaffected."
+                Check.YES -> "On. Android restricts accessibility access to verified accessibility tools, so gentle friction may be unavailable. Analytics are unaffected."
                 Check.NO -> "Off. Nothing restricts Lagrange's services."
                 Check.UNKNOWN -> "Android didn't say whether Advanced Protection is on."
             },

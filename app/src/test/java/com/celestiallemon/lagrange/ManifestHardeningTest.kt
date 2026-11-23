@@ -40,6 +40,15 @@ class ManifestHardeningTest {
         assertTrue(xml.contains("android:accessibilityEventTypes=\"typeWindowStateChanged\""))
         assertTrue(xml.contains("android:canRetrieveWindowContent=\"false\""))
         assertTrue(xml.contains("android:isAccessibilityTool=\"false\""))
+        assertTrue(xml.contains("android:notificationTimeout=\"0\""))
+
+        val serviceInfo = context.packageManager.getServiceInfo(
+            android.content.ComponentName(context, com.celestiallemon.lagrange.friction.LagrangeAccessibilityService::class.java),
+            PackageManager.ComponentInfoFlags.of(PackageManager.GET_META_DATA.toLong()),
+        )
+        assertEquals("android.permission.BIND_ACCESSIBILITY_SERVICE", serviceInfo.permission)
+        assertTrue(serviceInfo.exported)
+        assertTrue(serviceInfo.metaData?.containsKey("android.accessibilityservice") == true)
     }
 
     @Test
