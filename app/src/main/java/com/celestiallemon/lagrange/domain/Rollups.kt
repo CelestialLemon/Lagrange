@@ -271,8 +271,9 @@ object RollupEngine {
         val appRabbit = HashMap<Long, Long>()
         val hourly = HashMap<Pair<Int, Long>, LongArray>() // (slot, pkg) -> [ms, opens]
         for (ep in input.episodes) {
+            // Every lit minute, lockscreen before an unlock included, lands on the day it happened.
+            for (s in ep.screenSpans) screen += s.overlapMs(w.startMs, clip)
             if (ep.endMs <= w.startMs || ep.startMs >= w.endMs) continue
-            for (s in ep.activeSpans) screen += s.overlapMs(w.startMs, clip)
             for (seg in ep.segments) {
                 val cat = input.apps[seg.pkgId]?.category ?: AppCategory.NEUTRAL
                 for (piece in seg.effectiveSpans()) {
@@ -317,11 +318,17 @@ object RollupEngine {
         val firstPickup = startingUnlocked.minOfOrNull { it.startMs }
         val lastActivity = startingUnlocked.maxOfOrNull { it.endMs }
         val overnight = overnightGap(nonGlance, w, clip, rules)
-        val sortedDay = startingUnlocked.sortedBy { it.startMs }
+        // Phone-free stretches between this day's episodes, and from an episode still running at the rollover to
+        // the day's first one (that episode stays counted on the day it started).
+        val carriedIn = nonGlance.filter { it.startMs < w.startMs && it.endMs > w.startMs }
         var longest = 0L
-        for (i in 1 until sortedDay.size) {
-            val g = sortedDay[i].startMs - sortedDay[i - 1].endMs
-            if (g > longest && !(overnight != null && g == overnight.second && sortedDay[i].startMs == overnight.first)) longest = g
+        var prevEnd = carriedIn.maxOfOrNull { it.endMs } ?: Long.MIN_VALUE
+        for (ep in startingUnlocked.sortedBy { it.startMs }) {
+            if (prevEnd != Long.MIN_VALUE) {
+                val g = ep.startMs - prevEnd
+                if (g > longest && !(overnight != null && g == overnight.second && ep.startMs == overnight.first)) longest = g
+            }
+            prevEnd = maxOf(prevEnd, ep.endMs)
         }
 
         val rollup = DayRollup(

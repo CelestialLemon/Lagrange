@@ -23,12 +23,21 @@ class RollupEngineTest {
         listener(-3 * DAY_MS, 3 * DAY_MS)
     }
 
-    private fun compute(l: Ledger, zone: ZoneId, vararg dates: String, rollover: Int = 4, dataEnd: Long = l.at(3 * DAY_MS), budget: Long? = null): Map<LocalDate, DayResult> {
+    private fun compute(
+        l: Ledger,
+        zone: ZoneId,
+        vararg dates: String,
+        rollover: Int = 4,
+        dataEnd: Long = l.at(3 * DAY_MS),
+        budget: Long? = null,
+        rules: RollupRules = RollupRules(),
+    ): Map<LocalDate, DayResult> {
         val zones = ZoneTimeline.fixed(zone)
         val windows = dates.map { zones.window(LocalDate.parse(it), rollover) }
         val episodes = SessionReconstructor.reconstruct(l.input().copy(dataEndMs = dataEnd))
         return RollupEngine.compute(
             RollupInput(windows, episodes, P.apps, l.coverage, l.notifications, rollover, dataEnd, budgetFor = { budget }),
+            rules,
         ).associateBy { it.rollup.logicalDate }
     }
 
@@ -230,5 +239,84 @@ class RollupEngineTest {
         val r = compute(l, kolkata, "2026-11-22", "2026-11-23").day("2026-11-23").rollup
         assertEquals(l.at(7 * HOUR_MS + 30 * MIN + SEC) - l.at(5 * MIN + 3 * SEC), r.overnightGapMs)
         assertEquals(l.at(15 * HOUR_MS + 30 * MIN + SEC) - l.at(7 * HOUR_MS + 35 * MIN + 3 * SEC), r.longestFocusGapMs)
+    }
+
+    @Test
+    fun `lockscreen time before the unlock counts as screen on`() {
+        // Screen on 03:50, unlocked 03:55, screen off 03:56: six lit minutes, one of them unlocked.
+        val l = ledger("2026-11-23T03:50", kolkata)
+        l.screenOn(0).unlock(5 * MIN).use(P.INSTAGRAM, 5 * MIN, 6 * MIN).lock(6 * MIN).screenOff(6 * MIN)
+        val r = compute(l, kolkata, "2026-11-22", "2026-11-23")
+        val day = r.day("2026-11-22").rollup
+        assertEquals(6 * MIN, day.totalScreenMs)
+        assertEquals(MIN, day.activeUsageMs)
+        assertEquals(1, day.episodeCount)
+        assertEquals(0, day.glanceCount)
+        assertEquals(0L, r.day("2026-11-23").rollup.totalScreenMs)
+    }
+
+    @Test
+    fun `lockscreen time before an unlock after the rollover stays on the day it was lit`() {
+        // Screen on 03:58, unlocked 04:01, screen off 04:03: the episode starts on the new day, the lockscreen
+        // minutes before 04:00 stay on the old one.
+        val l = ledger("2026-11-23T03:50", kolkata)
+        l.screenOn(8 * MIN).unlock(11 * MIN).use(P.INSTAGRAM, 11 * MIN, 13 * MIN).lock(13 * MIN).screenOff(13 * MIN)
+        val r = compute(l, kolkata, "2026-11-22", "2026-11-23")
+        val before = r.day("2026-11-22").rollup
+        val after = r.day("2026-11-23").rollup
+        assertEquals(2 * MIN, before.totalScreenMs)
+        assertEquals(3 * MIN, after.totalScreenMs)
+        assertEquals(0, before.episodeCount)
+        assertEquals(1, after.episodeCount)
+        assertEquals(2 * MIN, after.activeUsageMs)
+    }
+
+    @Test
+    fun `glances inside a merged episode are lit time counted once`() {
+        val l = ledger("2026-11-23T10:00", kolkata)
+        l.session(0, P.INSTAGRAM to MIN) // lit 0 .. 1m03s
+        l.glance(MIN + 5 * SEC, durMs = 2 * SEC) // micro-lock glance, merged into the episode's gap
+        l.session(MIN + 10 * SEC, P.INSTAGRAM to MIN) // lit 1m10s .. 2m13s
+        val day = compute(l, kolkata, "2026-11-23").day("2026-11-23").rollup
+        assertEquals(1, day.episodeCount)
+        assertEquals(2 * (MIN + 3 * SEC) + 2 * SEC, day.totalScreenMs)
+    }
+
+    @Test
+    fun `an episode running past the rollover still opens the next day's first focus gap`() {
+        // 03:50 - 05:00 on the phone, then nothing until a noon pickup.
+        val l = ledger("2026-11-23T03:50", kolkata)
+        l.session(0, P.INSTAGRAM to 70 * MIN)
+        l.session(8 * HOUR_MS + 10 * MIN, P.WHATSAPP to 5 * MIN)
+        val stretch = l.at(8 * HOUR_MS + 10 * MIN + SEC) - l.at(70 * MIN + 3 * SEC) // 05:00 -> 12:00, about seven hours
+
+        // With a night window that ends at 06:00 the morning is a phone-free stretch, not sleep.
+        val earlyNight = RollupRules(nightAfterRolloverMs = 2 * HOUR_MS)
+        val r = compute(l, kolkata, "2026-11-22", "2026-11-23", rules = earlyNight)
+        val today = r.day("2026-11-23").rollup
+        assertEquals(stretch, today.longestFocusGapMs)
+        assertNull(today.overnightGapMs)
+        // The crossing episode is still counted on the day it started.
+        assertEquals(1, r.day("2026-11-22").rollup.episodeCount)
+        assertEquals(1, today.episodeCount)
+        assertEquals(l.at(8 * HOUR_MS + 10 * MIN + SEC), today.firstPickupMs)
+
+        // With the default 22:00 - 10:00 night it is the sleep proxy instead, and is never counted twice.
+        val byDefault = compute(l, kolkata, "2026-11-22", "2026-11-23").day("2026-11-23").rollup
+        assertEquals(stretch, byDefault.overnightGapMs)
+        assertEquals(0L, byDefault.longestFocusGapMs)
+    }
+
+    @Test
+    fun `a stretch after an episode running past the rollover counts when it is not the night`() {
+        // 03:50 - 05:00, then nothing until 15:30: ten and a half phone-free hours, mostly after the night window.
+        val l = ledger("2026-11-23T03:50", kolkata)
+        l.session(0, P.INSTAGRAM to 70 * MIN)
+        l.session(11 * HOUR_MS + 40 * MIN, P.WHATSAPP to 5 * MIN)
+        l.session(12 * HOUR_MS, P.CHROME to 5 * MIN)
+        val r = compute(l, kolkata, "2026-11-22", "2026-11-23").day("2026-11-23").rollup
+        assertNull(r.overnightGapMs)
+        assertEquals(l.at(11 * HOUR_MS + 40 * MIN + SEC) - l.at(70 * MIN + 3 * SEC), r.longestFocusGapMs)
+        assertEquals(2, r.episodeCount)
     }
 }

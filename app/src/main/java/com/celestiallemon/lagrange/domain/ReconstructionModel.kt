@@ -232,6 +232,11 @@ data class Episode(
     val uncertainTail: Boolean = false,
     /** Still open when the ledger ends (the episode is happening now). */
     val inProgress: Boolean = false,
+    /**
+     * Every lit-screen interval this episode is made of, lockscreen time before the unlock included (screen on to
+     * screen off, never gaps). Feeds "Screen on"; the same as [activeSpans] for glances.
+     */
+    val screenSpans: List<Span> = activeSpans,
 ) {
     val isRabbitHole: Boolean get() = rabbitHoleReasons.isNotEmpty()
     val episodeKey: String get() = EpisodeKey.of(startMs, entryPkgId, isGlanceOnly)

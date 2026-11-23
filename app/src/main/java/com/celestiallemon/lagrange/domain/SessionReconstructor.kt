@@ -65,6 +65,8 @@ object SessionReconstructor {
     /** An unlocked interval or a glance, before merging. */
     private class Piece(
         val pickupAtMs: Long,
+        /** The whole lit-screen interval, lockscreen time before the unlock included. */
+        val screen: Span,
         val active: Span,
         val glance: Boolean,
         val slices: List<Fg>,
@@ -75,6 +77,7 @@ object SessionReconstructor {
     private class RawEpisode(
         val pickupAtMs: Long,
         val activeSpans: List<Span>,
+        val screenSpans: List<Span>,
         val glance: Boolean,
         val slices: List<Fg>,
         val pickups: Int,
@@ -247,10 +250,11 @@ object SessionReconstructor {
                     ?: if (!timeline.keyguardObserved && slicesAll.any { !isTransient(it.pkgId) }) iv.onMs else null
                     ?: if (callUi) slicesAll.first { it.pkgId in callPkgIds }.span.startMs else null
                 if (activeStart == null || activeStart >= iv.endMs) {
-                    Piece(iv.onMs, Span(iv.onMs, iv.endMs), glance = true, slices = emptyList(), iv.uncertainTail, iv.inProgress)
+                    val lit = Span(iv.onMs, iv.endMs)
+                    Piece(iv.onMs, lit, lit, glance = true, slices = emptyList(), iv.uncertainTail, iv.inProgress)
                 } else {
                     val active = Span(activeStart, iv.endMs)
-                    Piece(iv.onMs, active, glance = false, slices = clipSlices(fg, active.startMs, active.endMs), iv.uncertainTail, iv.inProgress)
+                    Piece(iv.onMs, Span(iv.onMs, iv.endMs), active, glance = false, slices = clipSlices(fg, active.startMs, active.endMs), iv.uncertainTail, iv.inProgress)
                 }
             }
 
@@ -287,6 +291,7 @@ object SessionReconstructor {
                 out += RawEpisode(
                     pickupAtMs = group.first().pickupAtMs,
                     activeSpans = group.map { it.active },
+                    screenSpans = group.map { it.screen },
                     glance = false,
                     slices = group.flatMap { it.slices },
                     pickups = mergedPickups[i] + inside.size,
@@ -295,7 +300,7 @@ object SessionReconstructor {
                 )
             }
             for (g in glances) {
-                out += RawEpisode(g.pickupAtMs, listOf(g.active), glance = true, slices = emptyList(), pickups = 1, g.uncertainTail, g.inProgress)
+                out += RawEpisode(g.pickupAtMs, listOf(g.active), listOf(g.screen), glance = true, slices = emptyList(), pickups = 1, g.uncertainTail, g.inProgress)
             }
             return out.sortedBy { it.activeSpans.first().startMs }
         }
@@ -322,7 +327,7 @@ object SessionReconstructor {
                 // A lockscreen-only glance can't open a notification: taps need an unlock.
                 val trigger = attributeEpisode(raw.pickupAtMs, start, end, null, null, consumed, clicksAllowed = false)
                 return Episode(
-                    startMs = start, endMs = end, pickupAtMs = raw.pickupAtMs, activeSpans = raw.activeSpans,
+                    startMs = start, endMs = end, pickupAtMs = raw.pickupAtMs, activeSpans = raw.activeSpans, screenSpans = raw.screenSpans,
                     activeDurationMs = spanTotal, physicalPickupCount = 1, isGlanceOnly = true,
                     triggerEvidence = trigger.evidence, triggerPkgId = trigger.pkgId, triggerNotificationId = trigger.notificationId,
                     entryPkgId = null, segments = emptyList(), totals = CategoryTotals(), blockedAttemptCount = 0,
@@ -371,7 +376,7 @@ object SessionReconstructor {
             val reasons = rabbitHoleReasons(totals, distinctDistracting, active, entry?.pkgId, trigger.pkgId, trigger.evidence)
             val archetype = classify(segments, totals, active, reasons, blockedCount)
             return Episode(
-                startMs = start, endMs = end, pickupAtMs = raw.pickupAtMs, activeSpans = raw.activeSpans,
+                startMs = start, endMs = end, pickupAtMs = raw.pickupAtMs, activeSpans = raw.activeSpans, screenSpans = raw.screenSpans,
                 activeDurationMs = active, physicalPickupCount = raw.pickups, isGlanceOnly = false,
                 triggerEvidence = trigger.evidence, triggerPkgId = trigger.pkgId, triggerNotificationId = trigger.notificationId,
                 entryPkgId = entry?.pkgId, segments = segments, totals = totals, blockedAttemptCount = blockedCount,
