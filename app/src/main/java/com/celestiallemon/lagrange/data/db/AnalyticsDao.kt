@@ -160,6 +160,16 @@ interface AnalyticsDao {
     )
     suspend fun unlockedSessions(fromDate: String, toDate: String): List<SessionEntity>
 
+    /**
+     * Notifications lockscreen glances on the range's logical days consumed as their trigger. Glances never count as
+     * pickups or downstream use in the Lab, but the reconstructor's switch matching could not reuse these.
+     */
+    @Query(
+        "SELECT trigger_notification_id FROM sessions WHERE is_glance_only = 1 AND trigger_notification_id IS NOT NULL " +
+            "AND logical_date >= :fromDate AND logical_date <= :toDate",
+    )
+    suspend fun glanceTriggerNotificationIds(fromDate: String, toDate: String): List<Long>
+
     /** Of the unlocked episodes that started before [beforeMs], the one that ended last. */
     @Query("SELECT * FROM sessions WHERE is_glance_only = 0 AND start_ms < :beforeMs ORDER BY end_ms DESC, id DESC LIMIT 1")
     suspend fun lastUnlockedEndingBefore(beforeMs: Long): SessionEntity?

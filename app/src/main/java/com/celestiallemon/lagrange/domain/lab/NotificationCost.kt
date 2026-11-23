@@ -125,6 +125,8 @@ object NotificationCostAnalyzer {
      * @param notifications trigger-relevant notifications posted in `[fromMs, toMs)` (any coverage; filtered here).
      * @param listener spans the notification listener was ACTIVE.
      * @param episodes unlocked episodes overlapping the window (plus a little before, for idle gaps), any order.
+     * @param reserved notifications lockscreen glances consumed as their trigger: never matched to a switch, though
+     *   the glances themselves count neither as pickups nor as downstream use.
      */
     fun analyze(
         notifications: List<LabNotification>,
@@ -138,13 +140,14 @@ object NotificationCostAnalyzer {
         rules: NotificationRules = NotificationRules(),
         /** Where usage collection was observing (null: assume everywhere). */
         usage: List<Span>? = null,
+        reserved: Set<Long> = emptySet(),
     ): NotificationCostReport {
         val end = minOf(toMs, dataEndMs)
         val covered = notifications.filter { it.postedAtMs in fromMs until end && Spans.contains(listener, it.postedAtMs) && it.isCountable }
         // Credit is resolved against every candidate the reconstructor could see (including ones posted before the
         // window or outside listener coverage) and only then narrowed to this cohort; open sessions can't be credited yet.
         val candidates = notifications.filter { it.postedAtMs < end && it.isCountable }
-        val attributions = attribute(candidates, episodes.filter { !it.inProgress && it.endMs <= dataEndMs }, apps, rules)
+        val attributions = attribute(candidates, episodes.filter { !it.inProgress && it.endMs <= dataEndMs }, apps, rules, reserved)
         val likelyAppCancel = attributions.filter { it.evidence == TriggerEvidence.LIKELY_APP_CANCEL_CLICK }.map { it.notificationId }.toSet()
         fun clicked(n: LabNotification) = n.removalReason == RemovalReason.CLICK || (n.removalReason == RemovalReason.APP_CANCEL && n.id in likelyAppCancel)
 
@@ -204,13 +207,21 @@ object NotificationCostAnalyzer {
      * the app's own cancel within 10 s after it, or its alert within 60 s before it), each notification credited at
      * most once overall. Within an episode every distracting segment has one owner: the latest credit at or before
      * it, so a notification that opened the episode owns the stretch up to the next notification-driven hop.
+     * [reserved] holds notifications the reconstructor gave to episodes not passed here (lockscreen glances), so a
+     * switch can't take them either.
      */
-    fun attribute(notifications: List<LabNotification>, episodes: List<LabEpisode>, apps: LabApps, rules: NotificationRules = NotificationRules()): List<Attribution> {
+    fun attribute(
+        notifications: List<LabNotification>,
+        episodes: List<LabEpisode>,
+        apps: LabApps,
+        rules: NotificationRules = NotificationRules(),
+        reserved: Set<Long> = emptySet(),
+    ): List<Attribution> {
         val byId = notifications.associateBy { it.id }
         val byPkg = notifications.groupBy { it.pkgId }
         val sorted = episodes.sortedWith(compareBy<LabEpisode> { it.startMs }.thenBy { it.id })
         // Stored episode triggers are authoritative and were consumed first by the reconstructor.
-        val consumed = HashSet<Long>()
+        val consumed = HashSet<Long>(reserved)
         for (e in sorted) if (e.triggerEvidence in ATTRIBUTING) e.triggerNotificationId?.let { consumed += it }
 
         // Like the reconstructor: direct evidence (taps, app self-cancels) is matched everywhere first, so a

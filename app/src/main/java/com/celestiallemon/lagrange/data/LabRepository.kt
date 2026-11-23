@@ -260,8 +260,12 @@ class LabRepository(
         val notifications = if (end > scope.fromMs) db.rawNotificationDao().eligibleAlive(loadFrom, end).map { it.toLab() } else emptyList()
         // Still-open sessions count as pickups; the analyzer credits downstream minutes only once they close.
         val episodes = episodesBetween(scope.range.start.minusDays(1), scope.range.end).filter { it.startMs < scope.dataEndMs }
+        // Glances stay out of pickups and downstream use, but the alerts they consumed can't be matched to a switch.
+        val glanceTriggers = dao.glanceTriggerNotificationIds(scope.range.start.minusDays(1).toString(), scope.range.end.toString()).toSet()
         val usage = SpanSet.usageObserved(ctx.coverage)
-        val report = NotificationCostAnalyzer.analyze(notifications, listener, episodes, scope.fromMs, scope.toMs, scope.dataEndMs, apps, sort, usage = usage)
+        val report = NotificationCostAnalyzer.analyze(
+            notifications, listener, episodes, scope.fromMs, scope.toMs, scope.dataEndMs, apps, sort, usage = usage, reserved = glanceTriggers,
+        )
         NotificationCostData(scope, report, apps)
     }
 

@@ -181,6 +181,40 @@ class NotificationCostTest {
     }
 
     @Test
+    fun `an alert a lockscreen glance consumed is not matched to a later switch`() {
+        val h = HOUR_MS
+        val base = 2 * h
+        val notifs = listOf(
+            n(1, INSTA, base, channel = "older"),
+            n(2, INSTA, base + 10_000, channel = "newer"), // consumed by a glance at +12 s
+            n(3, YOUTUBE, base + 15_000, channel = "yt"), // opens the unlocked session at +20 s
+        )
+        val open = base + 20_000
+        val switch = open + 10_000 // both Instagram alerts fall within 60 s before the switch
+        val earlier = episode(base - 30 * MIN, KINDLE to 5) // gives the session an idle gap to be a pickup from
+        val e = episode(open, YOUTUBE to 1, INSTA to 10, trigger = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerNotificationId = 3).let { ep ->
+            val yt = ep.segments[0].copy(endMs = switch, durationMs = switch - open)
+            val insta = ep.segments[1].let { it.copy(startMs = switch, endMs = switch + 10 * MIN, triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT) }
+            ep.copy(endMs = insta.endMs, segments = listOf(yt, insta))
+        }
+        val r = NotificationCostAnalyzer.analyze(notifs, listener, listOf(earlier, e), 0, 10 * h, 10 * h, testApps, reserved = setOf(2L))
+        val insta = r.rows.first { it.pkgId == INSTA }
+        val older = insta.channels.first { it.channelId == "older" }
+        val newer = insta.channels.first { it.channelId == "newer" }
+        assertEquals(10 * MIN, older.downstreamMs)
+        assertEquals(1, older.attributed)
+        assertEquals(0L, newer.downstreamMs) // the glance's alert earns nothing…
+        assertEquals(0, newer.attributed)
+        assertEquals(10 * MIN, insta.downstreamMs)
+        assertEquals(1, r.basePickups) // …and the glance is no pickup: only the unlocked session is
+        assertEquals(10_000L, r.rows.first { it.pkgId == YOUTUBE }.downstreamMs)
+
+        // Without the reservation the switch would take the newer alert, as the bug did.
+        val unreserved = NotificationCostAnalyzer.attribute(notifs, listOf(earlier, e), testApps)
+        assertEquals(2L, unreserved.first { it.fromMs == switch }.notificationId)
+    }
+
+    @Test
     fun `pseudonymized or missing channel ids fall back to the app's notification settings`() {
         val pkg = "com.example"
         assertEquals(NotificationSettingsTarget.Channel(pkg, "promotions"), ChannelSettings.target(pkg, "promotions"))

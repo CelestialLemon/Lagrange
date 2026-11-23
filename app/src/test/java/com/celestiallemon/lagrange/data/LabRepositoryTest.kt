@@ -278,6 +278,55 @@ class LabRepositoryTest {
     }
 
     @Test
+    fun `notification cost reserves the alert a lockscreen glance consumed without counting the glance`() = runBlocking {
+        val e = env()
+        val insta = e.pkg("com.instagram.android")
+        val yt = e.pkg("com.google.android.youtube")
+        val day = d(-1)
+        e.rollup(day)
+        e.coverage(ServiceKind.NOTIFICATION_LISTENER, at(day, 8), at(day, 20))
+        val base = at(day, 10)
+        e.notification(insta, base, channel = "older")
+        val newer = e.notification(insta, base + 10_000, channel = "newer")
+        val ytAlert = e.notification(yt, base + 15_000, channel = "yt")
+        val open = base + 20_000
+        val switch = open + 10_000
+        val end = switch + 10 * MINUTE_MS
+        fun row(key: String, start: Long, stop: Long, glance: Boolean, trigger: TriggerEvidence, notif: Long?, entry: Long?) = SessionEntity(
+            episodeKey = key, algorithmVersion = 1, logicalDate = day.toString(), startMs = start, endMs = stop,
+            activeDurationMs = stop - start, physicalPickupCount = 1, isGlanceOnly = glance, triggerEvidence = trigger.name,
+            triggerPkgId = null, triggerNotificationId = notif, entryPkgId = entry, totalDistractingMs = if (glance) 0 else stop - start,
+            totalNeutralMs = 0, totalUtilityMs = 0, totalExcludedMs = 0, blockedAttemptCount = 0, distinctAppCount = if (glance) 0 else 2,
+            distinctDistractingCount = if (glance) 0 else 2, archetype = if (glance) "GLANCE" else "HOPPER", isRabbitHole = false,
+            rabbitHoleReasons = null, worthItRating = null, contextFlags = null,
+        )
+        // The glance (lockscreen only) consumed the newer Instagram alert.
+        e.db.derivedDao().insertSession(row("glance", base + 12_000, base + 16_000, true, TriggerEvidence.RECENT_POSSIBLE_ALERT, newer, null))
+        val sid = e.db.derivedDao().insertSession(row("unlocked", open, end, false, TriggerEvidence.RECENT_POSSIBLE_ALERT, ytAlert, yt))
+        e.db.derivedDao().insertSegment(
+            SessionSegmentEntity(
+                sessionId = sid, seqIndex = 0, pkgId = yt, startMs = open, endMs = switch, durationMs = switch - open,
+                isBlockedAttempt = false, segmentTriggerEvidence = null, segmentTriggerPkgId = null,
+            ),
+        )
+        // The reconstructor matched this switch to the older alert, since the glance had already used the newer one.
+        e.db.derivedDao().insertSegment(
+            SessionSegmentEntity(
+                sessionId = sid, seqIndex = 1, pkgId = insta, startMs = switch, endMs = end, durationMs = end - switch,
+                isBlockedAttempt = false, segmentTriggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT.name, segmentTriggerPkgId = insta,
+            ),
+        )
+
+        val r = e.repo.notificationCost(TrendWindow(WindowKind.D7)).report
+        val instaRow = r.rows.first { it.pkgId == insta }
+        assertEquals(10 * MINUTE_MS, instaRow.channels.first { it.channelId == "older" }.downstreamMs)
+        assertEquals(0L, instaRow.channels.first { it.channelId == "newer" }.downstreamMs)
+        assertEquals(0, instaRow.channels.first { it.channelId == "newer" }.attributed)
+        assertEquals(10 * MINUTE_MS, instaRow.downstreamMs)
+        assertEquals(0, r.basePickups) // a glance is never a pickup, so there is no idle gap before the session
+    }
+
+    @Test
     fun `friction exits use run starts, usage coverage and the enabled history`() = runBlocking {
         val e = env()
         val insta = e.pkg("com.instagram.android")
