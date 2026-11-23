@@ -1,6 +1,5 @@
 package com.celestiallemon.lagrange.digest
 
-import androidx.work.ExistingWorkPolicy
 import com.celestiallemon.lagrange.data.UserPrefs
 import com.celestiallemon.lagrange.digest.DigestScheduler.Job
 import com.celestiallemon.lagrange.digest.DigestScheduler.Plan
@@ -20,22 +19,20 @@ class DigestSchedulerPlanTest {
     }
 
     @Test
-    fun `nothing queued, or a stale run, is (re)placed`() {
-        assertEquals(Plan.Enqueue(emptyList(), ExistingWorkPolicy.REPLACE), DigestScheduler.plan(true, emptyList(), fp))
-        assertEquals(Plan.Enqueue(listOf(0), ExistingWorkPolicy.REPLACE), DigestScheduler.plan(true, listOf(Job(false, "digest-fp:daily:600:Europe/Berlin")), fp))
+    fun `nothing queued, or a stale run, is replaced`() {
+        assertEquals(Plan.Replace, DigestScheduler.plan(true, emptyList(), fp))
+        assertEquals(Plan.Replace, DigestScheduler.plan(true, listOf(Job(false, "digest-fp:daily:600:Europe/Berlin")), fp))
+        // A forced replan (wall clock jumped) replaces even an up-to-date queued run.
+        assertEquals(Plan.Replace, DigestScheduler.plan(true, listOf(Job(false, fp)), fp, force = true))
     }
 
     @Test
-    fun `a running digest is never cancelled`() {
-        // Running alone: it queues its own successor with the current settings when it finishes.
+    fun `a running digest is never touched, even with a stale successor or a forced replan`() {
+        // The running worker hands off under the scheduler lock with the settings current then, so nothing is
+        // cancelled or appended around it (cancelling a queued leaf behind it could prune the whole chain).
         assertEquals(Plan.Keep, DigestScheduler.plan(true, listOf(Job(true, "old")), fp))
-        // Running with a stale successor behind it: only the successor is replaced, appended after the running job.
-        assertEquals(
-            Plan.Enqueue(listOf(1), ExistingWorkPolicy.APPEND_OR_REPLACE),
-            DigestScheduler.plan(true, listOf(Job(true, fp), Job(false, "old")), fp),
-        )
-        // A forced replan (clock jump) also appends rather than replacing the running job.
-        assertEquals(Plan.Enqueue(emptyList(), ExistingWorkPolicy.APPEND_OR_REPLACE), DigestScheduler.plan(true, listOf(Job(true, fp)), fp, force = true))
+        assertEquals(Plan.Keep, DigestScheduler.plan(true, listOf(Job(true, fp), Job(false, "old")), fp))
+        assertEquals(Plan.Keep, DigestScheduler.plan(true, listOf(Job(true, fp)), fp, force = true))
     }
 
     @Test

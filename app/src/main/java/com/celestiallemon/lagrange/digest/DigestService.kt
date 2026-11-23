@@ -2,6 +2,8 @@ package com.celestiallemon.lagrange.digest
 
 import com.celestiallemon.lagrange.domain.digest.Digest
 import com.celestiallemon.lagrange.domain.digest.DigestKind
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.withContext
 
 /** Where digests go: the system notification shade in the app, a recorder in tests. */
 interface DigestPoster {
@@ -16,7 +18,8 @@ interface DigestPoster {
  * never claimed, so previewing never suppresses the real one.
  */
 class DigestService(
-    private val compose: suspend (DigestKind) -> Digest?,
+    /** Composes [DigestKind] for the occurrence due at the given instant (null: as of now, for previews). */
+    private val compose: suspend (DigestKind, Long?) -> Digest?,
     private val claim: suspend (DigestKind, String) -> Boolean,
     /** Gives a claim back when posting failed after it, so the next run can still deliver that day / week. */
     private val release: suspend (DigestKind, String) -> Unit = { _, _ -> },
@@ -28,11 +31,22 @@ class DigestService(
 ) {
     enum class Outcome { POSTED, ALREADY_POSTED, NOTHING_TO_SAY, NOTIFICATIONS_OFF }
 
-    suspend fun runScheduled(kind: DigestKind): Outcome {
+    /**
+     * Posts the scheduled digest for the occurrence due at [dueAtMs] (so a run delayed past the logical rollover still
+     * summarizes, and claims, the day or week it was meant for). A claim is given back if posting fails or the run is
+     * cancelled before the notification went out.
+     */
+    suspend fun runScheduled(kind: DigestKind, dueAtMs: Long? = null): Outcome {
         if (!poster.canPost()) return Outcome.NOTIFICATIONS_OFF
-        val digest = compose(kind) ?: return Outcome.NOTHING_TO_SAY
+        val digest = compose(kind, dueAtMs) ?: return Outcome.NOTHING_TO_SAY
         if (!claim(kind, digest.key)) return Outcome.ALREADY_POSTED
-        if (poster.post(digest)) return Outcome.POSTED
+        val posted = try {
+            poster.post(digest)
+        } catch (e: Throwable) {
+            withContext(NonCancellable) { release(kind, digest.key) }
+            throw e
+        }
+        if (posted) return Outcome.POSTED
         release(kind, digest.key)
         return Outcome.NOTIFICATIONS_OFF
     }
@@ -40,7 +54,7 @@ class DigestService(
     /** "Preview / Send test digest": posts what the digest would say right now, without claiming it. */
     suspend fun sendTest(kind: DigestKind): Outcome {
         if (!poster.canPost()) return Outcome.NOTIFICATIONS_OFF
-        val digest = compose(kind) ?: return Outcome.NOTHING_TO_SAY
+        val digest = compose(kind, null) ?: return Outcome.NOTHING_TO_SAY
         return if (poster.post(digest)) Outcome.POSTED else Outcome.NOTIFICATIONS_OFF
     }
 

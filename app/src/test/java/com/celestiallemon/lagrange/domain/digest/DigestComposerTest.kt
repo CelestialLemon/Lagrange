@@ -131,4 +131,33 @@ class DigestComposerTest {
         assertEquals("1h 5m", DigestComposer.duration(65 * min))
         assertEquals("2h", DigestComposer.duration(2 * hour))
     }
+
+    @Test
+    fun `an unobserved tail turns today into a lower bound with no budget verdict`() {
+        val throughMs = 1_000 * hour
+        assertTrue(DigestComposer.unobservedTail(Long.MIN_VALUE, throughMs))
+        assertTrue(DigestComposer.unobservedTail(throughMs - 31 * min, throughMs))
+        assertFalse(DigestComposer.unobservedTail(throughMs - 29 * min, throughMs))
+        val d = DigestComposer.daily(
+            DailyDigestInput(
+                today = today,
+                day = day(today, 20 * min, quality = DayQuality.PARTIAL, focus = 3 * hour),
+                currentBudgetMs = hour,
+                recordedThrough = today.atTime(9, 15),
+            ),
+        )!!
+        assertTrue(d.title, d.title.contains("at least 20m"))
+        assertFalse("no positive verdict from a partial day", d.title.contains("within"))
+        assertEquals("Nothing has been recorded since Tue 09:15, so these numbers are lower bounds and aren't compared with your usual.", d.coverageNote)
+        assertFalse("a stretch across a gap may hide pickups", d.lines.any { it.contains("phone-free") })
+    }
+
+    @Test
+    fun `the weekly key follows the anchor day, so a late Sunday run can't claim the next week`() {
+        val sunday = LocalDate.of(2026, 11, 29)
+        val covered = (7 downTo 1).map { day(sunday.minusDays(it.toLong()), 30 * min) }
+        val w = DigestComposer.weekly(WeeklyDigestInput(sunday, covered, emptyList()))!!
+        assertEquals("2026-W48", w.key)
+        assertEquals("2026-W49", DigestComposer.isoWeekKey(sunday.plusDays(1)))
+    }
 }

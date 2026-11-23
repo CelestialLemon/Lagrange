@@ -165,10 +165,10 @@ class AppGraph(private val app: Application) {
     /** Reflection digests and the coverage-gap alert: composed, claimed once per day / week, then posted. */
     val digests by lazy {
         DigestService(
-            compose = { kind ->
+            compose = { kind, anchor ->
                 when (kind) {
-                    DigestKind.DAILY -> digestRepository.composeDaily()
-                    DigestKind.WEEKLY -> digestRepository.composeWeekly()
+                    DigestKind.DAILY -> digestRepository.composeDaily(anchor)
+                    DigestKind.WEEKLY -> digestRepository.composeWeekly(anchor)
                 }
             },
             claim = { kind, key ->

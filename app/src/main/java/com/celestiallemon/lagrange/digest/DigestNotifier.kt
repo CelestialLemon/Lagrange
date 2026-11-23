@@ -60,6 +60,17 @@ class DigestNotifier(private val context: Context) {
             .setOnlyAlertOnce(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setPriority(NotificationCompat.PRIORITY_LOW)
+            // Digests stay on this phone: not bridged to watches or other paired devices, and only a generic line
+            // on a secure lock screen.
+            .setLocalOnly(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(context, channel)
+                    .setSmallIcon(R.drawable.ic_stat_lagrange)
+                    .setContentTitle(if (digest.kind == DigestKind.DAILY) "Your daily digest is ready" else "Your weekly digest is ready")
+                    .setLocalOnly(true)
+                    .build(),
+            )
             .build()
         return try {
             manager.notify(id, notification)
@@ -88,6 +99,7 @@ class DigestNotifier(private val context: Context) {
             .setContentIntent(Destination.SYSTEM.pendingIntent(context))
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
+            .setLocalOnly(true)
             .build()
         return try {
             manager.notify(ID_COVERAGE, notification)

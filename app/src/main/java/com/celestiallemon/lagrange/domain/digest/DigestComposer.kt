@@ -3,6 +3,7 @@ package com.celestiallemon.lagrange.domain.digest
 import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.domain.DayQuality
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.format.TextStyle
 import java.time.temporal.IsoFields
@@ -56,6 +57,8 @@ data class DailyDigestInput(
     val exits: DigestExits = DigestExits(),
     /** The budget in force now, used when the day has none recorded. */
     val currentBudgetMs: Long,
+    /** Set when nothing was recorded after this local time (a failed or late harvest): the day's tail is unobserved. */
+    val recordedThrough: LocalDateTime? = null,
 )
 
 data class WeeklyDigestInput(
@@ -88,6 +91,17 @@ object DigestComposer {
 
     /** Covered days each week needs before a week-over-week change is shown. */
     const val MIN_COMPARE_DAYS = 3
+
+    /** Derived data may lag the period it reports on by this much before the rest counts as unobserved. */
+    const val TAIL_TOLERANCE_MS = 30 * 60_000L
+
+    /**
+     * True when the derived data ([derivedThroughMs], `Long.MIN_VALUE` when nothing was derived) stops more than
+     * [TAIL_TOLERANCE_MS] before [expectedEndMs] (now, for today so far; the day's end for a past day): what follows
+     * was never seen, so the day's numbers are a lower bound and no positive budget verdict may be drawn.
+     */
+    fun unobservedTail(derivedThroughMs: Long, expectedEndMs: Long): Boolean =
+        derivedThroughMs == Long.MIN_VALUE || derivedThroughMs < expectedEndMs - TAIL_TOLERANCE_MS
 
     /**
      * The logical day a daily digest fired at [nowMs] summarizes: today once it is [EVENING_THRESHOLD_MS] old (an
@@ -149,13 +163,17 @@ object DigestComposer {
             }
         }
         input.biggestRabbitHole?.let { lines += "Biggest rabbit hole: ${rabbitHoleText(it, withDay = false)}." }
-        if (day.longestFocusGapMs > 0) lines += "Longest phone-free stretch while awake: ${duration(day.longestFocusGapMs)}."
+        // A stretch measured across a collection gap could include unseen pickups: only whole days report it.
+        if (!partial && day.longestFocusGapMs > 0) lines += "Longest phone-free stretch while awake: ${duration(day.longestFocusGapMs)}."
         exitsLine(input.exits)?.let { lines += it }
 
-        val note = if (partial) {
-            "Collection had a gap this day, so these numbers are lower bounds and aren't compared with your usual."
-        } else {
-            null
+        val note = when {
+            input.recordedThrough != null -> {
+                val t = input.recordedThrough
+                "Nothing has been recorded since ${shortDay(t.toLocalDate())} ${clock(t.toLocalTime())}, so these numbers are lower bounds and aren't compared with your usual."
+            }
+            partial -> "Collection had a gap this day, so these numbers are lower bounds and aren't compared with your usual."
+            else -> null
         }
         return Digest(
             kind = DigestKind.DAILY,

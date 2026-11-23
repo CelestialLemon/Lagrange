@@ -74,14 +74,26 @@ object WidgetStateCalculator {
     const val NEAR_BUDGET_RATIO = 0.8
     private const val STALE_HARVEST_MS = DigestComposer.EVENING_THRESHOLD_MS * 4 // 48h, as the coverage alert
 
+    /**
+     * Harvests run hourly; past this, today's tail is unobserved: totals become "≥", no "On track" verdict, and the
+     * live phone-free stretch is withheld (a pickup since the last harvest would be invisible).
+     */
+    const val STALE_TAIL_MS = 2 * 60 * 60_000L
+
     fun compute(input: WidgetInput, clock: (Long) -> String): WidgetState {
         val badge = badge(input, clock)
+        val lastHarvest = input.lastHarvestAtMs
+        val tailStale = lastHarvest == null || input.nowMs - lastHarvest > STALE_TAIL_MS
         val nextChange = listOfNotNull(
             input.focusBoostUntilMs?.takeIf { it > input.nowMs },
             input.snoozeUntilMs?.takeIf { it > input.nowMs },
+            // Redraw when the data goes stale, so "On track" can't outlive the last harvest unnoticed.
+            lastHarvest?.let { it + STALE_TAIL_MS + 1 }?.takeIf { it > input.nowMs },
         ).minOrNull()
-        val (streakLabel, streakText) = streak(input, clock)
-        val longest = if (input.hasRollup && input.longestFocusGapMs > 0) DigestComposer.duration(input.longestFocusGapMs) else "—"
+        val dayGap = input.dayCoverage == DayCoverage.PARTIAL_HARVEST || input.dayStatus == DayStatus.UNCERTAIN_COVERAGE
+        val (streakLabel, streakText) = if (tailStale || dayGap) "Phone-free" to "—" else streak(input, clock)
+        // A stretch measured across a collection gap could hide pickups, so a gap day shows no "longest".
+        val longest = if (input.hasRollup && !dayGap && input.longestFocusGapMs > 0) DigestComposer.duration(input.longestFocusGapMs) else "—"
         val budget = input.budgetMs.coerceAtLeast(0)
         val budgetText = if (budget > 0) "of ${DigestComposer.duration(budget)} budget" else "no budget set"
 
@@ -94,9 +106,7 @@ object WidgetStateCalculator {
             val label = if (harvestStale) "Coverage gap" else "Waiting for data"
             return WidgetState(status, label, "—", budgetText, 0f, streakLabel, "—", "—", badge, nextChange)
         }
-        val gap = harvestStale ||
-            input.dayCoverage == DayCoverage.PARTIAL_HARVEST ||
-            input.dayStatus == DayStatus.UNCERTAIN_COVERAGE
+        val gap = harvestStale || dayGap || tailStale
         val used = input.distractingMs.coerceAtLeast(0)
         val ratio = if (budget > 0) used.toDouble() / budget else 0.0
         val status = when {
@@ -108,7 +118,10 @@ object WidgetStateCalculator {
         }
         val label = when (status) {
             WidgetStatus.OVER_BUDGET -> "Over by ${DigestComposer.duration(used - budget)}"
-            WidgetStatus.COVERAGE_GAP -> "Coverage gap"
+            WidgetStatus.COVERAGE_GAP -> when {
+                harvestStale || dayGap || lastHarvest == null -> "Coverage gap"
+                else -> "As of ${clock(lastHarvest)}"
+            }
             WidgetStatus.NEAR_BUDGET -> "Near budget · ${DigestComposer.duration(budget - used)} left"
             else -> if (budget > 0) "On track · ${DigestComposer.duration(budget - used)} left" else "On track"
         }
@@ -158,23 +171,25 @@ object WidgetStateCalculator {
 /** The Quick Settings tile's look for one moment. */
 data class TileModel(val active: Boolean, val unavailable: Boolean, val subtitle: String)
 
-enum class TileAction { ACTIVATE_BOOST, CANCEL_BOOST, OPEN_SETUP }
+enum class TileAction { ACTIVATE_BOOST, SNOOZE, CANCEL_SNOOZE, OPEN_SETUP }
 
 /**
- * "Focus Boost" tile: one tap starts the 1-hour boost (cancelling any snooze), a tap while it runs ends it, and
- * without a connected accessibility service the tile opens friction setup instead of pretending to work.
+ * "Focus Boost 1h" tile (spec §5.5): a tap starts the 1-hour boost; a tap while it runs switches to a 1-hour snooze
+ * (ending the boost); a tap while snoozed ends the snooze. So the tile cycles Off → Boost → Snoozed → Off. Without a
+ * connected accessibility service it opens friction setup instead of pretending to work.
  */
 object FocusBoostTileModel {
     fun model(frictionReady: Boolean, boostRemainingMs: Long, snoozeRemainingMs: Long): TileModel = when {
         !frictionReady -> TileModel(active = false, unavailable = false, subtitle = "Set up friction")
         boostRemainingMs > 0 -> TileModel(active = true, unavailable = false, subtitle = "1h · ${remaining(boostRemainingMs)} left")
-        snoozeRemainingMs > 0 -> TileModel(active = false, unavailable = false, subtitle = "Snoozed")
+        snoozeRemainingMs > 0 -> TileModel(active = false, unavailable = false, subtitle = "Snoozed · ${remaining(snoozeRemainingMs)} left")
         else -> TileModel(active = false, unavailable = false, subtitle = "Off")
     }
 
-    fun onClick(frictionReady: Boolean, boostRemainingMs: Long): TileAction = when {
+    fun onClick(frictionReady: Boolean, boostRemainingMs: Long, snoozeRemainingMs: Long): TileAction = when {
         !frictionReady -> TileAction.OPEN_SETUP
-        boostRemainingMs > 0 -> TileAction.CANCEL_BOOST
+        boostRemainingMs > 0 -> TileAction.SNOOZE
+        snoozeRemainingMs > 0 -> TileAction.CANCEL_SNOOZE
         else -> TileAction.ACTIVATE_BOOST
     }
 

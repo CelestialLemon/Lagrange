@@ -268,35 +268,45 @@ class LagrangePreferences(
 
     // -- Reflection digests (settings logged to settings_history; dedupe keys are device-local) ---------------------
 
-    /** Turns the daily digest on/off and/or moves it; null keeps the current value. */
+    /**
+     * Turns the daily digest on/off and/or moves it; null keeps the current value. The merge happens inside one
+     * DataStore transaction, so overlapping partial edits (a toggle and a time step) can't undo each other.
+     */
     suspend fun setDailyDigest(enabled: Boolean? = null, minuteOfDay: Int? = null) {
         if (minuteOfDay != null) require(minuteOfDay in UserPrefs.MINUTE_OF_DAY_RANGE) { "minute of day must be 0..1439" }
-        val cur = current()
-        val on = enabled ?: cur.dailyDigestEnabled
-        val minute = minuteOfDay ?: cur.dailyDigestMinuteOfDay
-        if (cur.dailyDigestEnabled == on && cur.dailyDigestMinuteOfDay == minute) return
-        recordSettingHistory(HISTORY_DAILY_DIGEST, "{\"enabled\":$on,\"minute_of_day\":$minute}")
+        var history: String? = null
         store.edit {
+            val cur = it.toUserPrefs()
+            val on = enabled ?: cur.dailyDigestEnabled
+            val minute = minuteOfDay ?: cur.dailyDigestMinuteOfDay
+            if (cur.dailyDigestEnabled == on && cur.dailyDigestMinuteOfDay == minute) return@edit
             it[DAILY_DIGEST_ENABLED] = on
             it[DAILY_DIGEST_MINUTE] = minute
+            history = "{\"enabled\":$on,\"minute_of_day\":$minute}"
         }
+        history?.let { recordSettingHistory(HISTORY_DAILY_DIGEST, it) }
     }
 
-    /** Turns the weekly digest on/off and/or moves it (ISO day 1 = Monday … 7 = Sunday); null keeps the current value. */
+    /**
+     * Turns the weekly digest on/off and/or moves it (ISO day 1 = Monday … 7 = Sunday); null keeps the current value.
+     * Merged inside one DataStore transaction, like [setDailyDigest].
+     */
     suspend fun setWeeklyDigest(enabled: Boolean? = null, dayOfWeek: Int? = null, minuteOfDay: Int? = null) {
         if (dayOfWeek != null) require(dayOfWeek in UserPrefs.DAY_OF_WEEK_RANGE) { "day of week must be 1..7" }
         if (minuteOfDay != null) require(minuteOfDay in UserPrefs.MINUTE_OF_DAY_RANGE) { "minute of day must be 0..1439" }
-        val cur = current()
-        val on = enabled ?: cur.weeklyDigestEnabled
-        val day = dayOfWeek ?: cur.weeklyDigestDayOfWeek
-        val minute = minuteOfDay ?: cur.weeklyDigestMinuteOfDay
-        if (cur.weeklyDigestEnabled == on && cur.weeklyDigestDayOfWeek == day && cur.weeklyDigestMinuteOfDay == minute) return
-        recordSettingHistory(HISTORY_WEEKLY_DIGEST, "{\"enabled\":$on,\"day_of_week\":$day,\"minute_of_day\":$minute}")
+        var history: String? = null
         store.edit {
+            val cur = it.toUserPrefs()
+            val on = enabled ?: cur.weeklyDigestEnabled
+            val day = dayOfWeek ?: cur.weeklyDigestDayOfWeek
+            val minute = minuteOfDay ?: cur.weeklyDigestMinuteOfDay
+            if (cur.weeklyDigestEnabled == on && cur.weeklyDigestDayOfWeek == day && cur.weeklyDigestMinuteOfDay == minute) return@edit
             it[WEEKLY_DIGEST_ENABLED] = on
             it[WEEKLY_DIGEST_DAY] = day
             it[WEEKLY_DIGEST_MINUTE] = minute
+            history = "{\"enabled\":$on,\"day_of_week\":$day,\"minute_of_day\":$minute}"
         }
+        history?.let { recordSettingHistory(HISTORY_WEEKLY_DIGEST, it) }
     }
 
     /**

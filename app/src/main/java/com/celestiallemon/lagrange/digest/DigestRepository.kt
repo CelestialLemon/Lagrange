@@ -37,32 +37,55 @@ class DigestRepository(
     private val preferences: LagrangePreferences,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    suspend fun composeDaily(): Digest? = withContext(Dispatchers.IO) {
+    /**
+     * The daily digest for the occurrence due at [dueAtMs] (null: as of now, for previews). The day it summarizes is
+     * chosen from the due instant, so a run delayed past the logical rollover still reports the intended day. When
+     * the derived data stops short of the end of that day (or of now, for today so far) the day is a lower bound.
+     */
+    suspend fun composeDaily(dueAtMs: Long? = null): Digest? = withContext(Dispatchers.IO) {
         val now = clock()
         val ctx = derived.analyticsContext()
-        val todayStart = ctx.zones.window(ctx.today, ctx.rolloverHour).startMs
-        val target = DigestComposer.dailyTarget(now, ctx.today, todayStart)
+        val anchor = dueAtMs?.coerceAtMost(now) ?: now
+        val anchorDate = ctx.zones.dateOf(anchor, ctx.rolloverHour)
+        val anchorStart = ctx.zones.window(anchorDate, ctx.rolloverHour).startMs
+        val target = DigestComposer.dailyTarget(anchor, anchorDate, anchorStart)
+        val targetEnd = ctx.zones.window(target, ctx.rolloverHour).endMs
         val days = days(ctx, DateRange(target, target))
+        val tail = DigestComposer.unobservedTail(ctx.derivedThroughMs, minOf(now, targetEnd))
+        val day = days[target]?.let { if (tail) it.copy(quality = DayQuality.PARTIAL) else it }
         val window = TrendWindow(WindowKind.CUSTOM, target, target)
         DigestComposer.daily(
             DailyDigestInput(
                 today = ctx.today,
-                day = days[target],
+                day = day,
                 biggestRabbitHole = biggestRabbitHole(ctx, window),
                 exits = exits(window),
                 currentBudgetMs = preferences.current().dailyBudgetMs,
+                recordedThrough = if (tail && ctx.derivedThroughMs != Long.MIN_VALUE) {
+                    Instant.ofEpochMilli(ctx.derivedThroughMs).atZone(ctx.zones.zoneAt(ctx.derivedThroughMs)).toLocalDateTime()
+                } else {
+                    null
+                },
             ),
         )
     }
 
-    suspend fun composeWeekly(): Digest? = withContext(Dispatchers.IO) {
+    /**
+     * The weekly digest for the occurrence due at [dueAtMs] (null: now): the seven logical days before the due day and
+     * the seven before those, keyed by the due day's ISO week, so a run delayed into the next week can't claim (and
+     * suppress) that week's own digest.
+     */
+    suspend fun composeWeekly(dueAtMs: Long? = null): Digest? = withContext(Dispatchers.IO) {
+        val now = clock()
         val ctx = derived.analyticsContext()
-        val (current, previous) = DigestComposer.weeklyRanges(ctx.today)
+        val anchor = dueAtMs?.coerceAtMost(now) ?: now
+        val anchorDate = ctx.zones.dateOf(anchor, ctx.rolloverHour)
+        val (current, previous) = DigestComposer.weeklyRanges(anchorDate)
         val days = days(ctx, DateRange(previous.first(), current.last()))
         val window = TrendWindow(WindowKind.CUSTOM, current.first(), current.last())
         DigestComposer.weekly(
             WeeklyDigestInput(
-                today = ctx.today,
+                today = anchorDate,
                 current = current.map { days[it] ?: DigestDay(it, DayQuality.NO_DATA) },
                 previous = previous.map { days[it] ?: DigestDay(it, DayQuality.NO_DATA) },
                 biggestRabbitHole = biggestRabbitHole(ctx, window),

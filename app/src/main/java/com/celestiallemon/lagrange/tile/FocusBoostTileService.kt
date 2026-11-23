@@ -29,9 +29,15 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
- * Quick Settings "Focus Boost": one tap starts the persisted 1-hour boost from the Friction tab (cancelling any
- * snooze), a tap while it runs ends it. Without friction switched on and the accessibility service connected it says
- * "Set up friction" and opens the Friction tab instead. Nothing is read or written before startup recovery finished.
+ * Quick Settings "Focus Boost 1h" (spec §5.5): a tap starts the persisted 1-hour boost (cancelling any snooze), a tap
+ * while it runs switches to a 1-hour snooze, a tap while snoozed ends it (see [FocusBoostTileModel]). Without friction
+ * switched on and the accessibility service connected it says "Set up friction" and opens the Friction tab instead.
+ * Nothing is read or written before startup recovery finished.
+ *
+ * This is a standard (passive) tile: System UI binds it and calls [onStartListening] every time the Quick Settings
+ * panel opens, which re-renders from the live state, and a 30 s tick keeps "Xm left" current while it stays open.
+ * So a boost that changed in the app or expired while the shade was closed is always correct by the time the tile
+ * is seen; [requestUpdate] is only a best-effort nudge (a no-op for passive tiles on most builds).
  */
 class FocusBoostTileService : TileService() {
     private val graph get() = (application as LagrangeApplication).graph
@@ -96,11 +102,14 @@ class FocusBoostTileService : TileService() {
             openApp(Destination.TODAY)
             return
         }
-        val boost = graph.friction.liveStatus.value.focusBoostRemainingMs(SystemClock.elapsedRealtime())
-        when (FocusBoostTileModel.onClick(frictionReady(), boost)) {
+        val live = graph.friction.liveStatus.value
+        val elapsed = SystemClock.elapsedRealtime()
+        when (FocusBoostTileModel.onClick(frictionReady(), live.focusBoostRemainingMs(elapsed), live.snoozeRemainingMs(elapsed))) {
             TileAction.OPEN_SETUP -> openApp(Destination.FRICTION)
             TileAction.ACTIVATE_BOOST -> runCommand { graph.friction.activateFocusBoost1h() }
-            TileAction.CANCEL_BOOST -> runCommand { graph.friction.cancelFocusBoost() }
+            // Snoozing ends the boost in the same engine step (one persisted state change, never both active).
+            TileAction.SNOOZE -> runCommand { graph.friction.activateSnooze1h() }
+            TileAction.CANCEL_SNOOZE -> runCommand { graph.friction.cancelSnooze() }
         }
     }
 
@@ -162,7 +171,7 @@ class FocusBoostTileService : TileService() {
         private const val TAG = "LagrangeTile"
         private const val TICK_MS = 30_000L
 
-        /** Asks System UI to rebind the tile so it re-renders (no-op when the tile isn't added). */
+        /** Best-effort nudge for System UI to rebind the tile (no-op when it isn't added, or for passive tiles). */
         fun requestUpdate(context: Context) {
             runCatching { requestListeningState(context, ComponentName(context, FocusBoostTileService::class.java)) }
         }

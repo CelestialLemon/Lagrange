@@ -91,4 +91,28 @@ class WidgetStateCalculatorTest {
         val using = WidgetStateCalculator.compute(input(lastEnded = now - 50 * min, inProgress = now - 5 * min), clock)
         assertEquals("Before this pickup" to "45m", using.streakLabel to using.streakText)
     }
+
+    @Test
+    fun `a stale tail never reads as on track and withholds the live phone-free stretch`() {
+        val stale = WidgetStateCalculator.compute(input(lastHarvest = now - 3 * hour, lastEnded = now - 4 * hour), clock)
+        assertEquals(WidgetStatus.COVERAGE_GAP, stale.status)
+        assertEquals("As of T+-180", stale.statusLabel)
+        assertEquals("≥ 30m", stale.usedText)
+        assertEquals("—", stale.streakText)
+        // Over budget stays over: the recorded part alone already passed it.
+        assertEquals(WidgetStatus.OVER_BUDGET, WidgetStateCalculator.compute(input(distracting = 2 * hour, lastHarvest = now - 3 * hour), clock).status)
+        // Fresh data redraws itself when it would go stale.
+        val fresh = WidgetStateCalculator.compute(input(lastHarvest = now - 10 * min), clock)
+        assertEquals(now - 10 * min + WidgetStateCalculator.STALE_TAIL_MS + 1, fresh.nextChangeAtMs)
+    }
+
+    @Test
+    fun `a day with a collection gap shows no phone-free stretches`() {
+        val gap = WidgetStateCalculator.compute(input(coverage = DayCoverage.PARTIAL_HARVEST, lastEnded = now - hour), clock)
+        assertEquals("—", gap.longestText)
+        assertEquals("—", gap.streakText)
+        val whole = WidgetStateCalculator.compute(input(lastEnded = now - hour), clock)
+        assertEquals("1h 35m", whole.longestText)
+        assertEquals("T+-60", whole.streakText)
+    }
 }

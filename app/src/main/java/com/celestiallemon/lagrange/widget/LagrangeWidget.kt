@@ -48,7 +48,7 @@ import kotlinx.coroutines.CancellationException
  * [GlanceTheme]; tapping anywhere opens Lagrange on Today.
  */
 class LagrangeWidget : GlanceAppWidget() {
-    override val sizeMode = SizeMode.Responsive(setOf(SMALL, WIDE))
+    override val sizeMode = SizeMode.Responsive(setOf(SMALL, WIDE, TALL, TALL_WIDE))
 
     override suspend fun provideGlance(context: Context, id: GlanceId) {
         val graph = (context.applicationContext as LagrangeApplication).graph
@@ -70,8 +70,12 @@ class LagrangeWidget : GlanceAppWidget() {
     }
 
     companion object {
+        // Two cells high is a compact layout (no progress bar, the badge as plain text) that fits in the 110 dp
+        // minimum; from TALL's height on, the full layout has room for the bar, both stats and the badge chip.
         val SMALL = DpSize(120.dp, 110.dp)
         val WIDE = DpSize(250.dp, 110.dp)
+        val TALL = DpSize(120.dp, 170.dp)
+        val TALL_WIDE = DpSize(250.dp, 170.dp)
     }
 }
 
@@ -81,7 +85,9 @@ class LagrangeWidgetReceiver : GlanceAppWidgetReceiver() {
 
 @Composable
 private fun WidgetContent(s: WidgetState, context: Context) {
-    val wide = LocalSize.current.width >= LagrangeWidget.WIDE.width
+    val size = LocalSize.current
+    val wide = size.width >= LagrangeWidget.WIDE.width
+    val compact = size.height < LagrangeWidget.TALL.height
     val colors = GlanceTheme.colors
     val accent = when (s.status) {
         WidgetStatus.OVER_BUDGET -> colors.error
@@ -95,42 +101,56 @@ private fun WidgetContent(s: WidgetState, context: Context) {
             .appWidgetBackground()
             .cornerRadius(24.dp)
             .background(colors.widgetBackground)
-            .padding(14.dp)
+            .padding(if (compact) 12.dp else 14.dp)
             .clickable(actionStartActivity(Destination.TODAY.intent(context)))
             .semantics { contentDescription = "Lagrange today: ${s.usedText} distracting ${s.budgetText}. ${s.statusLabel}." },
         verticalAlignment = Alignment.Top,
     ) {
         Row(modifier = GlanceModifier.fillMaxWidth(), verticalAlignment = Alignment.Bottom) {
-            Text(s.usedText, style = TextStyle(color = colors.onSurface, fontSize = 26.sp, fontWeight = FontWeight.Bold))
+            Text(s.usedText, style = TextStyle(color = colors.onSurface, fontSize = if (compact) 22.sp else 26.sp, fontWeight = FontWeight.Bold), maxLines = 1)
             Spacer(GlanceModifier.width(6.dp))
             Text(s.budgetText, style = TextStyle(color = colors.onSurfaceVariant, fontSize = 12.sp), maxLines = 1)
         }
-        Spacer(GlanceModifier.height(6.dp))
-        LinearProgressIndicator(
-            progress = s.progress,
-            modifier = GlanceModifier.fillMaxWidth().height(6.dp),
-            color = accent,
-            backgroundColor = colors.surfaceVariant,
-        )
-        Spacer(GlanceModifier.height(6.dp))
+        if (!compact) {
+            Spacer(GlanceModifier.height(6.dp))
+            LinearProgressIndicator(
+                progress = s.progress,
+                modifier = GlanceModifier.fillMaxWidth().height(6.dp),
+                color = accent,
+                backgroundColor = colors.surfaceVariant,
+            )
+            Spacer(GlanceModifier.height(6.dp))
+        }
         Text(s.statusLabel, style = TextStyle(color = accent, fontSize = 13.sp, fontWeight = FontWeight.Medium), maxLines = 1)
         Spacer(GlanceModifier.defaultWeight())
-        if (wide) {
-            Row(modifier = GlanceModifier.fillMaxWidth()) {
-                Stat(s.streakLabel, s.streakText, GlanceModifier.defaultWeight())
-                Stat("Longest today", s.longestText, GlanceModifier.defaultWeight())
-            }
-        } else {
-            Stat(s.streakLabel, s.streakText, GlanceModifier)
-        }
-        s.badge?.let { badge ->
-            Spacer(GlanceModifier.height(6.dp))
+        if (compact) {
+            // One line each, so the streak and the badge both stay visible two cells high.
             Text(
-                badge.text,
-                modifier = GlanceModifier.background(colors.secondaryContainer).cornerRadius(10.dp).padding(horizontal = 8.dp, vertical = 2.dp),
-                style = TextStyle(color = colors.onSecondaryContainer, fontSize = 11.sp, fontWeight = FontWeight.Medium),
+                "${s.streakLabel} ${s.streakText}",
+                style = TextStyle(color = colors.onSurface, fontSize = 12.sp, fontWeight = FontWeight.Medium),
                 maxLines = 1,
             )
+            s.badge?.let { badge ->
+                Text(badge.text, style = TextStyle(color = colors.secondary, fontSize = 11.sp, fontWeight = FontWeight.Medium), maxLines = 1)
+            }
+        } else {
+            if (wide) {
+                Row(modifier = GlanceModifier.fillMaxWidth()) {
+                    Stat(s.streakLabel, s.streakText, GlanceModifier.defaultWeight())
+                    Stat("Longest today", s.longestText, GlanceModifier.defaultWeight())
+                }
+            } else {
+                Stat(s.streakLabel, s.streakText, GlanceModifier)
+            }
+            s.badge?.let { badge ->
+                Spacer(GlanceModifier.height(6.dp))
+                Text(
+                    badge.text,
+                    modifier = GlanceModifier.background(colors.secondaryContainer).cornerRadius(10.dp).padding(horizontal = 8.dp, vertical = 2.dp),
+                    style = TextStyle(color = colors.onSecondaryContainer, fontSize = 11.sp, fontWeight = FontWeight.Medium),
+                    maxLines = 1,
+                )
+            }
         }
     }
 }

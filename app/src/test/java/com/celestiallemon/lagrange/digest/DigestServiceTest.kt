@@ -29,10 +29,11 @@ class DigestServiceTest {
     private var coverageClaim: Long? = null
     private var lastHarvest: Long? = 0L
     private var now = 100 * hour
+    private val composedFor = mutableListOf<Long?>()
     private var digest: Digest? = Digest(DigestKind.DAILY, "2026-11-24", "t", "s", listOf("s"))
 
     private fun service(poster: Poster) = DigestService(
-        compose = { kind -> digest?.copy(kind = kind) },
+        compose = { kind, due -> composedFor += due; digest?.copy(kind = kind) },
         claim = { kind, key -> if (claims[kind] == key) false else true.also { claims[kind] = key } },
         release = { kind, key -> if (claims[kind] == key) claims.remove(kind) },
         poster = poster,
@@ -89,5 +90,34 @@ class DigestServiceTest {
         assertTrue("a new silence alerts again", s.checkCoverage())
         lastHarvest = null
         assertFalse("never harvested yet: nothing to alert about", s.checkCoverage())
+    }
+
+    @Test
+    fun `the due instant reaches the composer, and previews compose as of now`() = runBlocking {
+        val s = service(Poster())
+        s.runScheduled(DigestKind.WEEKLY, dueAtMs = 42L)
+        s.sendTest(DigestKind.WEEKLY)
+        assertEquals(listOf<Long?>(42L, null), composedFor)
+    }
+
+    @Test
+    fun `a post that throws gives the claim back`() = runBlocking {
+        val throwing = object : DigestPoster {
+            override fun canPost() = true
+            override fun post(digest: Digest): Boolean = throw IllegalStateException("boom")
+            override fun postCoverageAlert(silentHours: Long) = true
+        }
+        val s = DigestService(
+            compose = { kind, _ -> digest?.copy(kind = kind) },
+            claim = { kind, key -> if (claims[kind] == key) false else true.also { claims[kind] = key } },
+            release = { kind, key -> if (claims[kind] == key) claims.remove(kind) },
+            poster = throwing,
+            lastHarvestAtMs = { lastHarvest },
+            claimCoverageAlert = { true },
+            clock = { now },
+        )
+        val thrown = runCatching { s.runScheduled(DigestKind.DAILY) }.exceptionOrNull()
+        assertTrue(thrown is IllegalStateException)
+        assertTrue(claims.isEmpty())
     }
 }

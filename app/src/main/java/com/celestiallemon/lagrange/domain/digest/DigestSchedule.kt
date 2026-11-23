@@ -8,8 +8,9 @@ import java.time.ZonedDateTime
 import java.time.temporal.TemporalAdjusters
 
 /**
- * When the next digest is due, in local wall-clock terms. A configured time that falls in a spring-forward gap runs
- * at the first valid instant after it; one that occurs twice on a fall-back night runs at its first occurrence.
+ * When the next digest is due, in local wall-clock terms. A configured time that falls in a spring-forward gap is
+ * shifted later by the gap's length (java.time's rule: 02:30 on a one-hour spring-forward night runs at 03:30); one
+ * that occurs twice on a fall-back night runs at its first occurrence.
  */
 object DigestSchedule {
     /** The next instant strictly after [nowMs] at local [minuteOfDay]. */

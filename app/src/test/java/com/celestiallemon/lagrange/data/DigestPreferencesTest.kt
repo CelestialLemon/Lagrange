@@ -9,6 +9,8 @@ import java.io.File
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.json.Json
@@ -41,6 +43,27 @@ class DigestPreferencesTest {
         PreferenceDataStoreFactory.create(scope = scope) { File(context.filesDir, "$name.preferences_pb") },
         db,
     )
+
+    @Test
+    fun `overlapping partial digest edits never undo each other`() = runBlocking {
+        val p = prefs()
+        repeat(20) { round ->
+            val day = round % 7 + 1
+            val minute = 300 + round
+            // A weekday chip tap and a time step racing: both must land.
+            listOf(
+                scope.async { p.setWeeklyDigest(dayOfWeek = day) },
+                scope.async { p.setWeeklyDigest(minuteOfDay = minute) },
+                scope.async { p.setDailyDigest(enabled = round % 2 == 0) },
+                scope.async { p.setDailyDigest(minuteOfDay = minute) },
+            ).awaitAll()
+            val now = p.current()
+            assertEquals(day, now.weeklyDigestDayOfWeek)
+            assertEquals(minute, now.weeklyDigestMinuteOfDay)
+            assertEquals(round % 2 == 0, now.dailyDigestEnabled)
+            assertEquals(minute, now.dailyDigestMinuteOfDay)
+        }
+    }
 
     @Test
     fun `digest settings default off and changes are logged to settings history`() = runBlocking {

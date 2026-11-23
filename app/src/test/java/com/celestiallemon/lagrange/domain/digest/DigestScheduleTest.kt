@@ -20,7 +20,7 @@ class DigestScheduleTest {
     }
 
     @Test
-    fun `a time inside the spring-forward gap runs at the first valid instant`() {
+    fun `a time inside the spring-forward gap is shifted later by the gap`() {
         val next = DigestSchedule.nextDaily(at("2026-03-29T01:00"), berlin, 2 * 60 + 30)
         assertEquals(LocalDateTime.parse("2026-03-29T03:30"), local(next))
     }

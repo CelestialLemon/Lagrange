@@ -188,13 +188,14 @@ class CsvExporter(
                     "logical_date", "package_name", "app_name", "category",
                     "total_ms", "open_count", "session_count", "blocked_attempt_count", "rabbit_hole_contribution_ms",
                 ),
-                start = listOf("", "", LONG_MIN),
+                start = listOf("", LONG_MIN),
+                // A row-value comparison seeks the (logical_date, pkg_id) primary key instead of rescanning the prefix.
                 sql = "SELECT a.logical_date, a.pkg_id, p.package_name, p.display_name, p.category, a.total_ms, a.open_count, " +
                     "a.session_count, a.blocked_attempt_count, a.rabbit_hole_contribution_ms " +
                     "FROM daily_app_rollups a LEFT JOIN packages p ON p.id = a.pkg_id " +
-                    "WHERE a.logical_date > ? OR (a.logical_date = ? AND a.pkg_id > CAST(? AS INTEGER)) " +
+                    "WHERE (a.logical_date, a.pkg_id) > (?, CAST(? AS INTEGER)) " +
                     "ORDER BY a.logical_date, a.pkg_id",
-                key = { c -> listOf(c.getString(0), c.getString(0), c.getLong(1).toString()) },
+                key = { c -> listOf(c.getString(0), c.getLong(1).toString()) },
                 row = { c, _ -> listOf(c.str(0), c.str(2), c.str(3), c.str(4), c.num(5), c.num(6), c.num(7), c.num(8), c.num(9)) },
             ),
             Table(

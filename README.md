@@ -47,11 +47,13 @@ Gateway Apps use minimum-sample shrinkage; friction effectiveness counts an exit
 
 - **Widget (Jetpack Glance, Material You colours):** today's distracting time against the budget with a progress bar,
   the phone-free stretch (*since 14:05*, or the gap before the current pickup), today's longest, and a friction badge
-  (*Focus Boost*, *Snoozed*, or *set up*). Missing Usage Access shows *Grant access* and a collection gap shows
-  *Coverage gap* with a `≥` lower bound, never a confident `0m`. Tap to open Today. It is redrawn by the app after
+  (*Focus Boost*, *Snoozed*, or *set up*). Missing Usage Access shows *Grant access*, a collection gap shows
+  *Coverage gap* and data older than two hours shows *As of 14:05*, each with a `≥` lower bound and no phone-free
+  stretch, never a confident `0m` or *On track*. Tap to open Today. It is redrawn by the app after
   rollups, budget changes, boost/snooze toggles, boot and data reset; it never polls.
-- **Quick Settings tile "Focus Boost":** one tap starts a 1-hour Focus Boost (ending any snooze), another tap ends it.
-  The subtitle reads `1h · 42m left`, `Snoozed`, `Off`, or `Set up friction` (then a tap opens the Friction tab).
+- **Quick Settings tile "Focus Boost":** one tap starts a 1-hour Focus Boost (ending any snooze); a tap while it runs
+  switches to a 1-hour snooze, and a tap while snoozed ends it. The subtitle reads `1h · 42m left`,
+  `Snoozed · 42m left`, `Off`, or `Set up friction` (then a tap opens the Friction tab).
 
 ### Reflection digests
 
@@ -60,8 +62,10 @@ performance against your weekday/weekend baseline, the biggest rabbit hole, the 
 pause exits. The weekly digest compares with the week before only when both weeks have at least three fully covered
 days. Times and the weekday are configurable; each digest is posted at most once per logical day / ISO week, and the
 schedule follows time-zone and clock changes. A third channel, `lagrange_coverage_alerts`, warns once when nothing has
-been recorded for over 48 hours (Android keeps only about a week of usage events). *Send preview digest* shows what
-tonight's digest would say.
+been recorded for over 48 hours (Android keeps only about a week of usage events). If a harvest fails before a
+digest, it says *Nothing has been recorded since …* and reports lower bounds. Digests are marked local-only (not
+bridged to watches) and show only a generic line on a secure lock screen. *Send preview digest* shows what tonight's
+digest would say.
 
 ### Backups and exports
 
