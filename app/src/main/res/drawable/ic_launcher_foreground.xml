@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- orbit ring -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,54m-24,0a24,24 0,1 1,48 0a24,24 0,1 1,-48 0"
+        android:strokeWidth="2.2"
+        android:strokeColor="#8FA6FF"
+        android:strokeAlpha="0.75" />
+    <!-- primary body -->
+    <path
+        android:fillColor="#FFC870"
+        android:pathData="M54,54m-9,0a9,9 0,1 1,18 0a9,9 0,1 1,-18 0" />
+    <!-- orbiting body -->
+    <path
+        android:fillColor="#7BE3D6"
+        android:pathData="M78,54m-4.5,0a4.5,4.5 0,1 1,9 0a4.5,4.5 0,1 1,-9 0" />
+    <!-- L4 Lagrange point -->
+    <path
+        android:fillColor="#E9E4FF"
+        android:pathData="M66,33.2m-3,0a3,3 0,1 1,6 0a3,3 0,1 1,-6 0" />
+</vector>
