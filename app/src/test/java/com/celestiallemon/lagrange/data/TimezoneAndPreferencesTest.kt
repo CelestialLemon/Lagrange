@@ -71,6 +71,11 @@ class TimezoneAndPreferencesTest {
         assertEquals(30 * 60_000L, p.current().dailyBudgetMs)
         assertEquals(6, p.current().rolloverHour)
         assertFalse(p.repairFromHistory())
+        // The clock was set back before the last change: the row written last wins, not the later timestamp.
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 100, settingKey = LagrangePreferences.HISTORY_ROLLOVER_HOUR, valueJson = "5"))
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 50, settingKey = LagrangePreferences.HISTORY_ROLLOVER_HOUR, valueJson = "7"))
+        assertTrue(p.repairFromHistory())
+        assertEquals(7, p.current().rolloverHour)
         // A normal change writes history and preference together.
         p.setDailyBudgetMs(45 * 60_000L)
         assertEquals("${45 * 60_000L}", history.byKey(LagrangePreferences.HISTORY_DAILY_BUDGET_MS).last().valueJson)

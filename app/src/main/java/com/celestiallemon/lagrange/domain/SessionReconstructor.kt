@@ -403,9 +403,15 @@ object SessionReconstructor {
                 val last = stretches.lastOrNull()
                 // Consecutive activities of one app form a stretch (a splash handing over to the main activity leaves a
                 // few ms between them); only a screen-off gap starts a new one (a reopen).
-                val sameScreenOn = span.startMs <= (last?.endMs ?: Long.MIN_VALUE) ||
-                    (last != null && activeSpans.any { it.startMs <= last.endMs && span.startMs <= it.endMs })
-                if (last != null && last.pkgId == pkg && sameScreenOn) stretches[stretches.lastIndex] = last.copy(spans = last.spans + span)
+                // A resume with its own launch pause is a fresh open even then.
+                val joins = last != null && last.pkgId == pkg && (
+                    span.startMs <= last.endMs || (
+                        span.startMs - last.endMs <= rules.activityHandoffMs &&
+                            activeSpans.any { it.startMs <= last.endMs && span.startMs <= it.endMs } &&
+                            !launchPauseOpens(pkg, span.startMs, last.startMs)
+                        )
+                    )
+                if (joins) stretches[stretches.lastIndex] = last!!.copy(spans = last.spans + span)
                 else stretches += Segment(pkg, listOf(span))
             }
             val joined = scrubBlocked(stretches, frictionUsed)
@@ -438,6 +444,13 @@ object SessionReconstructor {
                 if (last != null && s.startMs <= last.endMs) out[out.lastIndex] = Span(last.startMs, maxOf(last.endMs, s.endMs)) else out += s
             }
             return out
+        }
+
+        /** A blocking launch pause for [pkg] near [openAtMs] that sits closer to it than to the earlier open at [prevOpenMs]. */
+        private fun launchPauseOpens(pkg: Long, openAtMs: Long, prevOpenMs: Long): Boolean = input.friction.any { f ->
+            f.pkgId == pkg && f.eventKind == FrictionVocab.LAUNCH_PAUSE && f.outcome in FrictionVocab.BLOCKING_OUTCOMES &&
+                f.timestampMs >= openAtMs - rules.frictionMatchMs && f.timestampMs <= openAtMs + rules.frictionMatchMs + f.pauseDurationSec * 1000L &&
+                kotlin.math.abs(f.timestampMs - openAtMs) < kotlin.math.abs(f.timestampMs - prevOpenMs)
         }
 
         /** Marks opens that ended at a launch pause (Go Home, system back/home, redirect) and scrubs the pause time. */

@@ -590,6 +590,22 @@ class SessionReconstructorTest {
     }
 
     @Test
+    fun `a same-app reopen with its own launch pause stays a separate, blocked open`() {
+        val l = covered()
+        l.screenOn(0).unlock(SEC)
+        // Real use, a minute of nothing in front, then a reopen stopped by the launch pause.
+        l.use(P.INSTAGRAM, 2 * SEC, 30 * SEC).use(P.INSTAGRAM, 90 * SEC, 97 * SEC)
+        // And a reopen half a second after a pause, also with its own launch pause.
+        l.use(P.INSTAGRAM, 97 * SEC + 500, 104 * SEC)
+        l.lock(105 * SEC).screenOff(105 * SEC)
+        l.blocked(P.INSTAGRAM, 90 * SEC + 100)
+        l.blocked(P.INSTAGRAM, 97 * SEC + 600)
+        val insta = l.reconstruct().single().segments.filter { it.pkgId == P.INSTAGRAM }
+        assertEquals(listOf(false, true, true), insta.map { it.isBlockedAttempt })
+        assertEquals(28 * SEC, insta[0].effectiveMs)
+    }
+
+    @Test
     fun `a switch never borrows the tap that opened a later switch`() {
         val l = covered()
         // Unlock at 1 s into Maps, Chrome from 4 s (nothing tapped), WhatsApp from 12 s, opened by a shade tap at 11 s.

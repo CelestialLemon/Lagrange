@@ -233,6 +233,10 @@ interface SettingsHistoryDao {
 
     @Query("SELECT * FROM settings_history WHERE setting_key = :key ORDER BY timestamp_utc_ms, id")
     suspend fun byKey(key: String): List<SettingsHistoryEntity>
+
+    /** The row written last (highest id), whatever the wall clock said when it was written. */
+    @Query("SELECT * FROM settings_history WHERE setting_key = :key ORDER BY id DESC LIMIT 1")
+    suspend fun lastWritten(key: String): SettingsHistoryEntity?
 }
 
 /** An existing self-report, read before a rebuild replaces the derived rows it lives on. */
@@ -364,6 +368,9 @@ interface DerivedDao {
 
     @Query("DELETE FROM daily_rollups WHERE logical_date = :date")
     suspend fun deleteDailyRollup(date: String)
+
+    @Query("SELECT * FROM session_segments WHERE session_id = :sessionId ORDER BY seq_index")
+    suspend fun segmentsOfSession(sessionId: Long): List<SessionSegmentEntity>
 
     @Query("UPDATE sessions SET worth_it_rating = :rating WHERE episode_key = :episodeKey AND is_glance_only = 0")
     suspend fun setRatingByKey(episodeKey: String, rating: Int?): Int

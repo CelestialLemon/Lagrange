@@ -110,6 +110,8 @@ data class ReconstructionRules(
     val callMergeMaxGapMs: Long = 2 * HOUR_MS,
     val transientHopMs: Long = 10_000,
     val customTabLaunchMs: Long = 2_000,
+    /** Two activities of one app this close together (splash → main) are one open, not a reopen. */
+    val activityHandoffMs: Long = 1_000,
     /** An interval with no closing event is never credited more than this past its last observed event. */
     val uncertainTailCapMs: Long = 30 * MINUTE_MS,
     val clickBeforeMs: Long = 5_000,

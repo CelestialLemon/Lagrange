@@ -6,6 +6,8 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class BaselinesTest {
@@ -108,6 +110,16 @@ class BaselinesTest {
         val trip = ZoneTimeline(listOf(0L to ny, ms("2026-11-20T15:00") to la, ms("2026-11-21T09:00", la) to ny), ny)
         val afternoon = LocalDateTime.parse("2026-11-23T16:30")
         assertEquals(Span(ms("2026-11-20T16:00", la), ms("2026-11-20T16:30", la)), PartialDayBaseline.currentHourOn(LocalDate.parse("2026-11-20"), afternoon, 4, trip))
+        // LA → NY at 07:00 Pacific (10:00 Eastern): 08:30 never showed on any clock that day.
+        val east = ZoneTimeline(listOf(0L to la, ms("2026-11-20T07:00", la) to ny), la)
+        assertNull(PartialDayBaseline.currentHourOn(LocalDate.parse("2026-11-20"), LocalDateTime.parse("2026-11-23T08:30"), 4, east))
+        assertEquals(
+            Span(ms("2026-11-20T10:00", ny), ms("2026-11-20T10:30", ny)),
+            PartialDayBaseline.currentHourOn(LocalDate.parse("2026-11-20"), LocalDateTime.parse("2026-11-23T10:30"), 4, east),
+        )
+        // Flying west an hour into the day: the clock reads 02:00, before this day's own rollover. Nothing compares.
+        assertFalse(PartialDayBaseline.comparable(LocalDateTime.parse("2026-11-23T02:00"), LocalDate.parse("2026-11-23"), 4))
+        assertTrue(PartialDayBaseline.comparable(LocalDateTime.parse("2026-11-24T02:00"), LocalDate.parse("2026-11-23"), 4))
     }
 
     @Test

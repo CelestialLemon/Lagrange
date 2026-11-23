@@ -94,6 +94,15 @@ class ZoneTimeline(entries: List<Pair<Long, ZoneId>>, private val fallback: Zone
 
     private val zones: List<ZoneId> = (sorted.map { it.second } + fallback).distinct()
 
+    /**
+     * The earliest instant in `[fromMs, toMs)` whose own zone (the one in force then) shows the wall time [local],
+     * or null when that wall time never happened there (a DST gap, or skipped by travel).
+     */
+    fun instantOf(local: java.time.LocalDateTime, fromMs: Long, toMs: Long): Long? = zones.mapNotNull { z ->
+        val t = local.atZone(z).toInstant().toEpochMilli()
+        t.takeIf { it in fromMs until toMs && zoneAt(it) == z && Instant.ofEpochMilli(it).atZone(z).toLocalDateTime() == local }
+    }.minOrNull()
+
     fun window(date: LocalDate, rolloverHour: Int): DayWindow {
         val start = dayStartMs(date, rolloverHour)
         val end = dayStartMs(date.plusDays(1), rolloverHour).coerceAtLeast(start)
@@ -487,13 +496,17 @@ object PartialDayBaseline {
      * falls on the next calendar date. Null when that minute never happened that day (a spring-forward gap) or the
      * hour has no length.
      */
+    /** Whether the wall clock [now] reads a time inside logical day [today] at all (not before its own rollover after flying west). */
+    fun comparable(now: java.time.LocalDateTime, today: LocalDate, rolloverHour: Int): Boolean =
+        now >= today.atTime(rolloverHour, 0) && now < today.plusDays(1).atTime(rolloverHour, 0)
+
     fun currentHourOn(date: LocalDate, now: java.time.LocalDateTime, rolloverHour: Int, zones: ZoneTimeline): Span? {
         val local = (if (now.hour < rolloverHour) date.plusDays(1) else date).atTime(now.toLocalTime())
-        val dayZone = zones.zoneAt(zones.window(date, rolloverHour).startMs)
-        val zone = zones.zoneAt(local.atZone(dayZone).toInstant().toEpochMilli())
-        if (zone.rules.getTransition(local)?.isGap == true) return null
-        val cut = local.atZone(zone).toInstant().toEpochMilli()
-        val hourStart = minOf(cut, local.truncatedTo(ChronoUnit.HOURS).atZone(zone).toInstant().toEpochMilli())
+        val w = zones.window(date, rolloverHour)
+        // Checked against the zone actually in force at each candidate instant, inside that day's window.
+        val cut = zones.instantOf(local, w.startMs, w.endMs) ?: return null
+        val zone = zones.zoneAt(cut)
+        val hourStart = minOf(cut, maxOf(w.startMs, local.truncatedTo(ChronoUnit.HOURS).atZone(zone).toInstant().toEpochMilli()))
         return if (cut > hourStart) Span(hourStart, cut) else null
     }
 

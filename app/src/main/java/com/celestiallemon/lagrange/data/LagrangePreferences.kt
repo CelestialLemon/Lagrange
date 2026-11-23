@@ -99,8 +99,8 @@ class LagrangePreferences(
      */
     suspend fun repairFromHistory(): Boolean {
         val history = db.settingsHistoryDao()
-        val rollover = history.byKey(HISTORY_ROLLOVER_HOUR).lastOrNull()?.valueJson?.trim()?.toIntOrNull()?.takeIf { it in 0..23 }
-        val budget = history.byKey(HISTORY_DAILY_BUDGET_MS).lastOrNull()?.valueJson?.trim()?.toLongOrNull()
+        val rollover = history.lastWritten(HISTORY_ROLLOVER_HOUR)?.valueJson?.trim()?.toIntOrNull()?.takeIf { it in 0..23 }
+        val budget = history.lastWritten(HISTORY_DAILY_BUDGET_MS)?.valueJson?.trim()?.toLongOrNull()
             ?.takeIf { it in UserPrefs.BUDGET_RANGE_MS }
         val now = current()
         if ((rollover == null || rollover == now.rolloverHour) && (budget == null || budget == now.dailyBudgetMs)) return false

@@ -384,7 +384,7 @@ class DerivedRepository(
         if (checkSpill && cs > ctx.earliest) {
             val fresh = episodes.filter { it.startMs < cs && it.endMs > cs }
             val stored = db.derivedDao().sessionsSpanning(cs)
-            if (fresh.map { it.episodeKey to it.endMs }.toSet() != stored.map { it.episodeKey to it.endMs }.toSet()) {
+            if (!sameRows(ctx, fresh, stored)) {
                 val from = (fresh.map { it.startMs } + stored.map { it.startMs }).min()
                 if (from < cs) return from
             }
@@ -394,6 +394,18 @@ class DerivedRepository(
         )
         writeChunk(ctx, cs, ce, windows.first().date, windows.last().date, episodes.filter { it.startMs >= cs }, results)
         return null
+    }
+
+    /** Whether [episodes] would be stored exactly as [rows] (session and segment fields alike; ratings aside). */
+    private suspend fun sameRows(ctx: Context, episodes: List<Episode>, rows: List<SessionEntity>): Boolean {
+        if (episodes.size != rows.size) return false
+        for ((ep, row) in episodes.sortedBy { it.startMs }.zip(rows.sortedBy { it.startMs })) {
+            val date = ctx.zones.dateOf(ep.startMs, ctx.rollover).toString()
+            if (ep.toEntity(date, row.worthItRating) != row.copy(id = 0)) return false
+            val segs = db.derivedDao().segmentsOfSession(row.id).map { it.copy(id = 0, sessionId = 0) }
+            if (segs != ep.segments.mapIndexed { i, s -> s.toEntity(0, i) }) return false
+        }
+        return true
     }
 
     /**
@@ -494,6 +506,9 @@ class DerivedRepository(
             PartialDayBaseline.sliceMs(slots, wholeHours, HourSlots.repeatedSlot(ctx.zones.window(date, ctx.rollover), ctx.rollover))
         }
         val nowLocal = java.time.Instant.ofEpochMilli(ctx.dataEnd).atZone(nowZone).toLocalDateTime()
+        // After a westward trip the clock can read a time before this logical day's own rollover: no past day has
+        // a comparable "same time", so there is no slice to show.
+        if (!PartialDayBaseline.comparable(nowLocal, ctx.today, ctx.rollover)) return null
         val partialHour = base.matchedDays.associateWith { date ->
             PartialDayBaseline.currentHourOn(date, nowLocal, ctx.rollover, ctx.zones)
                 ?.let { activeUseBetween(ctx, it.startMs, it.endMs, activePkgs) } ?: 0L

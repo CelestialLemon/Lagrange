@@ -449,6 +449,35 @@ class DerivedRepositoryTest {
     }
 
     @Test
+    fun `a late pause inside a session crossing the range start refreshes that session too`() = runBlocking {
+        val e = env()
+        e.history(2)
+        val boundary = at(today.minusDays(1), 4)
+        e.session(boundary - 5 * MINUTE_MS, INSTAGRAM, 15 * MINUTE_MS)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val before = e.sessions().single { it.startMs < boundary && it.endMs > boundary }
+        assertEquals(15 * MINUTE_MS, before.totalDistractingMs)
+
+        // Late events: Instagram left the foreground from 04:02 to 04:05 (same key, same end).
+        val p = e.interner.packageId(INSTAGRAM)
+        val c = e.interner.classId("$INSTAGRAM.Main")
+        e.db.rawUsageEventDao().insertAll(
+            listOf(
+                RawUsageEventEntity(timestampUtcMs = boundary + 2 * MINUTE_MS, eventType = T.ACTIVITY_PAUSED, pkgId = p, clsId = c),
+                RawUsageEventEntity(timestampUtcMs = boundary + 5 * MINUTE_MS, eventType = T.ACTIVITY_RESUMED, pkgId = p, clsId = c),
+            ),
+        )
+        e.repo.markDirty(boundary + MINUTE_MS)
+        e.repo.runPending()
+        val after = e.sessions().single { it.startMs < boundary && it.endMs > boundary }
+        assertEquals(before.episodeKey, after.episodeKey)
+        assertEquals(before.endMs, after.endMs)
+        assertEquals(12 * MINUTE_MS, after.totalDistractingMs)
+        assertEquals(12 * MINUTE_MS, e.db.derivedDao().segmentsOfSession(after.id).sumOf { it.durationMs })
+    }
+
+    @Test
     fun `an episode whose opening events all fall before the read is still rebuilt whole`() = runBlocking {
         suspend fun build(e: Env): Pair<List<SessionEntity>, List<com.celestiallemon.lagrange.data.db.HourlyAppUsageEntity>> {
             e.history(4)
