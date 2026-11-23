@@ -73,6 +73,7 @@ import com.celestiallemon.lagrange.ui.MainViewModel
 import com.celestiallemon.lagrange.ui.TodayState
 import com.celestiallemon.lagrange.ui.TodayViewModel
 import com.celestiallemon.lagrange.ui.components.LagrangeScreen
+import com.celestiallemon.lagrange.ui.lab.WorthCheckInCard
 import com.celestiallemon.lagrange.ui.components.SectionCard
 import com.celestiallemon.lagrange.ui.components.StatRow
 import com.celestiallemon.lagrange.ui.components.StatTile
@@ -100,6 +101,7 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
     val state by today.state.collectAsStateWithLifecycle()
     val progress by today.progress.collectAsStateWithLifecycle()
     val detail by today.detail.collectAsStateWithLifecycle()
+    val checkIn by today.checkIn.collectAsStateWithLifecycle()
     val status = LocalStatusColors.current
     val now = System.currentTimeMillis()
 
@@ -156,6 +158,23 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
         if (s != null) {
             item("budget") { BudgetOrbitCard(s, onEdit = { editingBudget = true }) }
             item("note") { DayNoteChip(s, onEdit = { editingNote = true }) }
+            checkIn?.let { card ->
+                item("checkin") {
+                    val key = card.episode.episodeKey
+                    WorthCheckInCard(
+                        card,
+                        onRate = { today.rate(key, card.episode.startMs, it) },
+                        onDismiss = { today.dismissCheckIn(key) },
+                        onOpen = {
+                            // Today's sheet shows today's sessions; an earlier one is rated right here on the card.
+                            if (s.episodes.any { it.session.episodeKey == key }) {
+                                openKey = key
+                                today.loadDetail(key)
+                            }
+                        },
+                    )
+                }
+            }
             if (rollup != null) {
                 item("baseline") { BaselineCard(s, dayStatus) }
                 if (dayStatus == DayStatus.SPIKE || dayStatus == DayStatus.GOOD_DAY) {

@@ -19,6 +19,8 @@ import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.data.TimezoneTracker
 import com.celestiallemon.lagrange.data.TrendsRepository
+import com.celestiallemon.lagrange.data.LabRepository
+import com.celestiallemon.lagrange.data.CheckInStore
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.ServiceKind
 import com.celestiallemon.lagrange.friction.LagrangeAccessibilityService
@@ -105,6 +107,20 @@ class AppGraph(private val app: Application) {
 
     /** Trends, the apps breakdown and the per-app deep dive, read from the derived tables. */
     val trends by lazy { TrendsRepository(database, derived) }
+
+    /** The Behavior Lab's sections and the "Was that worth it?" check-in. */
+    val lab by lazy {
+        LabRepository(
+            database,
+            derived,
+            checkInStore = object : CheckInStore {
+                override val changes = preferences.worthCheckInLog
+                override suspend fun update(transform: (String?) -> String?) {
+                    preferences.updateWorthCheckInLog(transform)
+                }
+            },
+        )
+    }
 
     /** Schedules, friction event logs, and monotonic live friction state (snooze, focus boost, timers). */
     val friction by lazy {
