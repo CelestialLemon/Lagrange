@@ -44,6 +44,7 @@ import com.celestiallemon.lagrange.domain.ReconstructionInput
 import com.celestiallemon.lagrange.domain.ReconstructionRules
 import com.celestiallemon.lagrange.domain.RollupEngine
 import com.celestiallemon.lagrange.domain.RollupInput
+import com.celestiallemon.lagrange.domain.RollupRules
 import com.celestiallemon.lagrange.domain.SessionReconstructor
 import com.celestiallemon.lagrange.domain.SliceBaseline
 import com.celestiallemon.lagrange.domain.UsageEvent
@@ -96,6 +97,7 @@ class DerivedRepository(
     private val lookbackMs: Long = LOOKBACK_MS,
     private val lookaheadMs: Long = LOOKAHEAD_MS,
 ) {
+    private val rollupRules = RollupRules()
     private val mutex = Mutex()
     private val _progress = MutableStateFlow(RecomputeProgress())
     val progress: StateFlow<RecomputeProgress> = _progress
@@ -362,9 +364,18 @@ class DerivedRepository(
                 (firstFg != null && firstFg.type != UsageEventTypes.ACTIVITY_RESUMED && firstFg.timestampMs > cs)
             val cutBehind = loadFrom > ctx.earliest && firstEvent != null &&
                 (openAtRead || episodes.any { it.startMs - firstEvent < MARGIN_EDGE_MS && it.endMs > cs })
-            if ((cutAhead || cutBehind) && attempt < MAX_MARGIN_DOUBLINGS) {
+            // The overnight gap is measured from the last unlocked episode before the chunk's first pickup; glances
+            // don't count, so a lockscreen glance inside the lookback must not stand in for it. Read back until
+            // that predecessor is in, or far enough that one ending earlier could not have its midpoint in the
+            // chunk's first night (whose window opens before any later window's).
+            val firstUnlocked = episodes.filter { !it.isGlanceOnly }.minByOrNull { it.startMs }
+            val predecessorReach = firstUnlocked?.let { 2 * (cs - rollupRules.nightBeforeRolloverMs) - it.startMs }
+            val noPredecessor = firstUnlocked != null && firstUnlocked.endMs > cs && predecessorReach != null &&
+                loadFrom > maxOf(ctx.earliest, predecessorReach)
+            if ((cutAhead || cutBehind || noPredecessor) && attempt < MAX_MARGIN_DOUBLINGS) {
                 if (cutAhead) ahead *= 2
                 if (cutBehind) back *= 2
+                if (noPredecessor) back = maxOf(back, cs - predecessorReach!!)
                 attempt++
                 continue
             }
@@ -392,6 +403,7 @@ class DerivedRepository(
         }
         val results = RollupEngine.compute(
             RollupInput(windows, episodes, ctx.apps, ctx.coverage, loaded.input.notifications, ctx.rollover, ctx.dataEnd, ctx.budgetFor, ctx.zones),
+            rollupRules,
         )
         writeChunk(ctx, cs, ce, windows.first().date, windows.last().date, episodes.filter { it.startMs >= cs }, results)
         return null

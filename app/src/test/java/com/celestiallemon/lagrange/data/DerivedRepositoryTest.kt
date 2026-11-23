@@ -496,6 +496,39 @@ class DerivedRepositoryTest {
     }
 
     @Test
+    fun `a lockscreen glance before the chunk start does not hide the overnight gap's predecessor`() = runBlocking {
+        val day = today.minusDays(2)
+        suspend fun build(e: Env): List<com.celestiallemon.lagrange.data.db.DailyRollupEntity> {
+            e.setup(at(day.minusDays(2), 0))
+            e.session(at(day.minusDays(2), 9), WHATSAPP, 30 * MINUTE_MS)
+            // Last unlocked use ends at 15:00; a lockscreen-only glance at 23:00 sits inside the 04:00 chunk's
+            // default lookback (16:00 onwards); the next unlock is at 08:00.
+            e.session(at(day.minusDays(1), 14, 30), WHATSAPP, 30 * MINUTE_MS - 3_000)
+            val sys = e.interner.packageId("android")
+            val none = e.interner.classId("")
+            val glance = at(day.minusDays(1), 23)
+            e.db.rawUsageEventDao().insertAll(
+                listOf(
+                    RawUsageEventEntity(timestampUtcMs = glance, eventType = T.KEYGUARD_SHOWN, pkgId = sys, clsId = none),
+                    RawUsageEventEntity(timestampUtcMs = glance, eventType = T.SCREEN_INTERACTIVE, pkgId = sys, clsId = none),
+                    RawUsageEventEntity(timestampUtcMs = glance + 4_000, eventType = T.SCREEN_NON_INTERACTIVE, pkgId = sys, clsId = none),
+                ),
+            )
+            e.session(at(day, 8), INSTAGRAM, 20 * MINUTE_MS)
+            e.repo.markAllDirty()
+            e.repo.runPending()
+            return e.db.derivedDao().dailyRollupsBetween("0000", "9999")
+        }
+        val split = build(env(chunkDays = 1))
+        val whole = build(env(chunkDays = 7))
+        assertEquals(whole, split)
+        assertEquals(1, split.single { it.logicalDate == day.minusDays(1).toString() }.glanceCount)
+        val gap = split.single { it.logicalDate == day.toString() }.overnightGapMs
+        assertNotNull(gap)
+        assertTrue("gap $gap", kotlin.math.abs(gap!! - 17 * HOUR_MS) < MINUTE_MS)
+    }
+
+    @Test
     fun `a rebuilt day that no longer produces a rollup loses its old row`() = runBlocking {
         val e = env()
         e.setup(at(today.minusDays(2), 0))
