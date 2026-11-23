@@ -335,7 +335,7 @@ class DerivedRepository(
         val episodes: List<Episode>,
     )
 
-    private suspend fun load(ctx: Context, cs: Long, ce: Long): Loaded {
+    private suspend fun load(ctx: Context, cs: Long, ce: Long, includeNotifications: Boolean = true): Loaded {
         var back = lookbackMs
         var ahead = lookaheadMs
         var attempt = 0
@@ -343,7 +343,8 @@ class DerivedRepository(
             val loadFrom = cs - back
             val loadTo = minOf(ce + ahead, ctx.dataEnd + 1)
             val events = db.rawUsageEventDao().between(loadFrom, loadTo).map { UsageEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) }
-            val notifications = db.rawNotificationDao().eligibleAlive(loadFrom, loadTo).map { it.toMeta() }
+            // Notifications only shape triggers, never where use falls.
+            val notifications = if (includeNotifications) db.rawNotificationDao().eligibleAlive(loadFrom, loadTo).map { it.toMeta() } else emptyList()
             val friction = db.derivedDao().frictionBetween(loadFrom, loadTo).map { it.toMeta() }
             val input = ReconstructionInput(events, ctx.apps, ctx.customTabs, notifications, friction, ctx.coverage, dataEndMs = minOf(ctx.dataEnd, loadTo))
             val episodes = SessionReconstructor.reconstruct(input, rules)
@@ -519,23 +520,14 @@ class DerivedRepository(
     }
 
     /**
-     * Active use in `[fromMs, toMs)` exactly as the day would have looked with the ledger ending at [toMs]: the
-     * stretch is reconstructed from raw events (stored segments only carry a total, not where inside them the
-     * launch pauses and merged screen-off gaps fell).
+     * Active use in `[fromMs, toMs)` as that day's own rebuild saw it: the stretch is reconstructed from raw events
+     * with the rebuild's margins (an app left open across [toMs] is closed by its real events, not capped as an
+     * unknown tail), then clipped. Stored segments only carry a total, not where inside them launch pauses fell.
      */
-    private suspend fun activeUseBetween(ctx: Context, fromMs: Long, toMs: Long, pkgs: Set<Long>): Long {
-        val loadFrom = fromMs - lookbackMs
-        val events = db.rawUsageEventDao().between(loadFrom, toMs).map { UsageEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) }
-        if (events.isEmpty()) return 0L
-        val friction = db.derivedDao().frictionBetween(loadFrom, toMs).map { it.toMeta() }
-        val episodes = SessionReconstructor.reconstruct(
-            ReconstructionInput(events, ctx.apps, ctx.customTabs, emptyList(), friction, ctx.coverage, dataEndMs = toMs),
-            rules,
-        )
-        return episodes.sumOf { ep ->
+    private suspend fun activeUseBetween(ctx: Context, fromMs: Long, toMs: Long, pkgs: Set<Long>): Long =
+        load(ctx, fromMs, toMs, includeNotifications = false).episodes.sumOf { ep ->
             ep.segments.filter { it.pkgId in pkgs }.sumOf { seg -> seg.effectiveSpans().sumOf { it.overlapMs(fromMs, toMs) } }
         }
-    }
 
     /**
      * Today against comparable days: the same-time-of-day slice (weekday/weekend matched) plus how many covered days

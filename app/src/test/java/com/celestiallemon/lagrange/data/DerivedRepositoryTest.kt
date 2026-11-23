@@ -529,6 +529,20 @@ class DerivedRepositoryTest {
     }
 
     @Test
+    fun `the same-time slice counts a long single-app stretch running past the cutoff minute`() = runBlocking {
+        val e = env()
+        e.setup(at(today.minusDays(10), 0))
+        // 11:15 to 12:40 in one app, with no events in between: closed by its real 12:40 pause, not capped.
+        for (i in 10 downTo 1) e.session(at(today.minusDays(i.toLong()), 11, 15), INSTAGRAM, 85 * MINUTE_MS)
+        e.session(at(today, 10), INSTAGRAM, 5 * MINUTE_MS)
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(today, 12, 30)))
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        // 44:58 in the 11:00 bucket plus the first 30 minutes of the 12:00 hour.
+        assertEquals(45 * MINUTE_MS - 2_000 + 30 * MINUTE_MS, e.repo.todayComparison()!!.slice!!.medianMs)
+    }
+
+    @Test
     fun `the same-time slice leaves out launch-pause time inside the current hour`() = runBlocking {
         val e = env()
         e.setup(at(today.minusDays(10), 0))
