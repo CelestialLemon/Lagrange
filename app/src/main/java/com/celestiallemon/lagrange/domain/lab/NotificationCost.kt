@@ -141,7 +141,10 @@ object NotificationCostAnalyzer {
     ): NotificationCostReport {
         val end = minOf(toMs, dataEndMs)
         val covered = notifications.filter { it.postedAtMs in fromMs until end && Spans.contains(listener, it.postedAtMs) && it.isCountable }
-        val attributions = attribute(covered, episodes, apps, rules)
+        // Credit is resolved against every candidate the reconstructor could see (including ones posted before the
+        // window or outside listener coverage) and only then narrowed to this cohort; open sessions can't be credited yet.
+        val candidates = notifications.filter { it.postedAtMs < end && it.isCountable }
+        val attributions = attribute(candidates, episodes.filter { !it.inProgress && it.endMs <= dataEndMs }, apps, rules)
         val likelyAppCancel = attributions.filter { it.evidence == TriggerEvidence.LIKELY_APP_CANCEL_CLICK }.map { it.notificationId }.toSet()
         fun clicked(n: LabNotification) = n.removalReason == RemovalReason.CLICK || (n.removalReason == RemovalReason.APP_CANCEL && n.id in likelyAppCancel)
 

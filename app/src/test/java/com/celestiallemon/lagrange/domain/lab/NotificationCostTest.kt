@@ -118,6 +118,42 @@ class NotificationCostTest {
     }
 
     @Test
+    fun `credit goes to the notification the reconstructor saw first, even one posted before the window`() {
+        val h = HOUR_MS
+        val start = 2 * h + 3 * MIN
+        val at = start + 5 * MIN // the hop into Instagram
+        val notifs = listOf(
+            n(1, INSTA, 2 * h - MIN, removed = at + 2_000, reason = RemovalReason.APP_CANCEL), // before the window, canceled first
+            n(2, INSTA, 2 * h + MIN, removed = at + 5_000, reason = RemovalReason.APP_CANCEL),
+        )
+        val e = episode(start, KINDLE to 5, INSTA to 10).let { ep ->
+            ep.copy(segments = ep.segments.mapIndexed { i, s -> if (i == 1) s.copy(triggerEvidence = TriggerEvidence.LIKELY_APP_CANCEL_CLICK) else s })
+        }
+        val r = NotificationCostAnalyzer.analyze(notifs, listener, listOf(e), 2 * h, 10 * h, 10 * h, testApps)
+        val insta = r.rows.single()
+        assertEquals(1, insta.volume) // only the one posted in the window is reported…
+        assertEquals(0, insta.clicks) // …and it was not the one tapped
+        assertEquals(0L, insta.downstreamMs)
+        assertEquals(0, insta.attributed)
+    }
+
+    @Test
+    fun `a session still open counts as the pickup after an alert but earns no minutes yet`() {
+        val h = HOUR_MS
+        val alertAt = h + 20 * MIN
+        val notifs = listOf(n(1, INSTA, alertAt))
+        val eps = listOf(
+            episode(h, INSTA to 5),
+            episode(alertAt + 30_000, INSTA to 10, trigger = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerNotificationId = 1, inProgress = true),
+        )
+        val r = NotificationCostAnalyzer.analyze(notifs, listener, eps, 0, 10 * h, alertAt + 10 * MIN + 30_000, testApps)
+        assertEquals(1, r.overall.alerts)
+        assertEquals(1, r.overall.alertPickups)
+        assertEquals(0, r.rows.single().attributed)
+        assertEquals(0L, r.rows.single().downstreamMs)
+    }
+
+    @Test
     fun `pseudonymized or missing channel ids fall back to the app's notification settings`() {
         val pkg = "com.example"
         assertEquals(NotificationSettingsTarget.Channel(pkg, "promotions"), ChannelSettings.target(pkg, "promotions"))

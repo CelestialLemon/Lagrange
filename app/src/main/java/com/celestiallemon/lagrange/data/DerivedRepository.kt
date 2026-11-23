@@ -558,9 +558,28 @@ class DerivedRepository(
      * unknown tail), then clipped. Stored segments only carry a total, not where inside them launch pauses fell.
      */
     private suspend fun activeUseBetween(ctx: Context, fromMs: Long, toMs: Long, pkgs: Set<Long>): Long =
-        load(ctx, fromMs, toMs, includeNotifications = false).episodes.sumOf { ep ->
-            ep.segments.filter { it.pkgId in pkgs }.sumOf { seg -> seg.effectiveSpans().sumOf { it.overlapMs(fromMs, toMs) } }
+        activeUseByApp(ctx, fromMs, toMs, pkgs).values.sum()
+
+    private suspend fun activeUseByApp(ctx: Context, fromMs: Long, toMs: Long, pkgs: Set<Long>): Map<Long, Long> {
+        val out = HashMap<Long, Long>()
+        for (ep in load(ctx, fromMs, toMs, includeNotifications = false).episodes) {
+            for (seg in ep.segments) {
+                if (seg.pkgId !in pkgs) continue
+                val ms = seg.effectiveSpans().sumOf { it.overlapMs(fromMs, toMs) }
+                if (ms > 0) out.merge(seg.pkgId, ms, Long::plus)
+            }
         }
+        return out
+    }
+
+    /**
+     * Per-app active use inside each of [spans], reconstructed from raw events exactly as the live slice counts it
+     * (launch pauses and other scrubbed time excluded), so per-app and per-block slices add up to the headline.
+     */
+    suspend fun activeUseByApp(spans: List<com.celestiallemon.lagrange.domain.Span>, pkgs: Set<Long>): List<Map<Long, Long>> {
+        val ctx = context() ?: return spans.map { emptyMap() }
+        return spans.map { activeUseByApp(ctx, it.startMs, it.endMs, pkgs) }
+    }
 
     /**
      * Today against comparable days: the same-time-of-day slice (weekday/weekend matched) plus how many covered days

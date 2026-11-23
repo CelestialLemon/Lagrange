@@ -560,7 +560,7 @@ fun LazyListScope.rhythmSection(data: RhythmData, metric: HeatMetric, onMetric: 
                     val n = g.buckets[b] ?: 0
                     BarRow(b.label, "$n · ${pct(n.toDouble() / g.count)}", n.toFloat() / max)
                 }
-                Muted("Within each recorded day; the overnight stretch is left out.")
+                Muted("Between pickups on recorded days, across midnight too; the overnight stretch is left out.")
             }
         }
     }

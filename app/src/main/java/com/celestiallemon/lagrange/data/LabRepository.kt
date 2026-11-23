@@ -5,6 +5,8 @@ import com.celestiallemon.lagrange.data.db.AppCategory
 import com.celestiallemon.lagrange.data.db.CoverageStatus
 import com.celestiallemon.lagrange.data.db.DailyRollupEntity
 import com.celestiallemon.lagrange.data.db.DayStatus
+import com.celestiallemon.lagrange.data.db.FrictionEventEntity
+import com.celestiallemon.lagrange.data.db.FrictionVocab
 import com.celestiallemon.lagrange.data.db.HourlyAppUsageEntity
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.PackageEntity
@@ -59,6 +61,7 @@ import com.celestiallemon.lagrange.domain.lab.SubstitutionDay
 import com.celestiallemon.lagrange.domain.lab.WorthCheckInSampler
 import java.time.Instant
 import java.time.LocalDate
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
@@ -132,8 +135,9 @@ class LabRepository(
     // -- Spikes ---------------------------------------------------------------------------------------------------------
 
     suspend fun spikes(window: TrendWindow): SpikesReport {
-        val comparison = runCatching { derived.todayComparison() }.getOrNull()
         return io {
+            // Inside the same read transaction, so the headline and the history come from one generation.
+            val comparison = comparison()
             val ctx = derived.analyticsContext()
             val scope = scope(ctx, window)
             val days = facts(ctx, scope.range.start.minusDays(BASELINE_LOOKBACK_DAYS), scope.range.end)
@@ -146,8 +150,8 @@ class LabRepository(
 
     /** The autopsy of a settled spike or good day, or of today's live one. Null when [date] isn't one (any more). */
     suspend fun autopsy(date: LocalDate): SpikeAutopsy? {
-        val comparison = runCatching { derived.todayComparison() }.getOrNull()
         return io {
+            val comparison = comparison()
             val ctx = derived.analyticsContext()
             val days = facts(ctx, date.minusDays(BASELINE_LOOKBACK_DAYS), date)
             val live = date == ctx.today
@@ -177,15 +181,23 @@ class LabRepository(
             }
             val partialHour = if (cutoff == null || comparison == null) null else {
                 val nowLocal = Instant.ofEpochMilli(comparison.dataEndMs).atZone(ctx.zones.zoneAt(comparison.dataEndMs)).toLocalDateTime()
-                highlight.matchedDays.associateWith { d ->
-                    val hour = PartialDayBaseline.currentHourOn(d, nowLocal, ctx.rolloverHour, ctx.zones) ?: return@associateWith emptyMap()
-                    clippedUse(dao.segmentsOverlapping(hour.startMs, hour.endMs), hour, active)
-                }
+                // Reconstructed like the headline's own partial hour, so launch pauses are never credited to an app.
+                val hours = highlight.matchedDays.mapNotNull { d -> PartialDayBaseline.currentHourOn(d, nowLocal, ctx.rolloverHour, ctx.zones)?.let { d to it } }
+                val use = derived.activeUseByApp(hours.map { (_, h) -> Span(h.startMs, h.endMs) }, active)
+                highlight.matchedDays.associateWith { emptyMap<Long, Long>() } + hours.map { it.first }.zip(use).toMap()
             }
             val episodes = episodesBetween(date, date)
             val note = dao.notesBetween(date.toString(), date.toString()).firstOrNull()?.noteText
             SpikeAnalyzer.autopsy(AutopsyInput(highlight, appMs, slotMs, episodes, note, cutoff, partialHour), apps)
         }
+    }
+
+    private suspend fun comparison(): TodayComparison? = try {
+        derived.todayComparison()
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        null
     }
 
     private fun liveHighlight(ctx: AnalyticsContext, comparison: TodayComparison, days: Map<LocalDate, DayFacts>): DayHighlight? {
@@ -234,9 +246,12 @@ class LabRepository(
         val apps = LabApps(metas())
         val listener = ctx.coverage.filter { it.kind == ServiceKind.NOTIFICATION_LISTENER && it.status == CoverageStatus.ACTIVE }.map { it.span }
         val end = minOf(scope.toMs, scope.dataEndMs)
-        val notifications = if (end > scope.fromMs) dao.countableNotificationsBetween(scope.fromMs, end).map { it.toLab() } else emptyList()
-        // The day before the window too: the idle stretch before the window's first pickup starts there.
-        val episodes = episodesBetween(scope.range.start.minusDays(1), scope.range.end).filter { !it.inProgress && it.endMs <= scope.dataEndMs }
+        // From the day before the window too: the idle stretch before the window's first pickup starts there, and a
+        // notification posted then can still be the one a session in the window consumed.
+        val loadFrom = ctx.zones.window(scope.range.start.minusDays(1), ctx.rolloverHour).startMs
+        val notifications = if (end > scope.fromMs) dao.countableNotificationsBetween(loadFrom, end).map { it.toLab() } else emptyList()
+        // Still-open sessions count as pickups; the analyzer credits downstream minutes only once they close.
+        val episodes = episodesBetween(scope.range.start.minusDays(1), scope.range.end).filter { it.startMs < scope.dataEndMs }
         val usage = SpanSet.usageObserved(ctx.coverage)
         val report = NotificationCostAnalyzer.analyze(notifications, listener, episodes, scope.fromMs, scope.toMs, scope.dataEndMs, apps, sort, usage = usage)
         NotificationCostData(scope, report, apps)
@@ -253,8 +268,19 @@ class LabRepository(
         val distracting = dao.hourlyOfCategory(AppCategory.DISTRACTING.name, from, to)
             .filter { metas[it.pkgId]?.isSystemSurface != true }
             .groupBy { LocalDate.parse(it.logicalDate) }
-        val episodes = dao.unlockedSessions(from, to).groupBy { LocalDate.parse(it.logicalDate) }
-        val rollups = dao.rollups(from, to).associateBy { LocalDate.parse(it.logicalDate) }
+        // A night can begin on the day before the range; the rollup picked its gap among these same episodes.
+        val nearby = dao.unlockedSessions(scope.range.start.minusDays(1).toString(), scope.range.end.plusDays(1).toString())
+        val nearbySpans = nearby.map { Span(it.startMs, it.endMs) }
+        val episodes = nearby.filter { it.logicalDate in from..to }.groupBy { LocalDate.parse(it.logicalDate) }
+        val rollups = dao.rollups(from, scope.range.end.plusDays(1).toString()).associateBy { LocalDate.parse(it.logicalDate) }
+        val usage = UsageCoverage.of(ctx.coverage)
+        fun nightOf(date: LocalDate): Span = ctx.zones.window(date, ctx.rolloverHour).let { w ->
+            Span(w.startMs - NIGHT_RULES.nightBeforeRolloverMs, w.startMs + NIGHT_RULES.nightAfterRolloverMs)
+        }
+        val covered = scope.coveredDates.toSet()
+        val otherNights = rollups.filterKeys { it !in covered }.mapNotNull { (date, roll) ->
+            roll.overnightGapMs?.let { RhythmAnalyzer.locateOvernightGap(nearbySpans, nightOf(date), it) }
+        }
         val days = scope.coveredDates.map { date ->
             val eps = episodes[date].orEmpty()
             val window = ctx.zones.window(date, ctx.rolloverHour)
@@ -262,21 +288,24 @@ class LabRepository(
             val hasRepeat = hourly.any { it.hourSlot == HourSlots.REPEATED_SLOT } ||
                 eps.any { HourSlots.slotOf(it.startMs, ctx.rolloverHour, ctx.zones.zoneAt(it.startMs)) == HourSlots.REPEATED_SLOT }
             val roll = rollups[date]
+            val gap = roll?.overnightGapMs?.let { RhythmAnalyzer.locateOvernightGap(nearbySpans, nightOf(date), it) }
+            // A phone-free night only counts when usage collection watched all of it.
+            val observedGap = gap?.takeIf { usage.isContinuous(it.startMs, it.endMs) }
             RhythmDay(
                 date = date,
                 distractingSlots = hourly.groupBy { it.hourSlot }.mapValues { (_, c) -> c.sumOf { it.durationMs } },
                 pickupSlots = eps.groupingBy { HourSlots.slotOf(it.startMs, ctx.rolloverHour, ctx.zones.zoneAt(it.startMs)) }.eachCount(),
                 repeatedSlot = if (hasRepeat) HourSlots.repeatedSlot(window, ctx.rolloverHour, ctx.zones) else null,
-                overnightGapMs = roll?.overnightGapMs,
+                overnightGapMs = observedGap?.durationMs,
                 firstPickupMinute = roll?.firstPickupMs?.let { ms ->
                     val t = Instant.ofEpochMilli(ms).atZone(ctx.zones.zoneAt(ms)).toLocalTime()
                     t.hour * 60 + t.minute
                 },
                 episodes = eps.map { Span(it.startMs, it.endMs) },
-                nightWindow = Span(window.startMs - NIGHT_RULES.nightBeforeRolloverMs, window.startMs + NIGHT_RULES.nightAfterRolloverMs),
+                overnightGap = gap,
             )
         }
-        RhythmData(scope, RhythmAnalyzer.analyze(days, ctx.rolloverHour))
+        RhythmData(scope, RhythmAnalyzer.analyze(days, ctx.rolloverHour, otherNights = otherNights))
     }
 
     // -- Friction -------------------------------------------------------------------------------------------------------
@@ -285,13 +314,17 @@ class LabRepository(
         val ctx = derived.analyticsContext()
         val scope = scope(ctx, window)
         val apps = LabApps(metas())
-        val followTo = scope.toMs + frictionRules.sustainMs
-        val events = db.derivedDao().frictionBetween(scope.fromMs, followTo).map {
+        fun toLab(it: FrictionEventEntity) =
             LabFriction(it.timestampUtcMs, it.pkgId, it.eventKind, it.outcome, it.postCountdownReactionMs, it.selectedTimerMin, it.pauseDurationSec)
-        }
-        val opens = dao.runStartsBetween(scope.fromMs, followTo)
-            .filter { apps.isDistracting(it.pkgId) && !apps.isTransient(it.pkgId) }
-            .map { it.startMs }
+        // A prompt shown just before the window ends can be left well after it: follow up from the latest exit.
+        val inWindow = db.derivedDao().frictionBetween(scope.fromMs, scope.toMs).map(::toLab)
+        val followTo = maxOf(scope.toMs, inWindow.maxOfOrNull { it.exitWindow.endMs } ?: scope.toMs) + frictionRules.sustainMs
+        val events = db.derivedDao().frictionBetween(scope.fromMs, followTo).map(::toLab)
+        val runs = dao.runStartsBetween(scope.fromMs, followTo).filter { !apps.isTransient(it.pkgId) }
+        val opens = runs.filter { apps.isDistracting(it.pkgId) }.map { it.startMs }
+        // A paused app that isn't distracting (opted in, or recategorized since) is still reopened by opening it again.
+        val pausedPkgs = inWindow.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }.map { it.pkgId }.toSet()
+        val ownOpens = runs.filter { it.pkgId in pausedPkgs && !apps.isDistracting(it.pkgId) }.groupBy({ it.pkgId }, { it.startMs })
 
         // Substitution: covered days of this period against the period before (All-Time: its two halves).
         val (current, previous) = if (window.kind == WindowKind.ALL) {
@@ -313,16 +346,16 @@ class LabRepository(
                 .filter { row -> apps.category(row.pkgId) == AppCategory.NEUTRAL && !apps.isTransient(row.pkgId) && row.coveredMs > 0 }
                 .associate { row -> row.pkgId to row.coveredMs }
         }
-        val currentStartMs = current?.let { ctx.zones.window(it.start, ctx.rolloverHour).startMs } ?: scope.fromMs
         val enabled = db.settingsHistoryDao().byKey(FRICTION_ENABLED_KEY).mapNotNull { row ->
             row.valueJson.trim().trim('"').toBooleanStrictOrNull()?.let { row.timestampUtcMs to it }
         }
         val currentDays = substitutionDays(current)
-        // The comparison ends with its last settled covered day; a switch flipped today says nothing about it.
-        val currentEndMs = currentDays.maxOfOrNull { it.date }?.let { ctx.zones.window(it, ctx.rolloverHour).endMs } ?: scope.toMs
+        // Friction is "on" for the comparison only if it was on during the days the average is made of.
+        val currentSpans = currentDays.map { ctx.zones.window(it.date, ctx.rolloverHour).let { w -> Span(w.startMs, w.endMs) } }
         val input = FrictionInput(
             events = events,
             distractingOpens = opens,
+            ownOpens = ownOpens,
             fromMs = scope.fromMs,
             toMs = scope.toMs,
             dataEndMs = scope.dataEndMs,
@@ -335,8 +368,8 @@ class LabRepository(
             currentNeutralApps = neutralApps(current),
             previousNeutralApps = neutralApps(previous),
             enabledHistory = enabled,
-            substitutionFromMs = currentStartMs,
-            substitutionToMs = currentEndMs,
+            substitutionSpans = currentSpans,
+            followUpToMs = followTo,
         )
         FrictionData(scope, FrictionAnalyzer.analyze(input, apps, frictionRules), apps)
     }
@@ -470,24 +503,6 @@ class LabRepository(
                 LabSegment(it.pkgId, it.seqIndex, it.startMs, it.endMs, it.durationMs, it.isBlockedAttempt, evidenceOf(it.segmentTriggerEvidence), it.segmentTriggerPkgId)
             },
         )
-
-        /**
-         * Per-app active use inside [window] from stored segments. A segment's launch pauses aren't placed within it, so
-         * its overlap is scaled by its own active share (duration over wall span).
-         */
-        fun clippedUse(segments: List<SessionSegmentEntity>, window: Span, pkgs: Set<Long>): Map<Long, Long> {
-            val out = HashMap<Long, Long>()
-            for (g in segments) {
-                if (g.pkgId !in pkgs || g.isBlockedAttempt) continue
-                val wall = g.endMs - g.startMs
-                if (wall <= 0) continue
-                val overlap = minOf(g.endMs, window.endMs) - maxOf(g.startMs, window.startMs)
-                if (overlap <= 0) continue
-                val ms = if (g.durationMs >= wall) overlap else overlap * g.durationMs / wall
-                if (ms > 0) out.merge(g.pkgId, ms, Long::plus)
-            }
-            return out
-        }
 
         fun RawNotificationEntity.toLab() = LabNotification(
             id = id,

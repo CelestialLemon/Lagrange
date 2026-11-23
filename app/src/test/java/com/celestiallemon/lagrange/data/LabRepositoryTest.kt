@@ -247,26 +247,6 @@ class LabRepositoryTest {
     }
 
     @Test
-    fun `the live hour is clipped from stored segments at the minute`() {
-        fun seg(pkg: Long, from: Long, to: Long, active: Long = to - from, blocked: Boolean = false) = SessionSegmentEntity(
-            sessionId = 1, seqIndex = 0, pkgId = pkg, startMs = from, endMs = to, durationMs = active, isBlockedAttempt = blocked,
-            segmentTriggerEvidence = null, segmentTriggerPkgId = null,
-        )
-        val hour = com.celestiallemon.lagrange.domain.Span(60 * MINUTE_MS, 90 * MINUTE_MS) // 01:00–01:30
-        val use = LabRepository.clippedUse(
-            listOf(
-                seg(1, 50 * MINUTE_MS, 70 * MINUTE_MS), // 10 min inside
-                seg(1, 80 * MINUTE_MS, 100 * MINUTE_MS, active = 10 * MINUTE_MS), // 10 of 20 wall min inside, half active → 5
-                seg(2, 65 * MINUTE_MS, 75 * MINUTE_MS), // not an active-category app
-                seg(1, 70 * MINUTE_MS, 75 * MINUTE_MS, active = 0, blocked = true),
-            ),
-            hour,
-            pkgs = setOf(1L),
-        )
-        assertEquals(mapOf(1L to 15 * MINUTE_MS), use)
-    }
-
-    @Test
     fun `a corrupt check-in log starts over instead of failing`() {
         assertEquals(LabRepository.decodeLog(null), LabRepository.decodeLog("{not json"))
         val log = LabRepository.decodeLog(null).copy(date = "2026-11-23", shown = listOf("a"), dismissed = listOf("b"))
@@ -326,6 +306,9 @@ class LabRepositoryTest {
         e.db.derivedDao().upsertHourly(HourlyAppUsageEntity(day.toString(), 19, insta, 20 * MINUTE_MS, 1)) // 23:00
         e.db.derivedDao().upsertHourly(HourlyAppUsageEntity(day.toString(), 19, maps, 40 * MINUTE_MS, 1))
         e.session(day, at(day, 23), insta, 20)
+        // The night before: 23:50 (still Friday's logical day) → 07:00, the 7 h the rollup stored.
+        e.session(d(-2), at(d(-2), 23, 50), maps, 10)
+        e.session(day, at(day, 7), maps, 30)
         // Not covered (no rollup): ignored entirely.
         e.db.derivedDao().upsertHourly(HourlyAppUsageEntity(d(-2).toString(), 19, insta, 50 * MINUTE_MS, 1))
 
@@ -337,6 +320,9 @@ class LabRepositoryTest {
         assertEquals(23, r.heatmap.wallHour(19))
         assertEquals(7 * 60 + 30, r.sleep.firstPickupMinute)
         assertEquals(20 * MINUTE_MS, r.sleep.lateNight.overallMs)
-        assertEquals(7 * 60 * MINUTE_MS, r.sleep.overnightGap.overallMs)
+        // Usage collection wasn't watching that night: no phone-free night is claimed.
+        assertNull(r.sleep.overnightGap.overallMs)
+        e.coverage(ServiceKind.USAGE_HARVEST, at(d(-3), 0), now)
+        assertEquals(7 * 60 * MINUTE_MS, e.repo.rhythm(TrendWindow(WindowKind.D7)).report.sleep.overnightGap.overallMs)
     }
 }

@@ -160,13 +160,6 @@ interface AnalyticsDao {
     )
     suspend fun unlockedSessions(fromDate: String, toDate: String): List<SessionEntity>
 
-    /** Real (not blocked) segments of unlocked episodes overlapping `[fromMs, toMs)`: a live slice cut at the minute. */
-    @Query(
-        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
-            "WHERE s.is_glance_only = 0 AND g.is_blocked_attempt = 0 AND g.start_ms < :toMs AND g.end_ms > :fromMs ORDER BY g.start_ms",
-    )
-    suspend fun segmentsOverlapping(fromMs: Long, toMs: Long): List<SessionSegmentEntity>
-
     /** Every segment of those episodes, in order. */
     @Query(
         "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +

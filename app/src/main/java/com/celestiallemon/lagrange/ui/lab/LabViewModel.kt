@@ -22,6 +22,7 @@ import com.celestiallemon.lagrange.domain.lab.RabbitHoleExplorer
 import com.celestiallemon.lagrange.domain.lab.RabbitHoleFeed
 import com.celestiallemon.lagrange.domain.lab.SpikeAutopsy
 import com.celestiallemon.lagrange.ui.EpisodeUi
+import com.celestiallemon.lagrange.ui.afterReady
 import com.celestiallemon.lagrange.ui.SessionDetail
 import com.celestiallemon.lagrange.ui.checkInFlow
 import com.celestiallemon.lagrange.ui.graph
@@ -80,7 +81,8 @@ data class LabUiState(
     val error: String? = null,
 ) {
     val current: LabData? get() = data[request.section]
-    val stale: Boolean get() = current != null && current?.window != request.window
+    /** What's on screen was loaded for another window (or another sort order) than the one selected. */
+    val stale: Boolean get() = current.let { c -> c != null && (c.window != request.window || (c is LabData.Alerts && c.sort != request.sort)) }
 }
 
 /** The session sheet opened from a Lab card. */
@@ -132,7 +134,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
     val autopsy: StateFlow<AutopsyState?> = combine(
         autopsyDate,
         ui.map { it.data[LabSection.SPIKES] }.distinctUntilChanged(),
-        graph.database.analyticsDao().observeNotesSignal().distinctUntilChanged(),
+        graph.afterReady { database.analyticsDao().observeNotesSignal() }.distinctUntilChanged(),
     ) { d, s, n -> Triple(d, s, n) }
         .loadLatest(TAG) { (d, _, _) -> d?.let { graph.lab.autopsy(it) } }
         .map { (key, ev) ->

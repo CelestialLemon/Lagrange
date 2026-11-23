@@ -83,6 +83,35 @@ class FrictionEffectivenessTest {
     }
 
     @Test
+    fun `an open during the countdown bound came after the user left and is a quick reopen`() {
+        val shown = 12 * HOUR_MS
+        // Left during a 12 s countdown (no reaction recorded), then straight into TikTok at 12:00:05.
+        val events = listOf(pause(shown, FrictionVocab.OUTCOME_CLOSED_GO_HOME, countdownSec = 12))
+        val out = FrictionAnalyzer.exits(events, FrictionInput(events, listOf(shown + 5_000), 0, day, day, harvest), testApps)
+        assertEquals(ExitOutcomes(1, sustained = 0, quickReopens = 1, unresolved = 0), out)
+    }
+
+    @Test
+    fun `reopening a paused app that isn't distracting is a reopen too`() {
+        val events = listOf(pause(HOUR_MS, FrictionVocab.OUTCOME_CLOSED_GO_HOME, pkg = KINDLE))
+        val input = FrictionInput(events, emptyList(), 0, day, day, harvest)
+        assertEquals(1, FrictionAnalyzer.exits(events, input, testApps).sustained)
+        val reopened = input.copy(ownOpens = mapOf(KINDLE to listOf(HOUR_MS + 30_000)))
+        assertEquals(1, FrictionAnalyzer.exits(events, reopened, testApps).quickReopens)
+        // Another neutral app's run is not a reopen of this one.
+        assertEquals(1, FrictionAnalyzer.exits(events, input.copy(ownOpens = mapOf(MAPS to listOf(HOUR_MS + 30_000))), testApps).sustained)
+    }
+
+    @Test
+    fun `a follow-up past what was loaded is unresolved, not sustained`() {
+        val events = listOf(pause(0, FrictionVocab.OUTCOME_CLOSED_GO_HOME, reaction = 60_000))
+        val input = FrictionInput(events, emptyList(), 0, day, day, harvest)
+        assertEquals(1, FrictionAnalyzer.exits(events, input, testApps).sustained)
+        // Opens were only loaded through 10 minutes after the prompt; the user left a minute later.
+        assertEquals(1, FrictionAnalyzer.exits(events, input.copy(followUpToMs = 10 * MIN), testApps).unresolved)
+    }
+
+    @Test
     fun `a timer chosen and then abandoned with Go Home never started`() {
         val events = listOf(
             pause(0, FrictionVocab.OUTCOME_CLOSED_GO_HOME, timer = 5),
@@ -184,11 +213,14 @@ class FrictionEffectivenessTest {
             current = days(5, 60, 50),
             previous = days(5, 90, 30),
             enabledHistory = listOf(0L to false, 19 * day to true),
-            substitutionFromMs = 10 * day,
-            substitutionToMs = 15 * day, // the last settled covered day ends here; today is day 19
+            // The settled covered days the average is made of; today (day 19) and the gap day 13 aren't among them.
+            substitutionSpans = listOf(10, 11, 12, 14, 15).map { Span(it * day, (it + 1) * day) },
         )
         assertFalse(FrictionAnalyzer.analyze(input, testApps).substitution!!.frictionActive)
-        assertTrue(FrictionAnalyzer.analyze(input.copy(substitutionToMs = null), testApps).substitution!!.frictionActive)
+        assertTrue(FrictionAnalyzer.analyze(input.copy(substitutionSpans = null), testApps).substitution!!.frictionActive)
+        // Friction on only during the excluded gap day: still not "with friction on".
+        val gapDay = input.copy(events = emptyList(), enabledHistory = listOf(0L to false, 13 * day to true, 14 * day to false))
+        assertFalse(FrictionAnalyzer.analyze(gapDay, testApps).substitution!!.frictionActive)
     }
 
     @Test

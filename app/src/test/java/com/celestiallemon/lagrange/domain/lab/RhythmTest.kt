@@ -64,7 +64,7 @@ class RhythmTest {
         val day = RhythmDay(
             monday,
             overnightGapMs = 6 * h,
-            nightWindow = Span(t0, t0 + 8 * h),
+            overnightGap = Span(t0 + 10 * MIN, t0 + 6 * h + 10 * MIN),
             episodes = listOf(
                 Span(t0, t0 + 10 * MIN),
                 Span(t0 + 6 * h + 10 * MIN, t0 + 6 * h + 20 * MIN), // the overnight gap: left out
@@ -99,17 +99,28 @@ class RhythmTest {
     fun `a gap as long as the overnight gap but outside the night window is still a gap`() {
         val h = HOUR_MS
         val t0 = 300 * h
-        val d = RhythmDay(
-            monday,
-            overnightGapMs = 2 * h,
-            nightWindow = Span(t0 - 6 * h, t0 + 6 * h),
-            episodes = listOf(Span(t0 - 3 * h, t0 - 2 * h), Span(t0, t0 + MIN), Span(t0 + 8 * h, t0 + 8 * h + MIN), Span(t0 + 10 * h + MIN, t0 + 10 * h + 2 * MIN)),
-        )
-        val g = RhythmAnalyzer.gaps(listOf(d))
+        val eps = listOf(Span(t0 - 3 * h, t0 - 2 * h), Span(t0, t0 + MIN), Span(t0 + 8 * h, t0 + 8 * h + MIN), Span(t0 + 10 * h + MIN, t0 + 10 * h + 2 * MIN))
+        val night = RhythmAnalyzer.locateOvernightGap(eps, Span(t0 - 6 * h, t0 + 6 * h), 2 * h)
+        assertEquals(Span(t0 - 2 * h, t0), night)
+        val g = RhythmAnalyzer.gaps(listOf(RhythmDay(monday, overnightGapMs = 2 * h, overnightGap = night, episodes = eps)))
         // 2h (night: dropped), ~8h (kept), 2h at midday (same length, outside the night window: kept).
         assertEquals(2, g.count)
         assertEquals(1, g.buckets[GapBucket.H1_3])
         assertEquals(1, g.buckets[GapBucket.H3_PLUS])
+    }
+
+    @Test
+    fun `of two equally long night gaps only the one the rollup kept is left out`() {
+        val h = HOUR_MS
+        val t0 = 500 * h // 22:00 → 00:00, then 00:10 → 02:10: both 2h, both in the night window
+        val eps = listOf(Span(t0 - MIN, t0), Span(t0 + 2 * h, t0 + 2 * h + 10 * MIN), Span(t0 + 4 * h + 10 * MIN, t0 + 4 * h + 11 * MIN))
+        val night = RhythmAnalyzer.locateOvernightGap(eps, Span(t0 - 4 * h, t0 + 8 * h), 2 * h)
+        assertEquals(Span(t0, t0 + 2 * h), night) // the first, as the engine's strict ">" keeps it
+        val g = RhythmAnalyzer.gaps(listOf(RhythmDay(monday, overnightGapMs = 2 * h, overnightGap = night, episodes = eps)))
+        assertEquals(1, g.count)
+        assertEquals(1, g.buckets[GapBucket.H1_3])
+        // A stored length that no gap in the night window has can't be placed.
+        assertNull(RhythmAnalyzer.locateOvernightGap(eps, Span(t0 - 4 * h, t0 + 8 * h), 3 * h))
     }
 
     @Test
@@ -119,10 +130,21 @@ class RhythmTest {
         val h = HOUR_MS
         val t0 = 400 * h
         val mon = RhythmDay(monday, episodes = listOf(Span(t0, t0 + MIN), Span(t0 + 3 * h, t0 + 3 * h + MIN)))
-        val tue = RhythmDay(monday.plusDays(1), overnightGapMs = 3 * h - MIN, nightWindow = Span(t0, t0 + 12 * h))
+        val gap = RhythmAnalyzer.locateOvernightGap(mon.episodes, Span(t0, t0 + 12 * h), 3 * h - MIN)
+        val tue = RhythmDay(monday.plusDays(1), overnightGapMs = 3 * h - MIN, overnightGap = gap)
         assertEquals(0, RhythmAnalyzer.gaps(listOf(mon, tue)).count)
         // Without that filing it would have counted.
         assertEquals(1, RhythmAnalyzer.gaps(listOf(mon)).count)
+    }
+
+    @Test
+    fun `a night filed under a day outside the covered list is still left out`() {
+        val h = HOUR_MS
+        val t0 = 600 * h
+        // Both episodes are on the last covered day; the rollup filed the gap under today, which isn't covered yet.
+        val d = RhythmDay(monday, episodes = listOf(Span(t0, t0 + MIN), Span(t0 + 5 * h, t0 + 5 * h + MIN)))
+        assertEquals(1, RhythmAnalyzer.gaps(listOf(d)).count)
+        assertEquals(0, RhythmAnalyzer.gaps(listOf(d), otherNights = listOf(Span(t0 + MIN, t0 + 5 * h))).count)
     }
 
     @Test

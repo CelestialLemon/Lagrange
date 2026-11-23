@@ -16,14 +16,14 @@ data class RhythmDay(
     val pickupSlots: Map<Int, Int> = emptyMap(),
     /** Which slot the repeated fall-back hour (slot 24) repeated, if this day had one. */
     val repeatedSlot: Int? = null,
-    /** The day's sleep-proxy gap from `daily_rollups`. */
+    /** The day's sleep-proxy gap from `daily_rollups`, only when it was observed end to end. */
     val overnightGapMs: Long? = null,
     /** The day's first unlocked pickup as a wall-clock minute of the day (0..1439). */
     val firstPickupMinute: Int? = null,
     /** Unlocked episodes that started this logical day, as spans. */
     val episodes: List<Span> = emptyList(),
-    /** Where this day's overnight gap may sit (its midpoint lies inside, as the rollup engine picks it). */
-    val nightWindow: Span? = null,
+    /** The exact gap the rollup chose as this day's overnight gap (see [RhythmAnalyzer.locateOvernightGap]). */
+    val overnightGap: Span? = null,
 )
 
 data class HeatCell(val distractingMs: Long, val pickups: Double)
@@ -91,9 +91,10 @@ data class RhythmRules(
 )
 
 object RhythmAnalyzer {
-    fun analyze(days: List<RhythmDay>, rolloverHour: Int, rules: RhythmRules = RhythmRules()): RhythmReport {
+    /** [otherNights]: overnight gaps filed under days not in [days] (today, an uncovered day), still not waking gaps. */
+    fun analyze(days: List<RhythmDay>, rolloverHour: Int, rules: RhythmRules = RhythmRules(), otherNights: List<Span> = emptyList()): RhythmReport {
         val sorted = days.sortedBy { it.date }
-        return RhythmReport(heatmap(sorted, rolloverHour), gaps(sorted), sleep(sorted, rolloverHour, rules), sorted.size)
+        return RhythmReport(heatmap(sorted, rolloverHour), gaps(sorted, otherNights), sleep(sorted, rolloverHour, rules), sorted.size)
     }
 
     fun heatmap(days: List<RhythmDay>, rolloverHour: Int): CircadianHeatmap {
@@ -136,8 +137,28 @@ object RhythmAnalyzer {
      * wasn't covered is left out, and so is each day's overnight gap: the one of exactly its length whose midpoint lies
      * in that day's night window (it belongs to the sleep view).
      */
-    fun gaps(days: List<RhythmDay>): GapDistribution {
-        val byDate = days.associateBy { it.date }
+    /**
+     * The gap the rollup engine picked as a day's overnight gap, recovered from the stored length: the first gap
+     * between [episodes] (sorted by start, overlaps merged as the engine does) of exactly [lengthMs] whose midpoint
+     * lies in [nightWindow]. The engine keeps the first of equally long candidates, so this is the same one.
+     */
+    fun locateOvernightGap(episodes: List<Span>, nightWindow: Span, lengthMs: Long): Span? {
+        var prevEnd = Long.MIN_VALUE
+        for (ep in episodes.sortedBy { it.startMs }) {
+            if (prevEnd != Long.MIN_VALUE) {
+                val len = ep.startMs - prevEnd
+                val mid = prevEnd + len / 2
+                if (len == lengthMs && mid >= nightWindow.startMs && mid < nightWindow.endMs) return Span(prevEnd, ep.startMs)
+            }
+            prevEnd = maxOf(prevEnd, ep.endMs)
+        }
+        return null
+    }
+
+    fun gaps(days: List<RhythmDay>, otherNights: List<Span> = emptyList()): GapDistribution {
+        // Only the one gap each night that the rollup chose is the overnight gap; an equally long one beside it stays.
+        // A night filed under a day outside [days] (e.g. today, after both episodes on the last covered day) counts too.
+        val overnight = (days.mapNotNull { it.overnightGap } + otherNights).toHashSet()
         val eps = days.flatMap { d -> d.episodes.map { d.date to it } }.sortedBy { it.second.startMs }
         val all = ArrayList<Long>()
         var prevEnd = Long.MIN_VALUE
@@ -148,15 +169,7 @@ object RhythmAnalyzer {
             val contiguous = pd != null && (date == pd || date == pd.plusDays(1))
             if (contiguous) {
                 val g = ep.startMs - prevEnd
-                if (g > 0) {
-                    val mid = prevEnd + g / 2
-                    // The rollup files a night under the day whose night window holds its midpoint, which can be the
-                    // day after both episodes' own date; windows of different days never overlap.
-                    val overnight = listOf(pd, date, pd.plusDays(1), date.plusDays(1)).distinct().mapNotNull { byDate[it] }.any { d ->
-                        d.overnightGapMs == g && (d.nightWindow == null || (mid >= d.nightWindow.startMs && mid < d.nightWindow.endMs))
-                    }
-                    if (!overnight) all += g
-                }
+                if (g > 0 && Span(prevEnd, ep.startMs) !in overnight) all += g
                 prevEnd = maxOf(prevEnd, ep.endMs)
             } else {
                 prevEnd = ep.endMs

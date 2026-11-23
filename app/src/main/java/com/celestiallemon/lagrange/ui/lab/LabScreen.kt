@@ -113,12 +113,12 @@ fun LabScreen(padding: PaddingValues) {
                 when {
                     ui.loading && ui.stale -> Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
                         LinearProgressIndicator(Modifier.fillMaxWidth())
-                        Muted("Showing the previous window while this one loads.", Modifier.padding(horizontal = Space.s))
+                        Muted("Showing the earlier results while these load.", Modifier.padding(horizontal = Space.s))
                     }
                     ui.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
                     ui.error != null -> Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
-                            "Couldn't load this section.",
+                            if (ui.stale) "Couldn't load this selection. Below are the earlier results, not these." else "Couldn't load this section.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = LocalStatusColors.current.bad,
                             modifier = Modifier.weight(1f),

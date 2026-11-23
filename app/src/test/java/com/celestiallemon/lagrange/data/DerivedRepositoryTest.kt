@@ -600,6 +600,10 @@ class DerivedRepositoryTest {
         assertTrue(blocked > 0)
         // 12:35:02 to 12:45 is 598 s of foreground, minus the launch pause at its start.
         assertEquals(10 * MINUTE_MS - 2_000 - blocked, e.repo.todayComparison()!!.slice!!.medianMs)
+        // The Lab's per-app live slice is reconstructed the same way: no launch-pause time is credited to the app.
+        val d1 = today.minusDays(1)
+        val perApp = e.repo.activeUseByApp(listOf(com.celestiallemon.lagrange.domain.Span(at(d1, 12), at(d1, 12, 45))), setOf(insta)).single()
+        assertEquals(mapOf(insta to 10 * MINUTE_MS - 2_000 - blocked), perApp)
     }
 
     @Test

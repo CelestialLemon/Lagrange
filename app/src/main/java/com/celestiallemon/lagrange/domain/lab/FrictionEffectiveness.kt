@@ -119,10 +119,15 @@ data class FrictionInput(
     val coveredDaySpans: List<Span>? = null,
     /** `friction_enabled` history: (effective ms, value), any order. */
     val enabledHistory: List<Pair<Long, Boolean>> = emptyList(),
-    /** Where the current substitution period starts (All-Time compares its halves); defaults to [fromMs]. */
-    val substitutionFromMs: Long? = null,
-    /** Where it ends: the end of its last settled covered day, so today's switch can't speak for past days. */
-    val substitutionToMs: Long? = null,
+    /**
+     * The windows of the settled covered days the current substitution average is made of. Friction counts as on only
+     * if it was on (or prompted) inside one of them (null: anywhere in [fromMs, toMs)).
+     */
+    val substitutionSpans: List<Span>? = null,
+    /** How far [events] and [distractingOpens] were loaded; a follow-up past it is unresolved (null: no limit). */
+    val followUpToMs: Long? = null,
+    /** Run starts of paused apps that aren't distracting, by app: reopening the paused app itself is a reopen too. */
+    val ownOpens: Map<Long, List<Long>> = emptyMap(),
 )
 
 object FrictionAnalyzer {
@@ -151,7 +156,7 @@ object FrictionAnalyzer {
             habituation = habituation(pauses, rules),
             substitution = substitution(
                 input,
-                pauses.any { it.timestampMs >= (input.substitutionFromMs ?: input.fromMs) && it.timestampMs < (input.substitutionToMs ?: input.toMs) },
+                pauses.any { p -> substitutionSpans(input).any { p.timestampMs >= it.startMs && p.timestampMs < it.endMs } },
                 rules,
             ),
             snoozes = inWindow.count { it.eventKind == FrictionVocab.SNOOZE_1H },
@@ -172,20 +177,26 @@ object FrictionAnalyzer {
                 it.timestampMs >= input.fromMs && it.timestampMs < input.toMs
         }
         // Derived runs past the derived cutoff may still change; logged pauses are final.
+        val pauses = sortedEvents.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
         val opens = (input.distractingOpens.filter { it < input.dataEndMs } +
-            sortedEvents.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE && apps.isDistracting(it.pkgId) }.map { it.timestampMs }).sorted()
+            pauses.filter { apps.isDistracting(it.pkgId) }.map { it.timestampMs }).sorted()
+        val ownOpensByPkg = HashMap<Long, List<Long>>()
+        fun opensFor(pkg: Long): List<Long> = if (apps.isDistracting(pkg)) opens else ownOpensByPkg.getOrPut(pkg) {
+            (opens + input.ownOpens[pkg].orEmpty().filter { it < input.dataEndMs } + pauses.filter { it.pkgId == pkg }.map { it.timestampMs }).sorted()
+        }
         var sustained = 0
         var quick = 0
         var unresolved = 0
         for (e in exits) {
             val (earliest, latest) = e.exitWindow.let { it.startMs to it.endMs }
-            // The paused open itself (at the prompt) and anything before the user could have left don't count.
-            val next = opens.firstOrNull { it > latest }
+            // The paused open itself (at the prompt, [earliest]) doesn't count. The overlay covers the screen until the
+            // user leaves it, so any later open, even one inside the countdown bound, came after they left.
+            val next = opensFor(e.pkgId).firstOrNull { it > earliest }
             val followEnd = latest + rules.sustainMs
             when {
                 next != null && next - earliest < rules.sustainMs -> quick++ // within 10 min whenever exactly they left
                 next != null && next < followEnd -> unresolved++ // within 10 min of some possible exit instants only
-                followEnd > input.dataEndMs || (input.coverage != null && !input.coverage.isContinuous(earliest, followEnd)) -> unresolved++
+                followEnd > minOf(input.dataEndMs, input.followUpToMs ?: Long.MAX_VALUE) || (input.coverage != null && !input.coverage.isContinuous(earliest, followEnd)) -> unresolved++
                 else -> sustained++
             }
         }
@@ -209,6 +220,8 @@ object FrictionAnalyzer {
         )
     }
 
+    private fun substitutionSpans(input: FrictionInput): List<Span> = input.substitutionSpans ?: listOf(Span(input.fromMs, input.toMs))
+
     fun frictionEnabledDuring(history: List<Pair<Long, Boolean>>, fromMs: Long, toMs: Long): Boolean {
         val sorted = history.sortedBy { it.first }
         val atStart = sorted.lastOrNull { it.first <= fromMs }?.second ?: false
@@ -224,7 +237,7 @@ object FrictionAnalyzer {
         val dNow = avg(cur) { it.distractingMs }
         val nBefore = avg(prev) { it.neutralMs }
         val nNow = avg(cur) { it.neutralMs }
-        val active = pausedInWindow || frictionEnabledDuring(input.enabledHistory, input.substitutionFromMs ?: input.fromMs, input.substitutionToMs ?: input.toMs)
+        val active = pausedInWindow || substitutionSpans(input).any { frictionEnabledDuring(input.enabledHistory, it.startMs, it.endMs) }
         val rising = (input.currentNeutralApps.keys + input.previousNeutralApps.keys).map { pkg ->
             pkg to ((input.currentNeutralApps[pkg] ?: 0L) / cur.size - (input.previousNeutralApps[pkg] ?: 0L) / prev.size)
         }.filter { it.second >= rules.minRisingAppMsPerDay }

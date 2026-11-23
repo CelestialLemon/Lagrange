@@ -181,14 +181,15 @@ internal suspend fun loadSessionDetail(db: LagrangeDatabase, episode: EpisodeUi)
 }
 
 /**
- * The check-in card, re-sampled whenever ratings, rebuilds, the logical day or the check-in memory change. Asking the
+ * The check-in card, re-sampled every minute (an offer expires 36 hours after its episode, at any time of day) and
+ * whenever ratings, rebuilds or the check-in memory change. Asking the
  * repository records the offer, which changes the memory once; the second pass then finds nothing new to write.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun AppGraph.checkInFlow(): Flow<CheckInCard?> = afterReady {
     val state = database.ingestionStateDao()
     combine(
-        minuteTickFlow().map { derived.dateOf(it) }.distinctUntilChanged(),
+        minuteTickFlow(),
         state.observe(IngestionKeys.DERIVED_LAST_RUN_AT_MS).distinctUntilChanged(),
         database.analyticsDao().observeUserSignals().distinctUntilChanged(),
         preferences.worthCheckInLog.distinctUntilChanged(),
