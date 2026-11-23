@@ -416,7 +416,7 @@ All file access uses Android's **Storage Access Framework (SAF)**. Note in UI th
    * User picks a backup folder once (`ACTION_OPEN_DOCUMENT_TREE` + `takePersistableUriPermission`), e.g., a local folder or Syncthing directory.
    * A weekly `WorkManager` job generates a verified backup ZIP and prunes old snapshots per a retention policy (e.g., keep last 8 weekly backups).
 2. **Backup Bundle Format (`.zip`):**
-   * `wellbeing.sqlite` — consistent snapshot generated in app-private storage via `VACUUM INTO`, integrity-checked (`PRAGMA integrity_check`), then copied into the ZIP.
+   * `lagrange.sqlite` — consistent snapshot generated in app-private storage via `VACUUM INTO`, integrity-checked (`PRAGMA integrity_check`), then copied into the ZIP.
    * `preferences.json` — user preferences (single authoritative store for schedules in Room so Room + DataStore never diverge).
    * `manifest.json` — `schema_version`, `app_version`, `created_at_utc_ms`, SHA-256 checksums.
 3. **Coordinated Safe Restore:**
