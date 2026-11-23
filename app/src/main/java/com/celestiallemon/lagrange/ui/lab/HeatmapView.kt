@@ -1,11 +1,12 @@
 package com.celestiallemon.lagrange.ui.lab
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -24,7 +25,6 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
@@ -41,7 +41,7 @@ import java.util.Locale
 
 private val ROW_HEIGHT = 22.dp
 
-enum class HeatMetric(val label: String) { DISTRACTING("Distracting time"), PICKUPS("Pickups") }
+enum class HeatMetric(val label: String) { DISTRACTING("Distracting time"), PICKUPS("Sessions started") }
 
 private fun dayName(row: Int, style: TextStyle = TextStyle.SHORT): String = DayOfWeek.of(row + 1).getDisplayName(style, Locale.getDefault())
 
@@ -53,7 +53,7 @@ private fun cellText(map: CircadianHeatmap, metric: HeatMetric, row: Int, slot: 
     if (days == 0) return "${dayName(row, TextStyle.FULL)} $hours: no covered ${dayName(row, TextStyle.FULL)}s yet"
     val value = when (metric) {
         HeatMetric.DISTRACTING -> "${formatDuration(cell.distractingMs)} distracting"
-        HeatMetric.PICKUPS -> "${"%.1f".format(Locale.getDefault(), cell.pickups)} pickups"
+        HeatMetric.PICKUPS -> "${"%.1f".format(Locale.getDefault(), cell.pickups)} sessions started"
     }
     return "${dayName(row, TextStyle.FULL)} $hours: $value on average ($days covered ${if (days == 1) "day" else "days"})"
 }
@@ -66,7 +66,7 @@ private fun summary(map: CircadianHeatmap, metric: HeatMetric): String {
         .take(3)
     if (top.isEmpty()) return "Heatmap of ${metric.label.lowercase()} by weekday and hour: nothing recorded yet."
     return "Heatmap of ${metric.label.lowercase()} by weekday and hour. Busiest: " + top.joinToString("; ") { cellText(map, metric, it.first, it.second) } +
-        ". Tap a cell to inspect it."
+        ". Move through the cells to hear each hour."
 }
 
 /** Mon–Sun × the 24 hours of the logical day (starting at the rollover hour); tap a cell to read it. */
@@ -87,31 +87,45 @@ fun CircadianHeatmapView(map: CircadianHeatmap, metric: HeatMetric, modifier: Mo
                     }
                 }
             }
-            Canvas(
+            Box(
                 Modifier
                     .weight(1f)
                     .height(ROW_HEIGHT * 7)
-                    .semantics { contentDescription = summary(map, metric) }
-                    .pointerInput(map, metric) {
-                        detectTapGestures { p ->
-                            val col = (p.x / size.width * 24).toInt().coerceIn(0, 23)
-                            val row = (p.y / size.height * 7).toInt().coerceIn(0, 6)
-                            selected = if (selected == row to col) null else row to col
-                        }
-                    },
+                    .semantics { contentDescription = summary(map, metric) },
             ) {
-                val cw = size.width / 24f
-                val ch = size.height / 7f
-                val gap = 1.5.dp.toPx()
-                for (r in 0 until 7) for (s in 0 until 24) {
-                    val cell = map.cells[r][s]
-                    val v = if (metric == HeatMetric.DISTRACTING) cell.distractingMs.toDouble() else cell.pickups
-                    val t = if (max <= 0.0 || map.daysPerRow[r] == 0) 0.0 else v / max
-                    val color = if (t <= 0.0) empty else base.copy(alpha = (0.12 + 0.88 * t).toFloat())
-                    drawRoundRect(color, Offset(s * cw + gap / 2, r * ch + gap / 2), Size(cw - gap, ch - gap), CornerRadius(3.dp.toPx()))
+                Canvas(Modifier.matchParentSize()) {
+                    val cw = size.width / 24f
+                    val ch = size.height / 7f
+                    val gap = 1.5.dp.toPx()
+                    for (r in 0 until 7) for (s in 0 until 24) {
+                        val cell = map.cells[r][s]
+                        val v = if (metric == HeatMetric.DISTRACTING) cell.distractingMs.toDouble() else cell.pickups
+                        val t = if (max <= 0.0 || map.daysPerRow[r] == 0) 0.0 else v / max
+                        val color = if (t <= 0.0) empty else base.copy(alpha = (0.12 + 0.88 * t).toFloat())
+                        drawRoundRect(color, Offset(s * cw + gap / 2, r * ch + gap / 2), Size(cw - gap, ch - gap), CornerRadius(3.dp.toPx()))
+                    }
+                    selected?.let { (r, s) ->
+                        drawRoundRect(outline, Offset(s * cw, r * ch), Size(cw, ch), CornerRadius(3.dp.toPx()), style = Stroke(1.5.dp.toPx()))
+                    }
                 }
-                selected?.let { (r, s) ->
-                    drawRoundRect(outline, Offset(s * cw, r * ch), Size(cw, ch), CornerRadius(3.dp.toPx()), style = Stroke(1.5.dp.toPx()))
+                // One invisible target per cell: taps select it, and TalkBack can move through cells and read each one.
+                Column(Modifier.matchParentSize()) {
+                    for (r in 0 until 7) {
+                        Row(Modifier.weight(1f).fillMaxWidth()) {
+                            for (s in 0 until 24) {
+                                val text = cellText(map, metric, r, s)
+                                Box(
+                                    Modifier
+                                        .weight(1f)
+                                        .fillMaxHeight()
+                                        .clickable(interactionSource = null, indication = null, onClickLabel = "Show this hour") {
+                                            selected = if (selected == r to s) null else r to s
+                                        }
+                                        .semantics { contentDescription = text },
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }

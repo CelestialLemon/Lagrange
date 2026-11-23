@@ -2,6 +2,8 @@ package com.celestiallemon.lagrange.domain.lab
 
 import com.celestiallemon.lagrange.data.db.FrictionVocab
 import com.celestiallemon.lagrange.domain.MINUTE_MS
+import com.celestiallemon.lagrange.domain.Span
+import com.celestiallemon.lagrange.domain.Spans
 import com.celestiallemon.lagrange.domain.UsageCoverage
 import java.time.LocalDate
 
@@ -17,7 +19,20 @@ data class LabFriction(
     val outcome: String,
     val reactionMs: Long? = null,
     val selectedTimerMin: Int? = null,
-)
+    /** The countdown length; the row's timestamp is when the prompt was shown, not when it was answered. */
+    val pauseDurationSec: Int = 0,
+) {
+    /**
+     * When the user actually left, as tight as the row allows: exactly countdown + reaction after the prompt appeared
+     * when a reaction was recorded, otherwise somewhere between the prompt appearing and the countdown ending.
+     */
+    val exitWindow: Span
+        get() {
+            val countdownEnd = timestampMs + pauseDurationSec.coerceAtLeast(0) * 1_000L
+            return if (reactionMs != null && reactionMs >= 0) Span(countdownEnd + reactionMs, countdownEnd + reactionMs)
+            else Span(timestampMs, countdownEnd)
+        }
+}
 
 data class FrictionRules(
     val sustainMs: Long = 10 * MINUTE_MS,
@@ -100,10 +115,14 @@ data class FrictionInput(
     /** Per-app NEUTRAL totals over the covered days of each period. */
     val currentNeutralApps: Map<Long, Long> = emptyMap(),
     val previousNeutralApps: Map<Long, Long> = emptyMap(),
+    /** The covered days' windows: the per-day prompt rate counts only prompts inside them (null: every prompt). */
+    val coveredDaySpans: List<Span>? = null,
     /** `friction_enabled` history: (effective ms, value), any order. */
     val enabledHistory: List<Pair<Long, Boolean>> = emptyList(),
     /** Where the current substitution period starts (All-Time compares its halves); defaults to [fromMs]. */
     val substitutionFromMs: Long? = null,
+    /** Where it ends: the end of its last settled covered day, so today's switch can't speak for past days. */
+    val substitutionToMs: Long? = null,
 )
 
 object FrictionAnalyzer {
@@ -116,17 +135,25 @@ object FrictionAnalyzer {
         val expiries = inWindow.filter { it.eventKind == FrictionVocab.TIMER_EXPIRED }
         return FrictionReport(
             launchPauses = pauses.size,
-            pausesPerCoveredDay = if (input.coveredDays == 0) null else pauses.size.toDouble() / input.coveredDays,
+            pausesPerCoveredDay = if (input.coveredDays == 0) null else {
+                val onCovered = input.coveredDaySpans?.let { spans -> pauses.count { Spans.contains(spans, it.timestampMs) } } ?: pauses.size
+                onCovered.toDouble() / input.coveredDays
+            },
             exits = exits(sorted, input, apps, rules),
             timer = TimerAdherence(
-                timersSet = pauses.count { it.selectedTimerMin != null && it.selectedTimerMin > 0 },
+                // A timer only starts when the user goes on; a choice followed by Go Home never ran.
+                timersSet = pauses.count { it.outcome == FrictionVocab.OUTCOME_CONTINUED && it.selectedTimerMin != null && it.selectedTimerMin > 0 },
                 expiries = expiries.size,
                 closedOnExpiry = expiries.count { it.outcome in CLOSED },
                 extended = expiries.count { it.outcome == FrictionVocab.OUTCOME_EXTENDED_5M },
                 dismissed = expiries.count { it.outcome == FrictionVocab.OUTCOME_DISMISSED_SESSION },
             ),
             habituation = habituation(pauses, rules),
-            substitution = substitution(input, pauses.any { it.timestampMs >= (input.substitutionFromMs ?: input.fromMs) }, rules),
+            substitution = substitution(
+                input,
+                pauses.any { it.timestampMs >= (input.substitutionFromMs ?: input.fromMs) && it.timestampMs < (input.substitutionToMs ?: input.toMs) },
+                rules,
+            ),
             snoozes = inWindow.count { it.eventKind == FrictionVocab.SNOOZE_1H },
             frictionCoverage = input.frictionCoverageRatios.takeIf { it.isNotEmpty() }?.average(),
             coveredDays = input.coveredDays,
@@ -134,8 +161,10 @@ object FrictionAnalyzer {
     }
 
     /**
-     * Each immediate exit is a quick reopen if a distracting app was opened (or its launch was paused) within 10 min;
-     * otherwise sustained once those 10 min were continuously collected, else unresolved.
+     * Each immediate exit, timed from when the user actually left ([LabFriction.exitWindow]): a quick reopen if a
+     * distracting app was opened (or its launch paused) within 10 min of it; sustained once 10 continuously observed
+     * minutes passed with no such open; otherwise unresolved. When the row only bounds the exit instant, an open whose
+     * verdict depends on where in that bound the exit fell is unresolved too.
      */
     fun exits(sortedEvents: List<LabFriction>, input: FrictionInput, apps: LabApps, rules: FrictionRules = FrictionRules()): ExitOutcomes {
         val exits = sortedEvents.filter {
@@ -145,16 +174,18 @@ object FrictionAnalyzer {
         // Derived runs past the derived cutoff may still change; logged pauses are final.
         val opens = (input.distractingOpens.filter { it < input.dataEndMs } +
             sortedEvents.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE && apps.isDistracting(it.pkgId) }.map { it.timestampMs }).sorted()
-        var j = 0
         var sustained = 0
         var quick = 0
         var unresolved = 0
         for (e in exits) {
-            while (j < opens.size && opens[j] <= e.timestampMs) j++
-            val followEnd = e.timestampMs + rules.sustainMs
+            val (earliest, latest) = e.exitWindow.let { it.startMs to it.endMs }
+            // The paused open itself (at the prompt) and anything before the user could have left don't count.
+            val next = opens.firstOrNull { it > latest }
+            val followEnd = latest + rules.sustainMs
             when {
-                j < opens.size && opens[j] - e.timestampMs < rules.sustainMs -> quick++
-                followEnd > input.dataEndMs || (input.coverage != null && !input.coverage.isContinuous(e.timestampMs, followEnd)) -> unresolved++
+                next != null && next - earliest < rules.sustainMs -> quick++ // within 10 min whenever exactly they left
+                next != null && next < followEnd -> unresolved++ // within 10 min of some possible exit instants only
+                followEnd > input.dataEndMs || (input.coverage != null && !input.coverage.isContinuous(earliest, followEnd)) -> unresolved++
                 else -> sustained++
             }
         }
@@ -193,7 +224,7 @@ object FrictionAnalyzer {
         val dNow = avg(cur) { it.distractingMs }
         val nBefore = avg(prev) { it.neutralMs }
         val nNow = avg(cur) { it.neutralMs }
-        val active = pausedInWindow || frictionEnabledDuring(input.enabledHistory, input.substitutionFromMs ?: input.fromMs, input.toMs)
+        val active = pausedInWindow || frictionEnabledDuring(input.enabledHistory, input.substitutionFromMs ?: input.fromMs, input.substitutionToMs ?: input.toMs)
         val rising = (input.currentNeutralApps.keys + input.previousNeutralApps.keys).map { pkg ->
             pkg to ((input.currentNeutralApps[pkg] ?: 0L) / cur.size - (input.previousNeutralApps[pkg] ?: 0L) / prev.size)
         }.filter { it.second >= rules.minRisingAppMsPerDay }

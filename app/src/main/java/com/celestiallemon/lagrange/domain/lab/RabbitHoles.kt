@@ -120,6 +120,13 @@ object WorthCheckInSampler {
         val byKey = eligible.associateBy { it.episodeKey }
         // Keep offering what is already on screen today until it is answered.
         current.shown.lastOrNull { it in byKey }?.let { return CheckInSelection(it, current) }
+        // One already offered is only briefly out of reach (a rebuild pulled the derived cutoff back before its end):
+        // wait for it instead of spending today's second offer on another.
+        val held = candidates.any { e ->
+            e.episodeKey in current.shown && e.isRabbitHole && e.worthItRating == null && e.episodeKey !in dismissed &&
+                nowMs - e.endMs <= rules.recentMs && (e.endMs > dataEndMs || e.inProgress)
+        }
+        if (held) return CheckInSelection(null, current)
         if (current.shown.size >= rules.maxPerDay) return CheckInSelection(null, current)
         val pick = eligible.filter { it.episodeKey !in current.shown }
             .maxWithOrNull(compareBy<LabEpisode> { it.endMs }.thenBy { it.episodeKey })

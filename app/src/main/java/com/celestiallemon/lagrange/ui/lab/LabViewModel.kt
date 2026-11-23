@@ -128,9 +128,13 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
 
     private val autopsyDate = MutableStateFlow<LocalDate?>(null)
 
-    /** The expanded spike autopsy; reloads with the rest of the Lab (a rating or rebuild can change it). */
-    val autopsy: StateFlow<AutopsyState?> = combine(autopsyDate, ui.map { it.data[LabSection.SPIKES] }.distinctUntilChanged()) { d, s -> d to s }
-        .loadLatest(TAG) { (d, _) -> d?.let { graph.lab.autopsy(it) } }
+    /** The expanded spike autopsy; reloads with the rest of the Lab (a rating or rebuild can change it) and on note edits. */
+    val autopsy: StateFlow<AutopsyState?> = combine(
+        autopsyDate,
+        ui.map { it.data[LabSection.SPIKES] }.distinctUntilChanged(),
+        graph.database.analyticsDao().observeNotesSignal().distinctUntilChanged(),
+    ) { d, s, n -> Triple(d, s, n) }
+        .loadLatest(TAG) { (d, _, _) -> d?.let { graph.lab.autopsy(it) } }
         .map { (key, ev) ->
             val date = key.first ?: return@map null
             when (ev) {

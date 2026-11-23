@@ -76,6 +76,48 @@ class NotificationCostTest {
     }
 
     @Test
+    fun `two notifications in one episode each own the stretch they started`() {
+        val h = HOUR_MS
+        // A tap on an Instagram DM opens the episode; 10 minutes in, a YouTube alert prompts a hop to YouTube.
+        val dm = n(1, INSTA, h - 10_000, channel = "dm", removed = h, reason = RemovalReason.CLICK)
+        val alert = n(2, YOUTUBE, h + 10 * MIN - 20_000, channel = "uploads")
+        // A second Instagram tap near the start: the entry segment mirrors the episode trigger and must not grab it.
+        val other = n(3, INSTA, h - 8_000, channel = "promo", removed = h + 2_000, reason = RemovalReason.CLICK)
+        val e = episode(h, INSTA to 10, YOUTUBE to 20, TIKTOK to 5, trigger = TriggerEvidence.OBSERVED_CLICK, triggerNotificationId = 1).let { ep ->
+            ep.copy(
+                segments = ep.segments.mapIndexed { i, sg ->
+                    when (i) {
+                        0 -> sg.copy(triggerEvidence = TriggerEvidence.OBSERVED_CLICK, triggerPkgId = INSTA)
+                        1 -> sg.copy(triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerPkgId = YOUTUBE)
+                        else -> sg
+                    }
+                },
+            )
+        }
+        val a = NotificationCostAnalyzer.attribute(listOf(dm, alert, other), listOf(e), testApps).associateBy { it.notificationId }
+        assertEquals(setOf(1L, 2L), a.keys)
+        assertEquals(10 * MIN, a.getValue(1).downstreamMs)
+        assertEquals(25 * MIN, a.getValue(2).downstreamMs)
+        // Every distracting minute has exactly one owner.
+        assertEquals(e.totalDistractingMs, a.values.sumOf { it.downstreamMs })
+    }
+
+    @Test
+    fun `a notification credited to one episode's hop is not credited again to the next`() {
+        val h = HOUR_MS
+        val alert = n(1, YOUTUBE, h - 30_000)
+        fun hop(start: Long) = episode(start, KINDLE to 1, YOUTUBE to 5).let { ep ->
+            ep.copy(segments = ep.segments.mapIndexed { i, sg -> if (i == 1) sg.copy(triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerPkgId = YOUTUBE) else sg })
+        }
+        // Both hops (at +5 s and +20 s) fall within 60 s after the alert; only the earlier one may take it.
+        val first = hop(h - MIN + 5_000)
+        val second = hop(h - MIN + 20_000)
+        val a = NotificationCostAnalyzer.attribute(listOf(alert), listOf(second, first), testApps)
+        assertEquals(1, a.size)
+        assertEquals(first.id, a.single().episodeId)
+    }
+
+    @Test
     fun `pseudonymized or missing channel ids fall back to the app's notification settings`() {
         val pkg = "com.example"
         assertEquals(NotificationSettingsTarget.Channel(pkg, "promotions"), ChannelSettings.target(pkg, "promotions"))
@@ -124,6 +166,24 @@ class NotificationCostTest {
         assertNull(dark.baseRate)
         // Zero alerts never divides by zero either.
         assertNull(base.lift(0, 0, NotificationRules()).lift)
+    }
+
+    @Test
+    fun `an alert outcome needs usage observed until the pickup or the whole minute`() {
+        val usage = listOf(Span(0, 3 * 30 * MIN + 10_000), Span(3 * 30 * MIN + 40_000, 10 * HOUR_MS))
+        val base = NotificationCostAnalyzer.PickupBase.of(regular, listener, 0, 10 * HOUR_MS, NotificationRules(), usage)
+        // Pickup at 1:30:00; usage went dark 1:30:10–1:30:40. An alert at 1:29:30 saw its pickup before the gap.
+        assertEquals(true, base.alertOutcome(3 * 30 * MIN - 30_000))
+        // An alert at 1:53:50 with no pickup for six minutes, and its whole minute observed, is a miss.
+        assertEquals(false, base.alertOutcome(3 * 30 * MIN + 25 * MIN - 60_000 - 10_000))
+        // Idle time inside the usage gap doesn't count toward exposure.
+        val full = NotificationCostAnalyzer.PickupBase.of(regular, listener, 0, 10 * HOUR_MS, NotificationRules())
+        assertEquals(full.exposureMs, base.exposureMs)
+        val dark = listOf(Span(0, 3 * 30 * MIN + 5 * MIN + 10_000), Span(3 * 30 * MIN + 5 * MIN + 40_000, 10 * HOUR_MS))
+        val gapped = NotificationCostAnalyzer.PickupBase.of(regular, listener, 0, 10 * HOUR_MS, NotificationRules(), dark)
+        assertEquals(full.exposureMs - 30_000, gapped.exposureMs)
+        // An alert just before that gap can't be scored: the minute after it wasn't fully observed and no pickup came first.
+        assertNull(gapped.alertOutcome(3 * 30 * MIN + 5 * MIN + 1_000))
     }
 
     @Test

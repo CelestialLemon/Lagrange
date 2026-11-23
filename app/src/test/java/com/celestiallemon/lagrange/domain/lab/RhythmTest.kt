@@ -58,21 +58,24 @@ class RhythmTest {
     }
 
     @Test
-    fun `gaps are measured within days, skip the overnight gap and handle overlaps`() {
+    fun `gaps skip the overnight gap, handle overlaps and need both ends covered`() {
         val h = HOUR_MS
+        val t0 = 100 * h
         val day = RhythmDay(
             monday,
             overnightGapMs = 6 * h,
+            nightWindow = Span(t0, t0 + 8 * h),
             episodes = listOf(
-                Span(0, 10 * MIN),
-                Span(6 * h + 10 * MIN, 6 * h + 20 * MIN), // the overnight gap: left out
-                Span(6 * h + 22 * MIN, 6 * h + 40 * MIN), // 2 min
-                Span(6 * h + 30 * MIN, 6 * h + 35 * MIN), // overlaps the previous one: no gap
-                Span(7 * h + 40 * MIN, 7 * h + 45 * MIN), // 60 min
+                Span(t0, t0 + 10 * MIN),
+                Span(t0 + 6 * h + 10 * MIN, t0 + 6 * h + 20 * MIN), // the overnight gap: left out
+                Span(t0 + 6 * h + 22 * MIN, t0 + 6 * h + 40 * MIN), // 2 min
+                Span(t0 + 6 * h + 30 * MIN, t0 + 6 * h + 35 * MIN), // overlaps the previous one: no gap
+                Span(t0 + 7 * h + 40 * MIN, t0 + 7 * h + 45 * MIN), // 60 min
             ),
         )
-        val other = RhythmDay(monday.plusDays(1), episodes = listOf(Span(0, MIN), Span(11 * MIN, 12 * MIN)))
-        val g = RhythmAnalyzer.gaps(listOf(day, other))
+        // Two days later (the day between wasn't covered): its first gap is unobserved, the next one counts.
+        val later = RhythmDay(monday.plusDays(2), episodes = listOf(Span(t0 + 48 * h, t0 + 48 * h + MIN), Span(t0 + 48 * h + 11 * MIN, t0 + 48 * h + 12 * MIN)))
+        val g = RhythmAnalyzer.gaps(listOf(day, later))
         assertEquals(3, g.count)
         assertEquals(1, g.buckets[GapBucket.UNDER_5M])
         assertEquals(1, g.buckets[GapBucket.M5_15])
@@ -80,6 +83,46 @@ class RhythmTest {
         assertEquals(0, g.buckets[GapBucket.H3_PLUS])
         assertEquals(10 * MIN, g.medianMs)
         assertNull(RhythmAnalyzer.gaps(emptyList()).medianMs)
+    }
+
+    @Test
+    fun `a gap across the rollover between two covered days counts`() {
+        val rollover = 200 * HOUR_MS
+        val before = RhythmDay(monday, episodes = listOf(Span(rollover - 30 * MIN, rollover - 2 * MIN)))
+        val after = RhythmDay(monday.plusDays(1), episodes = listOf(Span(rollover + 8 * MIN, rollover + 20 * MIN)))
+        val g = RhythmAnalyzer.gaps(listOf(before, after))
+        assertEquals(1, g.count)
+        assertEquals(10 * MIN, g.medianMs)
+    }
+
+    @Test
+    fun `a gap as long as the overnight gap but outside the night window is still a gap`() {
+        val h = HOUR_MS
+        val t0 = 300 * h
+        val d = RhythmDay(
+            monday,
+            overnightGapMs = 2 * h,
+            nightWindow = Span(t0 - 6 * h, t0 + 6 * h),
+            episodes = listOf(Span(t0 - 3 * h, t0 - 2 * h), Span(t0, t0 + MIN), Span(t0 + 8 * h, t0 + 8 * h + MIN), Span(t0 + 10 * h + MIN, t0 + 10 * h + 2 * MIN)),
+        )
+        val g = RhythmAnalyzer.gaps(listOf(d))
+        // 2h (night: dropped), ~8h (kept), 2h at midday (same length, outside the night window: kept).
+        assertEquals(2, g.count)
+        assertEquals(1, g.buckets[GapBucket.H1_3])
+        assertEquals(1, g.buckets[GapBucket.H3_PLUS])
+    }
+
+    @Test
+    fun `an overnight gap filed under the next day is still left out`() {
+        // Both episodes are Monday's (before the rollover), but the rollup filed the gap under Tuesday, whose night
+        // window holds its midpoint.
+        val h = HOUR_MS
+        val t0 = 400 * h
+        val mon = RhythmDay(monday, episodes = listOf(Span(t0, t0 + MIN), Span(t0 + 3 * h, t0 + 3 * h + MIN)))
+        val tue = RhythmDay(monday.plusDays(1), overnightGapMs = 3 * h - MIN, nightWindow = Span(t0, t0 + 12 * h))
+        assertEquals(0, RhythmAnalyzer.gaps(listOf(mon, tue)).count)
+        // Without that filing it would have counted.
+        assertEquals(1, RhythmAnalyzer.gaps(listOf(mon)).count)
     }
 
     @Test

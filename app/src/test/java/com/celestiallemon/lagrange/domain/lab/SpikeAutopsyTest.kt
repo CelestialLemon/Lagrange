@@ -76,7 +76,8 @@ class SpikeAutopsyTest {
     @Test
     fun `today is compared with the same slice of matched days`() {
         val slice = SliceBaseline(todayMs = 90 * MIN, medianMs = 30 * MIN, days = 12, cutoff = SliceCutoff(8, 0.5))
-        val live = SpikeAnalyzer.live(day, eligible = true, slice = slice, matchedDays = listOf(day.minusDays(7)))
+        val three = listOf(day.minusDays(7), day.minusDays(14), day.minusDays(21))
+        val live = SpikeAnalyzer.live(day, eligible = true, slice = slice, matchedDays = three)
         assertEquals(DayStatus.SPIKE, live!!.status)
         assertTrue(live.live)
         assertEquals(60 * MIN, live.deltaMs)
@@ -84,6 +85,8 @@ class SpikeAutopsyTest {
         assertNull(SpikeAnalyzer.live(day, eligible = false, slice = slice, matchedDays = emptyList()))
         assertNull(SpikeAnalyzer.live(day, true, slice.copy(todayMs = 31 * MIN), emptyList()))
         assertNull(SpikeAnalyzer.live(day, true, slice.copy(medianMs = null), emptyList()))
+        // Fewer matched days than a baseline needs: the autopsy would compare with too little, so no verdict.
+        assertNull(SpikeAnalyzer.live(day, true, slice, three.take(2)))
     }
 
     private val matched = listOf(day.minusDays(7), day.minusDays(14), day.minusDays(21))
@@ -160,6 +163,31 @@ class SpikeAutopsyTest {
         assertTrue(live.blocks[0].complete)
         assertEquals(30 * MIN, live.blocks[0].actualMs)
         assertEquals(20 * MIN, live.blocks[0].deltaMs)
+    }
+
+    @Test
+    fun `a live day uses each matched day's exact use up to the minute, not a pro-rated hour`() {
+        // Matched days used Instagram 10:00–10:20; it's now 10:30 and today has 15 minutes so far. Pro-rating the hour
+        // would say the usual is 10 (Instagram +5); clipped at 10:30 the usual is 20, so Instagram isn't a contributor.
+        val cut = SliceCutoff(4, 0.5)
+        val today = mapOf(day to mapOf(INSTA to 15 * MIN))
+        val slots = mapOf(day to mapOf(4 to 15 * MIN)) + matched.associateWith { mapOf(4 to 20 * MIN) }
+        val partial = matched.associateWith { mapOf(INSTA to 20 * MIN) }
+        val input = AutopsyInput(highlight().copy(live = true), today, slots, emptyList(), cutoff = cut, partialHour = partial)
+        val a = SpikeAnalyzer.autopsy(input, testApps)
+        assertTrue(a.appDeltas.isEmpty())
+        assertEquals(20 * MIN, a.blocks.single { it.block == DayBlock.MORNING }.medianMs)
+        // Without the clipped hour the old pro-rata reading shows the wrong sign.
+        val prorated = SpikeAnalyzer.autopsy(input.copy(partialHour = null, appMs = today + matched.associateWith { mapOf(INSTA to 10 * MIN) }), testApps)
+        assertEquals(5 * MIN, prorated.appDeltas.single().deltaMs)
+    }
+
+    @Test
+    fun `no live verdict while derived data lags the comparison`() {
+        assertTrue(SpikeAnalyzer.liveEligible(coverageOk = true, comparisonEndMs = 1_000, derivedThroughMs = 1_000))
+        assertFalse(SpikeAnalyzer.liveEligible(coverageOk = true, comparisonEndMs = 2_000, derivedThroughMs = 1_000))
+        assertFalse(SpikeAnalyzer.liveEligible(coverageOk = false, comparisonEndMs = 1_000, derivedThroughMs = 5_000))
+        assertFalse(SpikeAnalyzer.liveEligible(coverageOk = true, comparisonEndMs = 1_000, derivedThroughMs = Long.MIN_VALUE))
     }
 
     @Test

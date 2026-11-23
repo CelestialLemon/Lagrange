@@ -12,6 +12,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
@@ -53,10 +54,9 @@ fun LabScreen(padding: PaddingValues) {
     val checkIn by vm.checkIn.collectAsStateWithLifecycle()
     var heatMetric by rememberSaveable { mutableStateOf(HeatMetric.DISTRACTING) }
     var openKey by rememberSaveable { mutableStateOf<String?>(null) }
-    val open: (String) -> Unit = { key ->
-        openKey = key
-        vm.open(key)
-    }
+    val open: (String) -> Unit = { key -> openKey = key }
+    // The open session survives rotation and process death here; the view model's copy doesn't, so follow this one.
+    LaunchedEffect(openKey) { vm.open(openKey) }
 
     val current = ui.current
     val apps = when (current) {
@@ -111,6 +111,10 @@ fun LabScreen(padding: PaddingValues) {
             }
             item("status") {
                 when {
+                    ui.loading && ui.stale -> Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                        Muted("Showing the previous window while this one loads.", Modifier.padding(horizontal = Space.s))
+                    }
                     ui.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
                     ui.error != null -> Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
@@ -121,7 +125,6 @@ fun LabScreen(padding: PaddingValues) {
                         )
                         TextButton(onClick = vm::retry) { Text("Retry") }
                     }
-                    ui.stale -> Muted("Showing the previous window while this one loads.", Modifier.padding(horizontal = Space.s))
                 }
             }
             when (current) {
@@ -153,7 +156,6 @@ fun LabScreen(padding: PaddingValues) {
             onRate = { vm.rate(s.episode.session.episodeKey, s.episode.session.startMs, it) },
             onDismiss = {
                 openKey = null
-                vm.open(null)
             },
         )
     }

@@ -223,6 +223,50 @@ class LabRepositoryTest {
     }
 
     @Test
+    fun `gateways rank entries from covered days only and keep small samples apart`() = runBlocking {
+        val e = env()
+        val insta = e.pkg("com.instagram.android")
+        val tiktok = e.pkg("com.zhiliaoapp.musically")
+        e.rollup(d(-1))
+        e.rollup(d(-2))
+        listOf(9, 11, 13).forEach { e.session(d(-1), at(d(-1), it), insta, 10, rabbit = it == 9) }
+        listOf(9, 11).forEach { e.session(d(-2), at(d(-2), it), insta, 10, rabbit = it == 11) }
+        listOf(15, 17).forEach { e.session(d(-2), at(d(-2), it), tiktok, 10) }
+        // A day without a rollup isn't covered: its spirals never reach the rates.
+        e.session(d(-3), at(d(-3), 10), insta, 40, rabbit = true)
+
+        val r = e.repo.gateways(TrendWindow(WindowKind.D7)).report
+        assertEquals(7, r.totalEntries)
+        assertEquals(2, r.totalSpirals)
+        assertEquals(2.0 / 7, r.baseRate, 1e-9)
+        val top = r.ranked.single()
+        assertEquals(insta, top.pkgId)
+        assertEquals(5, top.entries)
+        assertEquals(2, top.spirals)
+        assertEquals(listOf(tiktok), r.lowSample.map { it.pkgId })
+    }
+
+    @Test
+    fun `the live hour is clipped from stored segments at the minute`() {
+        fun seg(pkg: Long, from: Long, to: Long, active: Long = to - from, blocked: Boolean = false) = SessionSegmentEntity(
+            sessionId = 1, seqIndex = 0, pkgId = pkg, startMs = from, endMs = to, durationMs = active, isBlockedAttempt = blocked,
+            segmentTriggerEvidence = null, segmentTriggerPkgId = null,
+        )
+        val hour = com.celestiallemon.lagrange.domain.Span(60 * MINUTE_MS, 90 * MINUTE_MS) // 01:00–01:30
+        val use = LabRepository.clippedUse(
+            listOf(
+                seg(1, 50 * MINUTE_MS, 70 * MINUTE_MS), // 10 min inside
+                seg(1, 80 * MINUTE_MS, 100 * MINUTE_MS, active = 10 * MINUTE_MS), // 10 of 20 wall min inside, half active → 5
+                seg(2, 65 * MINUTE_MS, 75 * MINUTE_MS), // not an active-category app
+                seg(1, 70 * MINUTE_MS, 75 * MINUTE_MS, active = 0, blocked = true),
+            ),
+            hour,
+            pkgs = setOf(1L),
+        )
+        assertEquals(mapOf(1L to 15 * MINUTE_MS), use)
+    }
+
+    @Test
     fun `a corrupt check-in log starts over instead of failing`() {
         assertEquals(LabRepository.decodeLog(null), LabRepository.decodeLog("{not json"))
         val log = LabRepository.decodeLog(null).copy(date = "2026-11-23", shown = listOf("a"), dismissed = listOf("b"))

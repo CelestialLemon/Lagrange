@@ -29,6 +29,7 @@ import androidx.compose.material.icons.outlined.Psychology
 import androidx.compose.material.icons.outlined.SwapHoriz
 import androidx.compose.material.icons.outlined.Timer
 import androidx.compose.material.icons.outlined.Whatshot
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
@@ -130,8 +131,9 @@ fun LazyListScope.spikesSection(
     }
     item("spikes-foot") {
         Muted(
-            "A spike is at least 40% and 30 minutes above the median of comparable days in the 28 before it; a good day at least " +
-                "25% and 20 minutes below. Days with gaps in recording are never judged. ${scopeLine(report.scope)}.",
+            "A spike is at least 40% and 30 minutes above the median of comparable days in the 28 before it. A good day is at " +
+                "least 25% and 20 minutes below it, or within your distracting budget with no more screen time than usual. " +
+                "Days with gaps in recording are never judged. ${scopeLine(report.scope)}.",
             Modifier.padding(horizontal = Space.s),
         )
     }
@@ -300,28 +302,36 @@ fun LazyListScope.rabbitHolesSection(
 private fun RabbitFilters(feed: RabbitHoleFeed?, apps: LabApps, f: RabbitFilter, onFilter: (RabbitFilter) -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
         ChipRow {
+            // A filter carried over from another window stays visible (and clearable) even when nothing there matches it.
+            if (f != RabbitFilter()) {
+                AssistChip(onClick = { onFilter(RabbitFilter()) }, label = { Text("Clear filters") })
+            }
             RatingFilter.entries.forEach { r ->
                 FilterChip(selected = f.rating == r, onClick = { onFilter(f.copy(rating = r)) }, label = { Text(r.label) })
             }
         }
         val facets = feed?.facets ?: return@Column
-        if (facets.reasons.size > 1 || f.reason != null) {
+        val reasons = withSelected(facets.reasons, f.reason)
+        if (reasons.size > 1 || f.reason != null) {
             ChipRow {
-                facets.reasons.forEach { r ->
+                reasons.forEach { r ->
                     FilterChip(selected = f.reason == r, onClick = { onFilter(f.copy(reason = if (f.reason == r) null else r)) }, label = { Text(reasonChip(r)) })
                 }
             }
         }
-        if (facets.triggers.size > 1 || f.trigger != null) {
+        val triggers = withSelected(facets.triggers, f.trigger)
+        if (triggers.size > 1 || f.trigger != null) {
             ChipRow {
-                facets.triggers.forEach { t ->
+                triggers.forEach { t ->
                     FilterChip(selected = f.trigger == t, onClick = { onFilter(f.copy(trigger = if (f.trigger == t) null else t)) }, label = { Text(t.badge) })
                 }
             }
         }
-        if (facets.apps.size > 1 || f.pkgId != null) {
+        val appIds = withSelected(facets.apps, f.pkgId)
+        if (appIds.size > 1 || f.pkgId != null) {
+            // Every app in the window: the row scrolls sideways.
             ChipRow {
-                facets.apps.take(MAX_APP_CHIPS).forEach { p ->
+                appIds.forEach { p ->
                     FilterChip(selected = f.pkgId == p, onClick = { onFilter(f.copy(pkgId = if (f.pkgId == p) null else p)) }, label = { Text(apps.name(p)) })
                 }
             }
@@ -329,7 +339,8 @@ private fun RabbitFilters(feed: RabbitHoleFeed?, apps: LabApps, f: RabbitFilter,
     }
 }
 
-private const val MAX_APP_CHIPS = 12
+private fun <T> withSelected(values: List<T>, selected: T?): List<T> =
+    if (selected == null || selected in values) values else listOf(selected) + values
 
 private fun reasonChip(r: RabbitHoleReason): String = when (r) {
     RabbitHoleReason.LONG_BINGE -> "Long binge"
@@ -557,12 +568,9 @@ fun LazyListScope.rhythmSection(data: RhythmData, metric: HeatMetric, onMetric: 
 
 private fun trendCaption(v: RecentVsEarlier, higherIsBetter: Boolean): String {
     val change = v.changeMs ?: return if (v.recentDays > 0) "${v.recentDays + v.earlierDays} days" else "no data yet"
-    val dir = when {
-        change == 0L -> "same as before"
-        (change > 0) == higherIsBetter -> "${signedDuration(change)} last ${v.recentDays} days"
-        else -> "${signedDuration(change)} last ${v.recentDays} days"
-    }
-    return dir
+    if (change == 0L) return "same as before"
+    val verdict = if ((change > 0) == higherIsBetter) "better" else "worse"
+    return "${signedDuration(change)} last ${v.recentDays} days · $verdict"
 }
 
 // -- Friction -------------------------------------------------------------------------------------------------------------

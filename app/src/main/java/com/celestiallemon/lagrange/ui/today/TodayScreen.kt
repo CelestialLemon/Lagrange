@@ -165,12 +165,14 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
                         card,
                         onRate = { today.rate(key, card.episode.startMs, it) },
                         onDismiss = { today.dismissCheckIn(key) },
-                        onOpen = {
-                            // Today's sheet shows today's sessions; an earlier one is rated right here on the card.
-                            if (s.episodes.any { it.session.episodeKey == key }) {
+                        // Today's sheet shows today's sessions; an earlier one is rated right here on the card.
+                        onOpen = if (s.episodes.any { it.session.episodeKey == key }) {
+                            {
                                 openKey = key
                                 today.loadDetail(key)
                             }
+                        } else {
+                            null
                         },
                     )
                 }

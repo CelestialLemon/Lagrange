@@ -20,8 +20,10 @@ import com.celestiallemon.lagrange.domain.Baselines
 import com.celestiallemon.lagrange.domain.DailyMetrics
 import com.celestiallemon.lagrange.domain.DateRange
 import com.celestiallemon.lagrange.domain.HourSlots
+import com.celestiallemon.lagrange.domain.PartialDayBaseline
 import com.celestiallemon.lagrange.domain.ReconstructionRules
 import com.celestiallemon.lagrange.domain.RollupEngine
+import com.celestiallemon.lagrange.domain.RollupRules
 import com.celestiallemon.lagrange.domain.SliceCutoff
 import com.celestiallemon.lagrange.domain.Span
 import com.celestiallemon.lagrange.domain.TrendWindow
@@ -52,6 +54,7 @@ import com.celestiallemon.lagrange.domain.lab.RhythmDay
 import com.celestiallemon.lagrange.domain.lab.RhythmReport
 import com.celestiallemon.lagrange.domain.lab.SpikeAnalyzer
 import com.celestiallemon.lagrange.domain.lab.SpikeAutopsy
+import com.celestiallemon.lagrange.domain.lab.SpanSet
 import com.celestiallemon.lagrange.domain.lab.SubstitutionDay
 import com.celestiallemon.lagrange.domain.lab.WorthCheckInSampler
 import java.time.Instant
@@ -136,7 +139,7 @@ class LabRepository(
             val days = facts(ctx, scope.range.start.minusDays(BASELINE_LOOKBACK_DAYS), scope.range.end)
             val history = SpikeAnalyzer.history(scope.range, days)
             val base = Baselines.baseline(ctx.today, SpikeAnalyzer.points(days))
-            val live = if (ctx.today in scope.range && comparison?.date == ctx.today) liveHighlight(ctx.today, comparison, days) else null
+            val live = if (ctx.today in scope.range && comparison?.date == ctx.today) liveHighlight(ctx, comparison, days) else null
             SpikesReport(scope, history, live, base.coveredDays, Baselines.MIN_COVERED_DAYS, LabApps(metas()))
         }
     }
@@ -149,7 +152,7 @@ class LabRepository(
             val days = facts(ctx, date.minusDays(BASELINE_LOOKBACK_DAYS), date)
             val live = date == ctx.today
             val highlight = if (live) {
-                comparison?.takeIf { it.date == date }?.let { liveHighlight(date, it, days) }
+                comparison?.takeIf { it.date == date }?.let { liveHighlight(ctx, it, days) }
             } else {
                 SpikeAnalyzer.history(DateRange(date, date), days).firstOrNull()
             } ?: return@io null
@@ -166,20 +169,31 @@ class LabRepository(
             }
             val rollupApps = dao.appRollupsFor(keys).filter { it.pkgId in active }.groupBy { LocalDate.parse(it.logicalDate) }
                 .mapValues { (_, rows) -> rows.associate { it.pkgId to it.totalMs } }
+            // Live: matched days count whole hours before "now" from the hourly cells, and the hour "now" is in
+            // exactly, clipped from their own segments at the same wall-clock minute.
+            val wholeHours = cutoff?.copy(fraction = 0.0)
             val appMs = dates.associateWith { d ->
-                if (cutoff != null && d != date) sliceApps(hourly[d].orEmpty(), repeated[d], cutoff) else rollupApps[d].orEmpty()
+                if (wholeHours != null && d != date) sliceApps(hourly[d].orEmpty(), repeated[d], wholeHours) else rollupApps[d].orEmpty()
+            }
+            val partialHour = if (cutoff == null || comparison == null) null else {
+                val nowLocal = Instant.ofEpochMilli(comparison.dataEndMs).atZone(ctx.zones.zoneAt(comparison.dataEndMs)).toLocalDateTime()
+                highlight.matchedDays.associateWith { d ->
+                    val hour = PartialDayBaseline.currentHourOn(d, nowLocal, ctx.rolloverHour, ctx.zones) ?: return@associateWith emptyMap()
+                    clippedUse(dao.segmentsOverlapping(hour.startMs, hour.endMs), hour, active)
+                }
             }
             val episodes = episodesBetween(date, date)
             val note = dao.notesBetween(date.toString(), date.toString()).firstOrNull()?.noteText
-            SpikeAnalyzer.autopsy(AutopsyInput(highlight, appMs, slotMs, episodes, note, cutoff), apps)
+            SpikeAnalyzer.autopsy(AutopsyInput(highlight, appMs, slotMs, episodes, note, cutoff, partialHour), apps)
         }
     }
 
-    private fun liveHighlight(today: LocalDate, comparison: TodayComparison, days: Map<LocalDate, DayFacts>): DayHighlight? {
-        val row = days[today]
-        // Today's rollup carries the coverage verdict so far; a gap today means no comparison at all.
-        val eligible = row != null && row.coverageOk
-        return SpikeAnalyzer.live(today, eligible, comparison.slice, SpikeAnalyzer.matchedDays(today, days))
+    private fun liveHighlight(ctx: AnalyticsContext, comparison: TodayComparison, days: Map<LocalDate, DayFacts>): DayHighlight? {
+        val row = days[ctx.today]
+        // Today's rollup carries the coverage verdict so far; a gap today means no comparison at all. Nor is there one
+        // while the derived tables lag behind the instant the comparison cut the matched days at.
+        val eligible = SpikeAnalyzer.liveEligible(row?.coverageOk == true, comparison.dataEndMs, ctx.derivedThroughMs)
+        return SpikeAnalyzer.live(ctx.today, eligible, comparison.slice, SpikeAnalyzer.matchedDays(ctx.today, days))
     }
 
     private fun sliceApps(rows: List<HourlyAppUsageEntity>, repeatedSlot: Int?, cutoff: SliceCutoff): Map<Long, Long> =
@@ -223,7 +237,8 @@ class LabRepository(
         val notifications = if (end > scope.fromMs) dao.countableNotificationsBetween(scope.fromMs, end).map { it.toLab() } else emptyList()
         // The day before the window too: the idle stretch before the window's first pickup starts there.
         val episodes = episodesBetween(scope.range.start.minusDays(1), scope.range.end).filter { !it.inProgress && it.endMs <= scope.dataEndMs }
-        val report = NotificationCostAnalyzer.analyze(notifications, listener, episodes, scope.fromMs, scope.toMs, scope.dataEndMs, apps, sort)
+        val usage = SpanSet.usageObserved(ctx.coverage)
+        val report = NotificationCostAnalyzer.analyze(notifications, listener, episodes, scope.fromMs, scope.toMs, scope.dataEndMs, apps, sort, usage = usage)
         NotificationCostData(scope, report, apps)
     }
 
@@ -258,6 +273,7 @@ class LabRepository(
                     t.hour * 60 + t.minute
                 },
                 episodes = eps.map { Span(it.startMs, it.endMs) },
+                nightWindow = Span(window.startMs - NIGHT_RULES.nightBeforeRolloverMs, window.startMs + NIGHT_RULES.nightAfterRolloverMs),
             )
         }
         RhythmData(scope, RhythmAnalyzer.analyze(days, ctx.rolloverHour))
@@ -271,7 +287,7 @@ class LabRepository(
         val apps = LabApps(metas())
         val followTo = scope.toMs + frictionRules.sustainMs
         val events = db.derivedDao().frictionBetween(scope.fromMs, followTo).map {
-            LabFriction(it.timestampUtcMs, it.pkgId, it.eventKind, it.outcome, it.postCountdownReactionMs, it.selectedTimerMin)
+            LabFriction(it.timestampUtcMs, it.pkgId, it.eventKind, it.outcome, it.postCountdownReactionMs, it.selectedTimerMin, it.pauseDurationSec)
         }
         val opens = dao.runStartsBetween(scope.fromMs, followTo)
             .filter { apps.isDistracting(it.pkgId) && !apps.isTransient(it.pkgId) }
@@ -301,6 +317,9 @@ class LabRepository(
         val enabled = db.settingsHistoryDao().byKey(FRICTION_ENABLED_KEY).mapNotNull { row ->
             row.valueJson.trim().trim('"').toBooleanStrictOrNull()?.let { row.timestampUtcMs to it }
         }
+        val currentDays = substitutionDays(current)
+        // The comparison ends with its last settled covered day; a switch flipped today says nothing about it.
+        val currentEndMs = currentDays.maxOfOrNull { it.date }?.let { ctx.zones.window(it, ctx.rolloverHour).endMs } ?: scope.toMs
         val input = FrictionInput(
             events = events,
             distractingOpens = opens,
@@ -309,13 +328,15 @@ class LabRepository(
             dataEndMs = scope.dataEndMs,
             coverage = UsageCoverage.of(ctx.coverage),
             coveredDays = scope.coveredDates.size,
+            coveredDaySpans = scope.coveredDates.map { ctx.zones.window(it, ctx.rolloverHour).let { w -> Span(w.startMs, w.endMs) } },
             frictionCoverageRatios = scope.coveredDates.mapNotNull { byDate[it]?.frictionCoverageRatio },
-            current = substitutionDays(current),
+            current = currentDays,
             previous = substitutionDays(previous),
             currentNeutralApps = neutralApps(current),
             previousNeutralApps = neutralApps(previous),
             enabledHistory = enabled,
             substitutionFromMs = currentStartMs,
+            substitutionToMs = currentEndMs,
         )
         FrictionData(scope, FrictionAnalyzer.analyze(input, apps, frictionRules), apps)
     }
@@ -415,6 +436,7 @@ class LabRepository(
     companion object {
         const val BASELINE_LOOKBACK_DAYS = 28L
         const val FRICTION_ENABLED_KEY = "friction_enabled"
+        private val NIGHT_RULES = RollupRules()
 
         private val json = Json { ignoreUnknownKeys = true }
 
@@ -448,6 +470,24 @@ class LabRepository(
                 LabSegment(it.pkgId, it.seqIndex, it.startMs, it.endMs, it.durationMs, it.isBlockedAttempt, evidenceOf(it.segmentTriggerEvidence), it.segmentTriggerPkgId)
             },
         )
+
+        /**
+         * Per-app active use inside [window] from stored segments. A segment's launch pauses aren't placed within it, so
+         * its overlap is scaled by its own active share (duration over wall span).
+         */
+        fun clippedUse(segments: List<SessionSegmentEntity>, window: Span, pkgs: Set<Long>): Map<Long, Long> {
+            val out = HashMap<Long, Long>()
+            for (g in segments) {
+                if (g.pkgId !in pkgs || g.isBlockedAttempt) continue
+                val wall = g.endMs - g.startMs
+                if (wall <= 0) continue
+                val overlap = minOf(g.endMs, window.endMs) - maxOf(g.startMs, window.startMs)
+                if (overlap <= 0) continue
+                val ms = if (g.durationMs >= wall) overlap else overlap * g.durationMs / wall
+                if (ms > 0) out.merge(g.pkgId, ms, Long::plus)
+            }
+            return out
+        }
 
         fun RawNotificationEntity.toLab() = LabNotification(
             id = id,

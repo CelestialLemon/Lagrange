@@ -184,6 +184,7 @@ internal suspend fun loadSessionDetail(db: LagrangeDatabase, episode: EpisodeUi)
  * The check-in card, re-sampled whenever ratings, rebuilds, the logical day or the check-in memory change. Asking the
  * repository records the offer, which changes the memory once; the second pass then finds nothing new to write.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 internal fun AppGraph.checkInFlow(): Flow<CheckInCard?> = afterReady {
     val state = database.ingestionStateDao()
     combine(

@@ -5,6 +5,7 @@ import com.celestiallemon.lagrange.data.db.FrictionVocab
 import com.celestiallemon.lagrange.data.db.ServiceKind
 import com.celestiallemon.lagrange.domain.CoverageSpan
 import com.celestiallemon.lagrange.domain.HOUR_MS
+import com.celestiallemon.lagrange.domain.Span
 import com.celestiallemon.lagrange.domain.UsageCoverage
 import java.time.LocalDate
 import org.junit.Assert.assertEquals
@@ -17,8 +18,8 @@ import org.junit.Test
 class FrictionEffectivenessTest {
     private val day = 24 * HOUR_MS
 
-    private fun pause(at: Long, outcome: String, pkg: Long = INSTA, reaction: Long? = null, timer: Int? = null) =
-        LabFriction(at, pkg, FrictionVocab.LAUNCH_PAUSE, outcome, reaction, timer)
+    private fun pause(at: Long, outcome: String, pkg: Long = INSTA, reaction: Long? = null, timer: Int? = null, countdownSec: Int = 0) =
+        LabFriction(at, pkg, FrictionVocab.LAUNCH_PAUSE, outcome, reaction, timer, countdownSec)
 
     private fun expiry(at: Long, outcome: String) = LabFriction(at, INSTA, FrictionVocab.TIMER_EXPIRED, outcome)
 
@@ -61,6 +62,43 @@ class FrictionEffectivenessTest {
         assertEquals(1, FrictionAnalyzer.exits(events, input, testApps).sustained)
         // Without any coverage information the analyzer only needs the data to reach that far.
         assertEquals(1, FrictionAnalyzer.exits(events, input.copy(coverage = null, distractingOpens = emptyList()), testApps).sustained)
+    }
+
+    @Test
+    fun `the ten minutes run from when the user left, not from when the prompt appeared`() {
+        val shown = 12 * HOUR_MS
+        // 30 s countdown, left 15 s after it: out at 12:00:45. A reopen at 12:10:20 is 9m35s later: quick.
+        val exact = listOf(pause(shown, FrictionVocab.OUTCOME_CLOSED_GO_HOME, reaction = 15_000, countdownSec = 30))
+        val reopen = shown + 10 * MIN + 20_000
+        assertEquals(1, FrictionAnalyzer.exits(exact, FrictionInput(exact, listOf(reopen), 0, day, day, harvest), testApps).quickReopens)
+        // Left during the countdown (no reaction): out somewhere in 12:00:00–12:00:30. A reopen at 12:10:10 is within
+        // ten minutes of some of those instants only, so it can't be called either way.
+        val bounded = listOf(pause(shown, FrictionVocab.OUTCOME_CLOSED_GO_HOME, countdownSec = 30))
+        val ambiguous = FrictionAnalyzer.exits(bounded, FrictionInput(bounded, listOf(shown + 10 * MIN + 10_000), 0, day, day, harvest), testApps)
+        assertEquals(ExitOutcomes(1, sustained = 0, quickReopens = 0, unresolved = 1), ambiguous)
+        // The follow-up must be complete after the latest possible exit instant too.
+        val late = FrictionAnalyzer.exits(bounded, FrictionInput(bounded, emptyList(), 0, day, shown + 10 * MIN + 10_000, harvest), testApps)
+        assertEquals(1, late.unresolved)
+        assertEquals(Span(shown + 45_000, shown + 45_000), exact.single().exitWindow)
+    }
+
+    @Test
+    fun `a timer chosen and then abandoned with Go Home never started`() {
+        val events = listOf(
+            pause(0, FrictionVocab.OUTCOME_CLOSED_GO_HOME, timer = 5),
+            pause(1, FrictionVocab.OUTCOME_CONTINUED, timer = 5),
+        )
+        assertEquals(1, FrictionAnalyzer.analyze(FrictionInput(events, emptyList(), 0, day, day), testApps).timer.timersSet)
+    }
+
+    @Test
+    fun `prompts per day count only prompts on the covered days`() {
+        val events = listOf(pause(HOUR_MS, FrictionVocab.OUTCOME_CONTINUED), pause(2 * HOUR_MS, FrictionVocab.OUTCOME_CONTINUED)) +
+            (1..8).map { pause(day + it * HOUR_MS, FrictionVocab.OUTCOME_CONTINUED) }
+        val input = FrictionInput(events, emptyList(), 0, 2 * day, 2 * day, coveredDays = 1, coveredDaySpans = listOf(Span(0, day)))
+        val r = FrictionAnalyzer.analyze(input, testApps)
+        assertEquals(10, r.launchPauses)
+        assertEquals(2.0, r.pausesPerCoveredDay!!, 1e-9)
     }
 
     @Test
@@ -133,6 +171,24 @@ class FrictionEffectivenessTest {
         assertFalse(FrictionAnalyzer.substitution(input.copy(current = days(5, 60, 39)), false)!!.flagged)
         // Fewer than three covered days in either period: nothing to compare.
         assertNull(FrictionAnalyzer.substitution(input.copy(previous = days(2, 90, 30)), false))
+    }
+
+    @Test
+    fun `friction switched on after the compared days does not mark them as under friction`() {
+        val input = FrictionInput(
+            events = listOf(pause(19 * day, FrictionVocab.OUTCOME_CONTINUED)),
+            distractingOpens = emptyList(),
+            fromMs = 10 * day,
+            toMs = 20 * day,
+            dataEndMs = 20 * day,
+            current = days(5, 60, 50),
+            previous = days(5, 90, 30),
+            enabledHistory = listOf(0L to false, 19 * day to true),
+            substitutionFromMs = 10 * day,
+            substitutionToMs = 15 * day, // the last settled covered day ends here; today is day 19
+        )
+        assertFalse(FrictionAnalyzer.analyze(input, testApps).substitution!!.frictionActive)
+        assertTrue(FrictionAnalyzer.analyze(input.copy(substitutionToMs = null), testApps).substitution!!.frictionActive)
     }
 
     @Test

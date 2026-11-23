@@ -108,6 +108,12 @@ data class AutopsyInput(
     val note: String? = null,
     /** For a live day: where "now" sits. Matched days are cut at the same place; blocks after it are left out. */
     val cutoff: SliceCutoff? = null,
+    /**
+     * For a live day: each matched day's per-app use inside the current hour up to the same wall-clock minute, clipped
+     * from its own sessions. With it, the hour "now" is in counts exactly instead of pro-rata (use concentrated on
+     * one side of the minute would otherwise flip a contributor's sign). Matched days' [appMs] then hold whole hours only.
+     */
+    val partialHour: Map<LocalDate, Map<Long, Long>>? = null,
 )
 
 data class SpikeRules(
@@ -154,8 +160,18 @@ object SpikeAnalyzer {
      * Today so far against the same time-of-day slice of comparable days ([slice] from the Today comparison). Null
      * unless today is a live spike or good day; a coverage gap today means no comparison at all.
      */
+    /**
+     * Whether today's live verdict can be trusted: today's coverage so far is fine and the derived tables (today's
+     * rollup, its hourly cells) reach the instant the comparison slices the matched days at. Harvested-but-not-yet-
+     * derived usage, or a rebuild in flight, would compare a stale today with fresher matched slices.
+     */
+    fun liveEligible(coverageOk: Boolean, comparisonEndMs: Long, derivedThroughMs: Long): Boolean =
+        coverageOk && derivedThroughMs != Long.MIN_VALUE && comparisonEndMs <= derivedThroughMs
+
     fun live(today: LocalDate, eligible: Boolean, slice: SliceBaseline?, matchedDays: List<LocalDate>, rules: SpikeRules = SpikeRules()): DayHighlight? {
         val median = slice?.medianMs ?: return null
+        // The autopsy compares against these days, so they must be a real baseline too.
+        if (matchedDays.size < rules.baseline.minMatchedDays) return null
         return when (val status = Baselines.partialStatus(eligible, slice.todayMs, median, rules.baseline)) {
             DayStatus.SPIKE, DayStatus.GOOD_DAY -> DayHighlight(today, status, slice.todayMs, median, matchedDays, live = true)
             else -> null
@@ -176,11 +192,15 @@ object SpikeAnalyzer {
             }
 
         // Each app against its own median over the matched days (a matched day without the app is a real zero).
+        val exact = input.cutoff != null && input.partialHour != null
+        fun matchedApp(date: LocalDate, pkg: Long): Long =
+            (input.appMs[date]?.get(pkg) ?: 0L) + (if (exact) input.partialHour!![date]?.get(pkg) ?: 0L else 0L)
         val target = input.appMs[h.date].orEmpty()
-        val pkgs = (target.keys + matched.flatMap { input.appMs[it].orEmpty().keys }).filterNot { apps.isTransient(it) }.toSet()
+        val pkgs = (target.keys + matched.flatMap { input.appMs[it].orEmpty().keys + input.partialHour?.get(it).orEmpty().keys })
+            .filterNot { apps.isTransient(it) }.toSet()
         val deltas = pkgs.mapNotNull { pkg ->
             val actual = target[pkg] ?: 0L
-            val median = if (matched.isEmpty()) 0L else medianLong(matched.map { input.appMs[it]?.get(pkg) ?: 0L }) ?: 0L
+            val median = if (matched.isEmpty()) 0L else medianLong(matched.map { matchedApp(it, pkg) }) ?: 0L
             AppDelta(pkg, actual, median).takeIf { it.deltaMs > 0 }
         }
         val ranked = deltas.filter { it.deltaMs >= rules.minAppDeltaMs }
@@ -191,7 +211,13 @@ object SpikeAnalyzer {
             val cut = input.cutoff
             if (cut != null && block.firstSlot > cut.slot) return@mapNotNull null
             val actual = blockMs(input.slotMs[h.date].orEmpty(), block, null)
-            val medians = matched.map { blockMs(input.slotMs[it].orEmpty(), block, cut) }
+            val medians = matched.map { d ->
+                if (exact && cut!!.slot in block.slots) {
+                    blockMs(input.slotMs[d].orEmpty(), block, cut.copy(fraction = 0.0)) + input.partialHour!![d].orEmpty().values.sum()
+                } else {
+                    blockMs(input.slotMs[d].orEmpty(), block, cut)
+                }
+            }
             BlockExcess(block, actual, medianLong(medians), complete = cut == null || cut.slot !in block.slots)
         }
 

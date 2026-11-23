@@ -136,6 +136,8 @@ object NotificationCostAnalyzer {
         apps: LabApps,
         sort: NotificationSort = NotificationSort.VOLUME,
         rules: NotificationRules = NotificationRules(),
+        /** Where usage collection was observing (null: assume everywhere). */
+        usage: List<Span>? = null,
     ): NotificationCostReport {
         val end = minOf(toMs, dataEndMs)
         val covered = notifications.filter { it.postedAtMs in fromMs until end && Spans.contains(listener, it.postedAtMs) && it.isCountable }
@@ -143,7 +145,7 @@ object NotificationCostAnalyzer {
         val likelyAppCancel = attributions.filter { it.evidence == TriggerEvidence.LIKELY_APP_CANCEL_CLICK }.map { it.notificationId }.toSet()
         fun clicked(n: LabNotification) = n.removalReason == RemovalReason.CLICK || (n.removalReason == RemovalReason.APP_CANCEL && n.id in likelyAppCancel)
 
-        val idle = PickupBase.of(episodes, listener, fromMs, end, rules)
+        val idle = PickupBase.of(episodes, listener, fromMs, end, rules, usage)
         val alertHits = covered.filter { it.isAlerting }.mapNotNull { n -> idle.alertOutcome(n.postedAtMs)?.let { n.id to it } }.toMap()
         val downstreamById = attributions.groupBy { it.notificationId }.mapValues { (_, a) -> a.sumOf { it.downstreamMs } }
 
@@ -193,42 +195,59 @@ object NotificationCostAnalyzer {
     data class Attribution(val notificationId: Long, val episodeId: Long, val evidence: TriggerEvidence, val fromMs: Long, val downstreamMs: Long)
 
     /**
-     * Session-level: the episode's own trigger notification. Segment-level (a hop prompted by a notification of the app
-     * hopped to): the matching notification under the reconstructor's windows. Each (notification, episode) pair is
-     * credited once, from its earliest point, so downstream minutes are never double counted.
+     * Session-level: the episode's own stored trigger notification (its entry segment mirrors that trigger, so it is
+     * never matched a second time). Segment-level: a hop to another app, matched like the reconstructor's switch rule
+     * (a tap on a notification of the trigger app removed within [-5 s, +15 s] of the hop and before the segment ended,
+     * the app's own cancel within 10 s after it, or its alert within 60 s before it), each notification credited at
+     * most once overall. Within an episode every distracting segment has one owner: the latest credit at or before
+     * it, so a notification that opened the episode owns the stretch up to the next notification-driven hop.
      */
     fun attribute(notifications: List<LabNotification>, episodes: List<LabEpisode>, apps: LabApps, rules: NotificationRules = NotificationRules()): List<Attribution> {
         val byId = notifications.associateBy { it.id }
         val byPkg = notifications.groupBy { it.pkgId }
-        val out = HashMap<Pair<Long, Long>, Attribution>()
-        fun credit(n: Long, e: LabEpisode, evidence: TriggerEvidence, fromMs: Long) {
-            val downstream = apps.realSegments(e).filter { it.startMs >= fromMs && apps.isDistracting(it.pkgId) }.sumOf { it.durationMs }
-            val key = n to e.id
-            val prev = out[key]
-            if (prev == null || fromMs < prev.fromMs) out[key] = Attribution(n, e.id, evidence, fromMs, downstream)
-        }
-        for (e in episodes) {
+        val sorted = episodes.sortedWith(compareBy<LabEpisode> { it.startMs }.thenBy { it.id })
+        // Stored episode triggers are authoritative and were consumed first by the reconstructor.
+        val consumed = HashSet<Long>()
+        for (e in sorted) if (e.triggerEvidence in ATTRIBUTING) e.triggerNotificationId?.let { consumed += it }
+
+        val out = ArrayList<Attribution>()
+        for (e in sorted) {
+            val credits = ArrayList<Triple<Long, TriggerEvidence, Long>>()
             val sessionNotif = e.triggerNotificationId
-            if (sessionNotif != null && e.triggerEvidence in ATTRIBUTING && sessionNotif in byId) credit(sessionNotif, e, e.triggerEvidence, e.startMs)
+            if (sessionNotif != null && e.triggerEvidence in ATTRIBUTING && sessionNotif in byId) credits += Triple(sessionNotif, e.triggerEvidence, e.startMs)
+            val real = e.segments.filter { !it.isBlockedAttempt }
+            val entry = real.firstOrNull { it.pkgId == e.entryPkgId } ?: real.firstOrNull()
             for (seg in e.segments) {
+                if (seg === entry || seg.isBlockedAttempt) continue
                 val ev = seg.triggerEvidence ?: continue
-                if (ev !in ATTRIBUTING || seg.isBlockedAttempt) continue
-                val pkg = seg.triggerPkgId ?: seg.pkgId
+                if (ev !in ATTRIBUTING) continue
                 val at = seg.startMs
-                val candidates = byPkg[pkg].orEmpty()
                 val match = when (ev) {
-                    TriggerEvidence.OBSERVED_CLICK -> candidates.filter {
-                        it.removalReason == RemovalReason.CLICK && it.removedAtMs != null && it.removedAtMs in (at - rules.clickBeforeMs)..(at + rules.clickAfterMs)
+                    TriggerEvidence.OBSERVED_CLICK -> byPkg[seg.triggerPkgId ?: seg.pkgId].orEmpty().filter {
+                        it.id !in consumed && it.removalReason == RemovalReason.CLICK && it.removedAtMs != null &&
+                            it.removedAtMs >= at - rules.clickBeforeMs && it.removedAtMs <= minOf(at + rules.clickAfterMs, seg.endMs)
                     }.minByOrNull { kotlin.math.abs(it.removedAtMs!! - at) }
-                    TriggerEvidence.LIKELY_APP_CANCEL_CLICK -> candidates.filter {
-                        it.removalReason == RemovalReason.APP_CANCEL && it.removedAtMs != null && it.removedAtMs in at..(at + rules.appCancelAfterMs)
-                    }.minByOrNull { it.removedAtMs!! - at }
-                    else -> candidates.filter { it.isAlerting && it.postedAtMs in (at - rules.alertBeforeMs)..at }.maxByOrNull { it.postedAtMs }
+                    TriggerEvidence.LIKELY_APP_CANCEL_CLICK -> byPkg[seg.pkgId].orEmpty().filter {
+                        it.id !in consumed && it.removalReason == RemovalReason.APP_CANCEL && it.postedAtMs < at && it.removedAtMs != null &&
+                            it.removedAtMs in at..(at + rules.appCancelAfterMs)
+                    }.minByOrNull { it.removedAtMs!! }
+                    else -> byPkg[seg.pkgId].orEmpty().filter {
+                        it.id !in consumed && it.isAlerting && it.postedAtMs in (at - rules.alertBeforeMs)..at
+                    }.maxByOrNull { it.postedAtMs }
                 } ?: continue
-                credit(match.id, e, ev, at)
+                consumed += match.id
+                credits += Triple(match.id, ev, at)
+            }
+            if (credits.isEmpty()) continue
+            credits.sortBy { it.third }
+            val segs = apps.realSegments(e).filter { apps.isDistracting(it.pkgId) }
+            for ((i, c) in credits.withIndex()) {
+                val until = credits.getOrNull(i + 1)?.third ?: Long.MAX_VALUE
+                val owned = segs.filter { it.startMs >= c.third && it.startMs < until }.sumOf { it.durationMs }
+                out += Attribution(c.first, e.id, c.second, c.third, owned)
             }
         }
-        return out.values.sortedWith(compareBy<Attribution> { it.fromMs }.thenBy { it.notificationId })
+        return out.sortedWith(compareBy<Attribution> { it.fromMs }.thenBy { it.notificationId })
     }
 
     /** Waking idle time between episodes, and whether a notification posted in it was followed by a pickup. */
@@ -237,6 +256,8 @@ object NotificationCostAnalyzer {
         private val starts: List<Long>,
         private val dataEndMs: Long,
         private val rules: NotificationRules,
+        /** Where usage collection was observing (null: everywhere); a pickup can only be seen, or ruled out, there. */
+        private val usage: List<Span>?,
         val exposureMs: Long,
         val pickups: Int,
     ) {
@@ -249,7 +270,11 @@ object NotificationCostAnalyzer {
         fun alertOutcome(postedAtMs: Long): Boolean? {
             if (postedAtMs + rules.pickupWindowMs > dataEndMs) return null
             if (idle.none { postedAtMs >= it.startMs && postedAtMs < it.endMs }) return null
-            return starts.any { it > postedAtMs && it <= postedAtMs + rules.pickupWindowMs }
+            val pickup = starts.firstOrNull { it > postedAtMs && it <= postedAtMs + rules.pickupWindowMs }
+            // Usage must have been observed from the alert until the pickup (or for the whole minute, for a miss).
+            val until = pickup ?: (postedAtMs + rules.pickupWindowMs)
+            if (usage != null && !SpanSet.covers(usage, postedAtMs, until)) return null
+            return pickup != null
         }
 
         fun lift(alerts: Int, hits: Int, rules: NotificationRules): PickupLift {
@@ -264,7 +289,9 @@ object NotificationCostAnalyzer {
         }
 
         companion object {
-            fun of(episodes: List<LabEpisode>, listener: List<Span>, fromMs: Long, toMs: Long, rules: NotificationRules): PickupBase {
+            fun of(episodes: List<LabEpisode>, listener: List<Span>, fromMs: Long, toMs: Long, rules: NotificationRules, usage: List<Span>? = null): PickupBase {
+                // Idle time counts only where both the listener (alerts seen) and usage collection (pickups seen) ran.
+                val observed = SpanSet.merge(if (usage == null) listener else SpanSet.intersect(listener, usage))
                 val sorted = episodes.sortedBy { it.startMs }
                 val idle = ArrayList<Span>()
                 var exposure = 0L
@@ -277,13 +304,12 @@ object NotificationCostAnalyzer {
                     val gap = next.startMs - gapStart
                     if (gap <= 0 || gap >= rules.wakingGapMaxMs) continue
                     val span = Span(gapStart, next.startMs).clip(fromMs, toMs) ?: continue
-                    // Only listener-covered idle time: an alert can't be seen (or ruled out) anywhere else.
-                    val coveredParts = listener.mapNotNull { it.clip(span.startMs, span.endMs) }
+                    val coveredParts = observed.mapNotNull { it.clip(span.startMs, span.endMs) }
                     idle += coveredParts
-                    exposure += Spans.coveredMs(listener, span.startMs, span.endMs)
-                    if (next.startMs < toMs && Spans.contains(listener, next.startMs - 1)) pickups++
+                    exposure += coveredParts.sumOf { it.endMs - it.startMs }
+                    if (next.startMs < toMs && Spans.contains(observed, next.startMs - 1)) pickups++
                 }
-                return PickupBase(idle, sorted.map { it.startMs }, toMs, rules, exposure, pickups)
+                return PickupBase(idle, sorted.map { it.startMs }, toMs, rules, usage?.let(SpanSet::merge), exposure, pickups)
             }
         }
     }

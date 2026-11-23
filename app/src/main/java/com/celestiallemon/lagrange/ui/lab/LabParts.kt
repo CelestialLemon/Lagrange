@@ -63,7 +63,7 @@ fun hopText(e: LabEpisode, apps: LabApps): String = apps.hopChain(e).joinToStrin
  * episode away for good.
  */
 @Composable
-fun WorthCheckInCard(card: CheckInCard, onRate: (Int) -> Unit, onDismiss: () -> Unit, onOpen: () -> Unit, modifier: Modifier = Modifier) {
+fun WorthCheckInCard(card: CheckInCard, onRate: (Int) -> Unit, onDismiss: () -> Unit, onOpen: (() -> Unit)?, modifier: Modifier = Modifier) {
     val e = card.episode
     SectionCard(
         title = "Was that worth it?",
@@ -76,7 +76,7 @@ fun WorthCheckInCard(card: CheckInCard, onRate: (Int) -> Unit, onDismiss: () -> 
             Modifier
                 .fillMaxWidth()
                 .clip(MaterialTheme.shapes.medium)
-                .clickable(onClick = onOpen)
+                .then(if (onOpen != null) Modifier.clickable(onClickLabel = "Open this session", onClick = onOpen) else Modifier)
                 .padding(vertical = Space.xs),
             verticalArrangement = Arrangement.spacedBy(Space.xs),
         ) {

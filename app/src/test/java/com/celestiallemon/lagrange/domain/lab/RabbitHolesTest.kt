@@ -86,6 +86,19 @@ class RabbitHolesTest {
     }
 
     @Test
+    fun `an offered episode that briefly drops out of reach is waited for, not replaced`() {
+        val first = WorthCheckInSampler.select(CheckInLog(), today, candidates(), now, now)
+        assertEquals("new", first.episodeKey)
+        // A rebuild pulled the derived cutoff back before "new" ended: offer nothing, spend nothing.
+        val dataEnd = base + 8 * HOUR_MS
+        val waiting = WorthCheckInSampler.select(first.log, today, candidates(), now, dataEnd)
+        assertNull(waiting.episodeKey)
+        assertEquals(first.log, waiting.log)
+        // Once the data catches up it comes back.
+        assertEquals("new", WorthCheckInSampler.select(waiting.log, today, candidates(), now, now).episodeKey)
+    }
+
+    @Test
     fun `skips episodes that are in progress, not yet derived, stale, or not rabbit holes`() {
         val list = listOf(
             episode(now - HOUR_MS, INSTA to 25, rabbit = true, inProgress = true, key = "live"),

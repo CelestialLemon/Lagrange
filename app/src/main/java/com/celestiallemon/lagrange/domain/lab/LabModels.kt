@@ -1,10 +1,15 @@
 package com.celestiallemon.lagrange.domain.lab
 
 import com.celestiallemon.lagrange.data.db.AppCategory
+import com.celestiallemon.lagrange.data.db.CoverageStatus
+import com.celestiallemon.lagrange.data.db.ServiceKind
 import com.celestiallemon.lagrange.data.db.RabbitHoleReason
 import com.celestiallemon.lagrange.data.db.TriggerEvidence
 import com.celestiallemon.lagrange.domain.AppMeta
+import com.celestiallemon.lagrange.domain.CoverageSpan
 import com.celestiallemon.lagrange.domain.DateRange
+import com.celestiallemon.lagrange.domain.Span
+import com.celestiallemon.lagrange.domain.Spans
 import com.celestiallemon.lagrange.domain.TrendWindow
 import com.celestiallemon.lagrange.domain.WindowKind
 import java.time.LocalDate
@@ -107,6 +112,44 @@ data class LabCoverage(
     /** Hours of notification-listener coverage inside the window (null for sections that don't use it). */
     val notificationCoveredMs: Long? = null,
 )
+
+/** Interval arithmetic on half-open spans. */
+object SpanSet {
+    /** Sorted, non-overlapping union. */
+    fun merge(spans: List<Span>): List<Span> {
+        val out = ArrayList<Span>()
+        for (s in spans.filter { it.endMs > it.startMs }.sortedBy { it.startMs }) {
+            val last = out.lastOrNull()
+            if (last != null && s.startMs <= last.endMs) out[out.lastIndex] = Span(last.startMs, maxOf(last.endMs, s.endMs)) else out += s
+        }
+        return out
+    }
+
+    fun intersect(a: List<Span>, b: List<Span>): List<Span> {
+        val mb = merge(b)
+        return merge(merge(a).flatMap { x -> mb.mapNotNull { it.clip(x.startMs, x.endMs) } })
+    }
+
+    fun subtract(a: List<Span>, cut: List<Span>): List<Span> {
+        var cur = merge(a)
+        for (c in merge(cut)) {
+            cur = cur.flatMap { s ->
+                if (c.endMs <= s.startMs || c.startMs >= s.endMs) listOf(s)
+                else listOfNotNull(Span(s.startMs, c.startMs).takeIf { c.startMs > s.startMs }, Span(c.endMs, s.endMs).takeIf { c.endMs < s.endMs })
+            }
+        }
+        return cur
+    }
+
+    fun covers(spans: List<Span>, fromMs: Long, toMs: Long): Boolean = toMs <= fromMs || Spans.coveredMs(merge(spans), fromMs, toMs) >= toMs - fromMs
+
+    /** Time usage collection actually observed: harvest ACTIVE/BACKFILL spans minus recorded GAPs (as [UsageCoverage]). */
+    fun usageObserved(coverage: List<CoverageSpan>): List<Span> {
+        val harvest = coverage.filter { it.kind == ServiceKind.USAGE_HARVEST }
+        val on = harvest.filter { it.status == CoverageStatus.ACTIVE || it.status == CoverageStatus.BACKFILL }.map { it.span }
+        return subtract(on, harvest.filter { it.status == CoverageStatus.GAP }.map { it.span })
+    }
+}
 
 internal fun medianLong(values: List<Long>): Long? {
     if (values.isEmpty()) return null
