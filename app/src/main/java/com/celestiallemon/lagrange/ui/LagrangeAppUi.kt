@@ -31,6 +31,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -92,6 +93,13 @@ fun LagrangeShell(main: MainViewModel) {
     var tab by rememberSaveable { mutableStateOf(Tab.Today) }
     // The app open in the Trends deep dive, if any. It lives here so re-selecting Trends can return to the list.
     var deepDive by rememberSaveable { mutableStateOf<Long?>(null) }
+    // Held at shell scope so tab switches keep Trends' scroll position and an open deep dive's own window.
+    val trendsSaveable = rememberSaveableStateHolder()
+    fun setDeepDive(next: Long?) {
+        val previous = deepDive
+        if (previous != null && previous != next) trendsSaveable.removeState("app-$previous")
+        deepDive = next
+    }
     // Predictive back: from any other tab, back returns to Today before leaving the app. The deep dive registers
     // its own (later, so higher-priority) handler that returns to the Trends list first.
     BackHandler(enabled = tab != Tab.Today) { tab = Tab.Today }
@@ -103,7 +111,7 @@ fun LagrangeShell(main: MainViewModel) {
                     NavigationBarItem(
                         selected = t == tab,
                         onClick = {
-                            if (t == Tab.Trends && tab == Tab.Trends) deepDive = null
+                            if (t == Tab.Trends && tab == Tab.Trends) setDeepDive(null)
                             tab = t
                         },
                         icon = { Icon(t.icon, contentDescription = null) },
@@ -116,7 +124,7 @@ fun LagrangeShell(main: MainViewModel) {
         Crossfade(targetState = tab, label = "tab") { current ->
             when (current) {
                 Tab.Today -> TodayScreen(main, padding, onOpenSystem = { tab = Tab.System })
-                Tab.Trends -> TrendsTab(padding, deepDive, onDeepDive = { deepDive = it })
+                Tab.Trends -> TrendsTab(padding, deepDive, onDeepDive = ::setDeepDive, saveable = trendsSaveable)
                 Tab.Lab -> LabScreen(padding)
                 Tab.Friction -> FrictionScreen(padding)
                 Tab.System -> SystemScreen(main, padding)

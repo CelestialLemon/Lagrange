@@ -82,7 +82,12 @@ object AppsBreakdown {
         val goalOnly = meta.values.filter { it.dailyGoalMs != null && !it.isSystemSurface && it.pkgId !in used }.map { m ->
             val prevAvg = if (previousCoveredDays > 0) (prev[m.pkgId]?.coveredMs ?: 0L).toDouble() / previousCoveredDays else null
             val zero = if (coveredDays > 0) 0.0 else null
-            AppRow(m, 0, 0, zero, zero, null, prevAvg)
+            val trend = if (zero != null && prevAvg != null && prevAvg > 0 && coveredDays >= minCoveredDays && previousCoveredDays >= minCoveredDays) {
+                -1.0
+            } else {
+                null
+            }
+            AppRow(m, 0, 0, zero, zero, trend, prevAvg)
         }
         return usedRows + goalOnly
     }
@@ -268,7 +273,7 @@ data class FrictionSummary(
     val quickReopens: Int,
     val timerCheckIns: Int,
     val extensions: Int,
-    /** Exits too recent to know yet whether a quick reopen follows; kept out of the reopen rate. */
+    /** Exits whose 10-minute follow-up is not yet complete or lacked continuous usage coverage; kept out of the reopen rate. */
     val pendingExits: Int = 0,
 ) {
     val hasData: Boolean get() = launchPauses > 0 || timerCheckIns > 0 || extensions > 0
@@ -325,6 +330,25 @@ fun interface SwitchCoverage {
     }
 }
 
+/** Whether usage collection continuously covered `[fromMs, toMs)` with no gap. */
+fun interface UsageCoverage {
+    fun isContinuous(fromMs: Long, toMs: Long): Boolean
+
+    companion object {
+        fun of(coverage: List<CoverageSpan>): UsageCoverage {
+            val active = coverage.filter {
+                it.kind == ServiceKind.USAGE_HARVEST && (it.status == CoverageStatus.ACTIVE || it.status == CoverageStatus.BACKFILL)
+            }.map { it.span }
+            val gaps = coverage.filter {
+                it.kind == ServiceKind.USAGE_HARVEST && it.status == CoverageStatus.GAP
+            }.map { it.span }
+            return UsageCoverage { from, to ->
+                to <= from || (Spans.coveredMs(active, from, to) >= to - from && gaps.none { it.overlapMs(from, to) > 0 })
+            }
+        }
+    }
+}
+
 data class AppSessionInsights(
     val shape: SessionShape,
     val flows: SequenceFlows,
@@ -343,6 +367,9 @@ object AppSessionAnalyzer {
     /**
      * @param followUpOpens starts of real runs of the app shortly after the window (quick reopens of late exits).
      * @param switchCoverage how a switch without evidence is labelled; by default it inherits the episode's label.
+     * @param usageCoverage whether usage collection continuously covered an exit's follow-up interval.
+     * @param priorRunEndMs latest end of a real run of the app that started before [window.fromMs], so a reopen loop
+     * crossing the window start is still attributed to the first in-window open.
      */
     fun analyze(
         pkgId: Long,
@@ -353,14 +380,21 @@ object AppSessionAnalyzer {
         window: InsightWindow = InsightWindow.ALL,
         followUpOpens: List<Long> = emptyList(),
         switchCoverage: SwitchCoverage? = null,
+        usageCoverage: UsageCoverage? = null,
+        priorRunEndMs: Long? = null,
     ): AppSessionInsights {
-        val runs = runsOf(pkgId, sessions, isTransient).filter { it.seg.startMs in window }
+        val allRuns = runsOf(pkgId, sessions, isTransient)
+        val runs = allRuns.filter { it.seg.startMs in window }
+        val precedingEndMs = listOfNotNull(
+            priorRunEndMs,
+            allRuns.filter { it.seg.startMs < window.fromMs }.maxOfOrNull { it.seg.endMs },
+        ).maxOrNull()
         return AppSessionInsights(
-            shape = shape(runs, rules),
+            shape = shape(runs, rules, precedingEndMs),
             flows = flows(pkgId, runs, rules),
             triggers = triggers(pkgId, sessions, isTransient, window, switchCoverage),
             value = value(pkgId, sessions, isTransient, window),
-            friction = friction(friction, runs.map { it.seg.startMs } + followUpOpens, rules, window),
+            friction = friction(friction, runs.map { it.seg.startMs } + followUpOpens, rules, window, usageCoverage),
         )
     }
 
@@ -379,13 +413,17 @@ object AppSessionAnalyzer {
         return out.sortedWith(compareBy({ it.seg.startMs }, { it.seg.seqIndex }))
     }
 
-    private fun shape(runs: List<Run>, rules: AppInsightRules): SessionShape {
+    private fun shape(runs: List<Run>, rules: AppInsightRules, priorRunEndMs: Long? = null): SessionShape {
         val counts = LengthBucket.entries.associateWith { 0 }.toMutableMap()
         for (r in runs) counts.merge(LengthBucket.of(r.seg.durationMs), 1, Int::plus)
         var loops = 0
-        for (i in 1 until runs.size) {
-            val gap = runs[i].seg.startMs - runs[i - 1].seg.endMs
-            if (gap in 0..rules.reopenLoopMs) loops++
+        var lastEnd = priorRunEndMs
+        for (r in runs) {
+            if (lastEnd != null) {
+                val gap = r.seg.startMs - lastEnd
+                if (gap in 0..rules.reopenLoopMs) loops++
+            }
+            lastEnd = r.seg.endMs
         }
         val durations = runs.map { it.seg.durationMs }.sorted()
         val median = if (durations.isEmpty()) null else if (durations.size % 2 == 1) durations[durations.size / 2]
@@ -460,7 +498,7 @@ object AppSessionAnalyzer {
                 val arrival = segs[k + 1]
                 val ev = seg.triggerEvidence
                     ?: (k + 1 until i).firstNotNullOfOrNull { segs[it].triggerEvidence }
-                    ?: switchCoverage?.unobserved(arrival.startMs, seg.endMs)
+                    ?: switchCoverage?.unobserved(arrival.startMs, arrival.endMs)
                     ?: if (s.triggerEvidence in UNOBSERVED) s.triggerEvidence else TriggerEvidence.NO_OBSERVED_TRIGGER
                 mid.merge(ev, 1, Int::plus)
             }
@@ -491,6 +529,7 @@ object AppSessionAnalyzer {
         opens: List<Long>,
         rules: AppInsightRules = AppInsightRules(),
         window: InsightWindow = InsightWindow.ALL,
+        usageCoverage: UsageCoverage? = null,
     ): FrictionSummary {
         val sorted = events.sortedBy { it.timestampMs }
         val allPauses = sorted.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
@@ -502,9 +541,10 @@ object AppSessionAnalyzer {
         var pending = 0
         for (e in exits) {
             while (j < allOpens.size && allOpens[j] <= e.timestampMs) j++
+            val followEnd = e.timestampMs + rules.quickReopenMs
             when {
                 j < allOpens.size && allOpens[j] - e.timestampMs < rules.quickReopenMs -> quick++
-                e.timestampMs + rules.quickReopenMs > window.dataEndMs -> pending++
+                followEnd > window.dataEndMs || (usageCoverage != null && !usageCoverage.isContinuous(e.timestampMs, followEnd)) -> pending++
             }
         }
         val inWindow = sorted.filter { it.timestampMs in window }

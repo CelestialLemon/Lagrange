@@ -310,7 +310,7 @@ fun HourProfileChart(bins: List<HourBin>, peakSlot: Int?, description: String, m
             }
             if (i % 6 == 0) {
                 val layout = measurer.measure(String.format(Locale.US, "%02d", b.wallHour), labelStyle)
-                val x = (plot.left + slot * i + (slot - layout.size.width) / 2).coerceIn(plot.left, plot.right - layout.size.width)
+                val x = (plot.left + slot * i + (slot - layout.size.width) / 2).coerceIn(plot.left, maxOf(plot.left, plot.right - layout.size.width))
                 drawText(layout, topLeft = Offset(x, plot.bottom + 4.dp.toPx()))
             }
         }

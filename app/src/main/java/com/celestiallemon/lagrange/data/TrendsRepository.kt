@@ -38,6 +38,7 @@ import com.celestiallemon.lagrange.domain.TimeOfDayProfile
 import com.celestiallemon.lagrange.domain.TrendCalculator
 import com.celestiallemon.lagrange.domain.TrendPoint
 import com.celestiallemon.lagrange.domain.TrendWindow
+import com.celestiallemon.lagrange.domain.UsageCoverage
 import com.celestiallemon.lagrange.domain.WorthTotals
 import java.time.LocalDate
 import kotlinx.coroutines.Dispatchers
@@ -185,11 +186,12 @@ class TrendsRepository(
         // Opens are attributed to the logical day they happened on: select by the instants of the window's days.
         val fromMs = ctx.zones.window(range.start, ctx.rolloverHour).startMs
         val toMs = ctx.zones.window(range.end, ctx.rolloverHour).endMs
-        val insightWindow = InsightWindow(fromMs, toMs, ctx.dataEndMs)
+        val insightWindow = InsightWindow(fromMs, toMs, ctx.derivedThroughMs)
         val followTo = toMs + rules.quickReopenMs
         val sessions = sessionRows(pkgId, fromMs, toMs)
         val friction = dao.frictionOf(pkgId, fromMs, followTo).map { FrictionRow(it.timestampMs, it.eventKind, it.outcome) }
         val followUps = dao.runStarts(pkgId, toMs, followTo)
+        val priorRunEndMs = if (!meta.isSystemSurface) dao.lastRunEndBefore(pkgId, fromMs) else null
         val metas = metas()
         val insights = AppSessionAnalyzer.analyze(
             pkgId, sessions, friction,
@@ -198,6 +200,8 @@ class TrendsRepository(
             window = insightWindow,
             followUpOpens = followUps,
             switchCoverage = SwitchCoverage.of(ctx.coverage),
+            usageCoverage = UsageCoverage.of(ctx.coverage),
+            priorRunEndMs = priorRunEndMs,
         )
         val flowIds = (insights.flows.inflow + insights.flows.outflow).mapNotNull { (it.node as? FlowNode.App)?.pkgId }
         val rangeRollups = rollups.filter { LocalDate.parse(it.logicalDate) in range }

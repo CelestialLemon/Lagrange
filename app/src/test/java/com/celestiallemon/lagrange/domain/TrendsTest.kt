@@ -319,6 +319,25 @@ class TrendsTest {
     }
 
     @Test
+    fun `valued vs regretted report totals net valued time across all days with data`() {
+        val window = TrendWindow(WindowKind.D7)
+        val range = window.resolve(today, null)
+        val days = mapOf(
+            d(-3) to DailyMetrics(d(-3), DayQuality.COVERED, worth = WorthTotals(valuedMs = 30 * MINUTE_MS, regrettedMs = 10 * MINUTE_MS, valuedCount = 1, regrettedCount = 1)),
+            d(-2) to DailyMetrics(d(-2), DayQuality.COVERED, worth = WorthTotals(valuedMs = 5 * MINUTE_MS, regrettedMs = 25 * MINUTE_MS, valuedCount = 1, regrettedCount = 1)),
+            d(-1) to DailyMetrics(d(-1), DayQuality.PARTIAL, worth = WorthTotals(valuedMs = 10 * MINUTE_MS, regrettedMs = 40 * MINUTE_MS, valuedCount = 1, regrettedCount = 1)),
+            today to DailyMetrics(today, DayQuality.IN_PROGRESS, worth = WorthTotals(valuedMs = 0, regrettedMs = 5 * MINUTE_MS, regrettedCount = 1)),
+        )
+        val r = TrendCalculator.report(TrendMetric.VALUED_VS_REGRETTED, window, range, days)
+        // Net: (+20m) + (-20m) + (-30m) + (-5m) = -35m (not gross valued +45m).
+        assertEquals(-35.0 * MINUTE_MS, r.observedTotal, 1e-9)
+        // Covered mean uses only the two covered days: (+20m + -20m) / 2 = 0.
+        assertEquals(0.0, r.coveredMean!!, 1e-9)
+        assertEquals(45 * MINUTE_MS, r.worth.valuedMs)
+        assertEquals(80 * MINUTE_MS, r.worth.regrettedMs)
+    }
+
+    @Test
     fun `no-data days have no value in a report`() {
         val range = DateRange(d(-1), today)
         val days = mapOf(d(-1) to DailyMetrics(d(-1), DayQuality.NO_DATA, distractingMs = 999))

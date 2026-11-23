@@ -54,4 +54,10 @@ object IngestionKeys {
     /** The reconstruction algorithm version the derived tables were built with. */
     const val DERIVED_ALGORITHM_VERSION = "derived_algorithm_version"
     const val DERIVED_LAST_RUN_AT_MS = "derived_last_run_at_ms"
+
+    /** Collection cutoff (`dataEnd`) up to which the derived tables were last rebuilt through the tail. */
+    const val DERIVED_DATA_END_MS = "derived_data_end_ms"
+
+    /** The rollover hour the currently stored derived tables were completely rebuilt under. */
+    const val DERIVED_APPLIED_ROLLOVER_HOUR = "derived_applied_rollover_hour"
 }

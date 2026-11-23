@@ -106,6 +106,33 @@ class AppInsightsTest {
         assertNull(analyze(emptyList()).shape.loopRate)
     }
 
+    @Test
+    fun `reopen loop across the window start is attributed to the first in-window open`() {
+        val boundary = 4 * HOUR_MS
+        // Leave at 03:59:40, reopen at 04:00:10 (30s gap across the 04:00 rollover).
+        val before = session(boundary - 2 * MINUTE_MS, app to (2 * MINUTE_MS - 20_000))
+        val after = session(boundary + 10_000, app to MINUTE_MS)
+        val window = InsightWindow(boundary, boundary + 24 * HOUR_MS)
+
+        // When both sessions are supplied, the preceding run provides loop context without inflating run count.
+        val fromSessions = AppSessionAnalyzer.analyze(app, listOf(before, after), emptyList(), isTransient, window = window).shape
+        assertEquals(1, fromSessions.runs)
+        assertEquals(1, fromSessions.reopenLoops)
+
+        // When only in-window sessions are loaded, priorRunEndMs provides the same context.
+        val fromPrior = AppSessionAnalyzer.analyze(
+            app, listOf(after), emptyList(), isTransient, window = window, priorRunEndMs = boundary - 20_000,
+        ).shape
+        assertEquals(1, fromPrior.runs)
+        assertEquals(1, fromPrior.reopenLoops)
+
+        // Over 60s across the boundary is not a loop.
+        val tooLate = AppSessionAnalyzer.analyze(
+            app, listOf(after), emptyList(), isTransient, window = window, priorRunEndMs = boundary - 51_000,
+        ).shape
+        assertEquals(0, tooLate.reopenLoops)
+    }
+
     // -- Sequence flows ----------------------------------------------------------------------------------------------
 
     @Test
@@ -238,6 +265,20 @@ class AppInsightsTest {
     }
 
     @Test
+    fun `blocked arrival coverage checks the arrival end, not the later real run's end`() {
+        // Blocked attempt lasts 1s at MINUTE_MS..MINUTE_MS+1s; real run lasts 1m after it.
+        // Listener was active through MINUTE_MS+1s (covering the arrival's full click-after window capped by arrival.endMs)
+        // and dropped right after: the arrival should still read NO_OBSERVED_TRIGGER, not PARTIAL_COVERAGE.
+        val s = session(
+            0, other to MINUTE_MS, app to 1_000L, app to MINUTE_MS,
+            blockedIdx = setOf(1), trigger = NO_OBSERVED_TRIGGER,
+        )
+        val listener = CoverageSpan(ServiceKind.NOTIFICATION_LISTENER, CoverageStatus.ACTIVE, 0, MINUTE_MS + 1_000L)
+        val t = AppSessionAnalyzer.analyze(app, listOf(s), emptyList(), isTransient, switchCoverage = SwitchCoverage.of(listOf(listener))).triggers
+        assertEquals(mapOf(NO_OBSERVED_TRIGGER to 1), t.midSession)
+    }
+
+    @Test
     fun `runs belong to the window they open in, whatever day their episode started`() {
         val sessions = listOf(
             session(0, app to MINUTE_MS),
@@ -343,6 +384,33 @@ class AppInsightsTest {
         assertEquals(0.0, f.quickReopenRate!!, 1e-9)
     }
 
+    @Test
+    fun `missing quick reopens need continuous usage coverage to count as resolved`() {
+        val window = InsightWindow(0, 10 * HOUR_MS, dataEndMs = 10 * HOUR_MS)
+        val coverage = UsageCoverage.of(
+            listOf(
+                CoverageSpan(ServiceKind.USAGE_HARVEST, CoverageStatus.ACTIVE, 0, 5 * HOUR_MS),
+                // A 2-minute harvest gap during the 2nd exit's 10-minute follow-up.
+                CoverageSpan(ServiceKind.USAGE_HARVEST, CoverageStatus.GAP, 2 * HOUR_MS + 3 * MINUTE_MS, 2 * HOUR_MS + 5 * MINUTE_MS),
+                // Continuous backfill covers the 4th exit.
+                CoverageSpan(ServiceKind.USAGE_HARVEST, CoverageStatus.BACKFILL, 6 * HOUR_MS, 7 * HOUR_MS),
+            ),
+        )
+        val events = listOf(
+            FrictionRow(HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"), // fully covered -> resolved miss
+            FrictionRow(2 * HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"), // gap in follow-up -> pending
+            FrictionRow(5 * HOUR_MS - 4 * MINUTE_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"), // uncovered tail -> pending
+            FrictionRow(6 * HOUR_MS + 10 * MINUTE_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"), // backfill covered -> resolved miss
+            FrictionRow(8 * HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"), // uncovered, but reopen WAS observed -> quick reopen
+        )
+        val f = AppSessionAnalyzer.friction(events, opens = listOf(8 * HOUR_MS + 2 * MINUTE_MS), window = window, usageCoverage = coverage)
+        assertEquals(5, f.immediateExits)
+        assertEquals(1, f.quickReopens)
+        assertEquals(2, f.pendingExits)
+        assertEquals(3, f.resolvedExits)
+        assertEquals(1.0 / 3, f.quickReopenRate!!, 1e-9)
+    }
+
     // -- Time-of-day profile -----------------------------------------------------------------------------------------
 
     @Test
@@ -398,6 +466,16 @@ class AppInsightsTest {
         val window = zones.window(LocalDate.parse("2026-10-31"), 4)
         assertNull(HourSlots.repeatedSlot(window, 4))
         assertEquals(21, HourSlots.repeatedSlot(window, 4, zones)) // 01:00 repeats, 21 slots after 04:00
+    }
+
+    @Test
+    fun `landing in a new zone already inside its DST overlap still resolves the repeated slot`() {
+        // New York falls back at 06:00 UTC (01:00–02:00 EST = 06:00–07:00 UTC). Switching at 06:30 UTC lands mid-overlap.
+        val midOverlap = Instant.parse("2026-11-01T06:30:00Z").toEpochMilli()
+        val zones = ZoneTimeline(listOf(0L to ZoneId.of("America/Phoenix"), midOverlap to ZoneId.of("America/New_York")), ZoneId.of("UTC"))
+        val window = zones.window(LocalDate.parse("2026-10-31"), 4)
+        assertEquals(HourSlots.REPEATED_SLOT, HourSlots.slotOf(midOverlap, 4, zones.zoneAt(midOverlap)))
+        assertEquals(21, HourSlots.repeatedSlot(window, 4, zones))
     }
 
     @Test
@@ -462,6 +540,29 @@ class AppInsightsTest {
         val goal = rows.last()
         assertEquals(0L, goal.totalMs)
         assertEquals(0.0, goal.dailyAvgMs!!, 0.0)
+        assertNull(goal.trendPct)
+
+        // Unused this window after prior use over sufficient covered days is a -100% drop.
+        val dropped = AppsBreakdown.rows(
+            current = listOf(AppWindowTotals(1, MINUTE_MS, 1, MINUTE_MS, 1)),
+            previous = listOf(AppWindowTotals(2, 50 * MINUTE_MS, 5, 50 * MINUTE_MS, 5)),
+            coveredDays = 5,
+            previousCoveredDays = 5,
+            meta = meta,
+            minCoveredDays = 3,
+        ).single { it.meta.pkgId == 2L }
+        assertEquals(-1.0, dropped.trendPct!!, 1e-9)
+
+        // Too few covered days keeps the trend null.
+        val thin = AppsBreakdown.rows(
+            current = emptyList(),
+            previous = listOf(AppWindowTotals(2, 50 * MINUTE_MS, 5, 50 * MINUTE_MS, 5)),
+            coveredDays = 2,
+            previousCoveredDays = 5,
+            meta = meta,
+            minCoveredDays = 3,
+        ).single { it.meta.pkgId == 2L }
+        assertNull(thin.trendPct)
     }
 
     @Test

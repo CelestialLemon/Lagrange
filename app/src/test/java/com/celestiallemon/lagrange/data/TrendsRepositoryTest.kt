@@ -5,6 +5,8 @@ import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.celestiallemon.lagrange.FakeResolver
 import com.celestiallemon.lagrange.data.db.AppCategory
+import com.celestiallemon.lagrange.data.db.CoverageIntervalEntity
+import com.celestiallemon.lagrange.data.db.CoverageStatus
 import com.celestiallemon.lagrange.data.db.DailyAppRollupEntity
 import com.celestiallemon.lagrange.data.db.DailyRollupEntity
 import com.celestiallemon.lagrange.data.db.DayCoverage
@@ -13,6 +15,7 @@ import com.celestiallemon.lagrange.data.db.FrictionEventEntity
 import com.celestiallemon.lagrange.data.db.HourlyAppUsageEntity
 import com.celestiallemon.lagrange.data.db.IngestionStateEntity
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
+import com.celestiallemon.lagrange.data.db.ServiceKind
 import com.celestiallemon.lagrange.data.db.SessionEntity
 import com.celestiallemon.lagrange.data.db.SessionSegmentEntity
 import com.celestiallemon.lagrange.data.db.TriggerEvidence
@@ -427,6 +430,62 @@ class TrendsRepositoryTest {
         val rows = e.repo.apps(e.repo.trendData(TrendWindow(WindowKind.D7)))
         assertEquals(listOf(reddit), rows.map { it.meta.pkgId })
         assertEquals(0L, rows.single().totalMs)
+    }
+
+    @Test
+    fun `deep dive catches a reopen loop crossing the window boundary from an earlier session`() = runBlocking {
+        val e = env()
+        val reddit = e.pkg(REDDIT)
+        val first = d(-6) // start of 7D window: 04:00
+        // Separate session ends at 03:59:40 (20s before window start); new session opens at 04:00:10 (30s gap).
+        val boundary = at(first, 4, 0)
+        e.session(first.minusDays(1), boundary - 2 * MINUTE_MS, listOf(Triple(reddit, 2 * MINUTE_MS - 20_000, false)))
+        e.session(first, boundary + 10_000, listOf(Triple(reddit, MINUTE_MS, false)))
+
+        val dive = e.repo.deepDive(reddit, TrendWindow(WindowKind.D7))!!
+        assertEquals(1, dive.insights.shape.runs)
+        assertEquals(1, dive.insights.shape.reopenLoops)
+    }
+
+    @Test
+    fun `deep dive friction requires continuous usage coverage and caught-up derived data`() = runBlocking {
+        val e = env()
+        val reddit = e.pkg(REDDIT)
+        val day = d(-1)
+        e.rollups(rollup(day))
+        e.db.coverageDao().insert(
+            CoverageIntervalEntity(
+                serviceKind = ServiceKind.USAGE_HARVEST.name,
+                startMs = at(d(-2), 0),
+                endMs = now,
+                status = CoverageStatus.ACTIVE.name,
+                lastSeenMs = now,
+            ),
+        )
+        // Gap during the 11:00 exit's 10-minute follow-up.
+        e.db.coverageDao().insert(
+            CoverageIntervalEntity(
+                serviceKind = ServiceKind.USAGE_HARVEST.name,
+                startMs = at(day, 11, 4),
+                endMs = at(day, 11, 6),
+                status = CoverageStatus.GAP.name,
+                lastSeenMs = at(day, 11, 6),
+            ),
+        )
+        e.db.derivedDao().insertFrictionEvent(friction(at(day, 9, 0), reddit, "CLOSED_GO_HOME"))
+        e.db.derivedDao().insertFrictionEvent(friction(at(day, 11, 0), reddit, "CLOSED_GO_HOME"))
+
+        val coveredDive = e.repo.deepDive(reddit, TrendWindow(WindowKind.D7))!!
+        assertEquals(2, coveredDive.insights.friction.immediateExits)
+        assertEquals(1, coveredDive.insights.friction.pendingExits) // 11:00 had a usage gap
+        assertEquals(1, coveredDive.insights.friction.resolvedExits) // 09:00 was continuously covered
+        assertEquals(0.0, coveredDive.insights.friction.quickReopenRate!!, 1e-9)
+
+        // If derived tables have only caught up to 09:05, the 09:00 exit is also pending.
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.DERIVED_DATA_END_MS, at(day, 9, 5)))
+        val laggingDive = e.repo.deepDive(reddit, TrendWindow(WindowKind.D7))!!
+        assertEquals(2, laggingDive.insights.friction.pendingExits)
+        assertNull(laggingDive.insights.friction.quickReopenRate)
     }
 
     // -- Refresh signal ----------------------------------------------------------------------------------------------

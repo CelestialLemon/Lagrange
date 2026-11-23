@@ -20,6 +20,7 @@ import com.celestiallemon.lagrange.domain.TrendWindow
 import com.celestiallemon.lagrange.ui.afterReady
 import com.celestiallemon.lagrange.ui.graph
 import com.celestiallemon.lagrange.ui.minuteTickFlow
+import java.util.concurrent.atomic.AtomicReference
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -33,15 +34,38 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
-import kotlinx.coroutines.flow.scan
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+/** Emits the first value immediately and debounces subsequent bursts by [timeoutMillis]. */
+@OptIn(FlowPreview::class)
+internal fun <T> Flow<T>.debounceAfterFirst(timeoutMillis: Long): Flow<T> = flow {
+    var first = true
+    this@debounceAfterFirst.debounce {
+        if (first) {
+            first = false
+            0L
+        } else {
+            timeoutMillis
+        }
+    }.collect { emit(it) }
+}
+
+/**
+ * Like `scan`, but keeps the last reduced state across upstream restarts (e.g. `WhileSubscribed` stopping while
+ * off-screen) and never re-emits a blank initial seed on resubscribe.
+ */
+internal fun <T, R> Flow<T>.scanRetaining(initial: R, operation: (acc: R, value: T) -> R): Flow<R> {
+    val state = AtomicReference(initial)
+    return map { value -> state.updateAndGet { acc -> operation(acc, value) } }
+}
 
 /**
  * Anything that changes what Trends shows: a rebuild landing (`derived_last_run_at_ms`), a harvest (which moves how far
@@ -63,7 +87,7 @@ private fun AppGraph.trendsRefresh(includeGoals: Boolean): Flow<Any> = afterRead
                 rows.map { listOf(it.id, it.category, it.displayName, it.isLauncherOrSystemUi, if (includeGoals) it.dailyGoalMs else null) }
             }.distinctUntilChanged(),
         ),
-    ) { it.toList() }.debounce(REFRESH_DEBOUNCE_MS)
+    ) { it.toList() }.debounceAfterFirst(REFRESH_DEBOUNCE_MS)
 }
 
 private const val REFRESH_DEBOUNCE_MS = 400L
@@ -118,9 +142,9 @@ class TrendsViewModel(app: Application) : AndroidViewModel(app) {
 
     val ui: StateFlow<TrendsUiState> = combine(window, retries, graph.trendsRefresh(includeGoals = true)) { w, _, _ -> w }
         .loadLatest(TAG) { w -> graph.trends.overview(w) }
-        .scan(TrendsUiState(TrendWindow.DEFAULT)) { acc, (w, ev) ->
+        .scanRetaining(TrendsUiState(TrendWindow.DEFAULT)) { acc, (w, ev) ->
             when (ev) {
-                Load.Started -> acc.copy(requested = w, loading = true)
+                Load.Started -> acc.copy(requested = w, loading = true, error = null)
                 is Load.Done -> TrendsUiState(w, ev.value, loading = false, error = null)
                 is Load.Failed -> acc.copy(requested = w, loading = false, error = ev.message)
             }
@@ -197,7 +221,7 @@ class AppDeepDiveViewModel(app: Application) : AndroidViewModel(app) {
 
     val ui: StateFlow<DeepDiveUiState> = combine(request.filterNotNull(), retries, graph.trendsRefresh(includeGoals = false)) { r, _, _ -> r }
         .loadLatest(TAG) { (p, w) -> graph.trends.deepDive(p, w) }
-        .scan(DeepDiveUiState()) { acc, (r, ev) ->
+        .scanRetaining(DeepDiveUiState()) { acc, (r, ev) ->
             val (p, w) = r
             when (ev) {
                 // Never keep another app's figures around under this one's name.
@@ -220,9 +244,13 @@ class AppDeepDiveViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setCategory(category: AppCategory) {
-        val name = pkgRow.value?.packageName ?: return
+        val targetId = request.value?.first ?: return
         if (category == AppCategory.SELF_APP) return
-        launchIo { graph.catalog.setCategory(name, category) }
+        val cachedName = pkgRow.value?.takeIf { it.id == targetId }?.packageName
+        launchIo {
+            val name = cachedName ?: graph.database.analyticsDao().packageById(targetId)?.packageName ?: return@launchIo
+            graph.catalog.setCategory(name, category)
+        }
     }
 
     private fun launchIo(block: suspend () -> Unit) = viewModelScope.launch {

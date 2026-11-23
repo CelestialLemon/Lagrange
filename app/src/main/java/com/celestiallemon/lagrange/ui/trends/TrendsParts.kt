@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -74,18 +73,29 @@ import java.time.format.TextStyle
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
+import kotlin.math.roundToLong
 
 // -- Formatting ----------------------------------------------------------------------------------------------------
 
 /** A metric value for display: durations as "1h 5m" (signed when negative), counts with one decimal below ten. */
 fun formatMetric(v: Double?, unit: MetricUnit): String {
-    if (v == null) return "–"
+    if (v == null || !v.isFinite()) return "–"
     // A sign only appears when the magnitude survives rounding, so there is never a "−0m" or "−0".
     return when (unit) {
-        MetricUnit.DURATION -> (if (v <= -30_000.0) "−" else "") + formatDurationShort(abs(v).toLong())
+        MetricUnit.DURATION -> {
+            val ms = abs(v).roundToLong()
+            val sign = if (v < 0 && ms > 0) "−" else ""
+            sign + formatDurationShort(ms)
+        }
         MetricUnit.COUNT -> {
-            val c = if (abs(v) < 0.05) 0.0 else v
-            if (abs(c) >= 10 || c == c.roundToInt().toDouble()) "${c.roundToInt()}" else String.format(Locale.getDefault(), "%.1f", c)
+            val tenths = (abs(v) * 10.0).roundToLong()
+            val sign = if (v < 0 && tenths > 0) "−" else ""
+            when {
+                tenths == 0L -> "0"
+                tenths >= 100L -> "$sign${abs(v).roundToLong()}"
+                tenths % 10L == 0L -> "$sign${tenths / 10L}"
+                else -> sign + String.format(Locale.getDefault(), "%.1f", tenths / 10.0)
+            }
         }
     }
 }
@@ -99,7 +109,7 @@ val DayQuality.label: String
         DayQuality.COVERED -> "Covered"
         DayQuality.BACKFILL -> "Backfilled history"
         DayQuality.PARTIAL -> "Partial coverage"
-        DayQuality.IN_PROGRESS -> "Today, in progress"
+        DayQuality.IN_PROGRESS -> "In progress"
         DayQuality.NO_DATA -> "No data"
     }
 
@@ -315,7 +325,7 @@ fun DayCallout(p: TrendPoint, unit: MetricUnit, valueLabel: String, secondaryLab
                     else -> null
                 }
                 if (text != null) {
-                    val c = if (st == com.celestiallemon.lagrange.data.db.DayStatus.SPIKE) LocalStatusColors.current.warn else LocalStatusColors.current.good
+                    val c = if (st == com.celestiallemon.lagrange.data.db.DayStatus.SPIKE) LocalStatusColors.current.bad else LocalStatusColors.current.good
                     StatusPill(text, c)
                 }
             }
@@ -355,9 +365,7 @@ fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
     val tertiary = MaterialTheme.colorScheme.tertiary
     val axis = MaterialTheme.colorScheme.outlineVariant
     Row(
-        Modifier
-            .fillMaxWidth()
-            .height(132.dp),
+        Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(Space.s),
     ) {
         DayOfWeek.entries.forEach { dow ->
@@ -367,7 +375,6 @@ fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
             Column(
                 Modifier
                     .weight(1f)
-                    .fillMaxHeight()
                     .clearAndSetSemantics {
                         contentDescription = if (a.mean == null) "$name: no covered days"
                         else "$name: ${formatMetric(a.mean, unit)} on average over ${a.days} covered days"
@@ -383,11 +390,11 @@ fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
                 )
                 Spacer(Modifier.height(2.dp))
                 val frac = ((a.mean ?: 0.0) / maxAbs).toFloat().coerceIn(-1f, 1f)
-                val color = if (weekend) tertiary else primary.copy(alpha = if (a.days > 0) 0.75f else 0.2f)
+                val color = if (weekend) tertiary.copy(alpha = if (a.days > 0) 1f else 0.2f) else primary.copy(alpha = if (a.days > 0) 0.75f else 0.2f)
                 Canvas(
                     Modifier
                         .fillMaxWidth(0.7f)
-                        .weight(1f),
+                        .height(64.dp),
                 ) {
                     val base = if (diverging) size.height / 2f else size.height
                     val room = if (diverging) size.height / 2f else size.height

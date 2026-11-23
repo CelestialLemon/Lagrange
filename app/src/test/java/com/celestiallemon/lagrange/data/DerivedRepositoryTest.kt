@@ -602,6 +602,62 @@ class DerivedRepositoryTest {
         assertEquals(10 * MINUTE_MS - 2_000 - blocked, e.repo.todayComparison()!!.slice!!.medianMs)
     }
 
+    @Test
+    fun `analyticsContext keeps older pending rebuilds unsettled after a multi-day harvest gap`() = runBlocking {
+        val e = env()
+        val dayMinus4 = today.minusDays(4)
+        e.setup(at(today.minusDays(6), 0))
+        e.session(at(today.minusDays(5), 10), INSTAGRAM, 20 * MINUTE_MS)
+        e.session(at(dayMinus4, 10), INSTAGRAM, 15 * MINUTE_MS)
+        // Last applied rebuild only had data through day-4 20:00 (clipped day-4).
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(dayMinus4, 20)))
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        assertEquals(at(dayMinus4, 20), e.state(IngestionKeys.DERIVED_DATA_END_MS))
+
+        // Three days later, a harvest advances LAST_HARVEST_AT_MS to today and queues a rebuild starting >2 days ago.
+        e.session(at(today, 10), WHATSAPP, 10 * MINUTE_MS)
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, now))
+        e.repo.markDirty(at(dayMinus4, 8))
+
+        val pendingCtx = e.repo.analyticsContext()
+        assertEquals(dayMinus4, pendingCtx.firstUnsettled)
+        assertEquals(at(dayMinus4, 8), pendingCtx.derivedThroughMs)
+
+        // Once the rebuild lands, day-4..yesterday settle and derivedThroughMs catches up.
+        e.repo.runPending()
+        val settledCtx = e.repo.analyticsContext()
+        assertEquals(today, settledCtx.firstUnsettled)
+        assertEquals(now, settledCtx.derivedThroughMs)
+    }
+
+    @Test
+    fun `analyticsContext keeps old-rollover rollups unsettled until the rollover rebuild finishes`() = runBlocking {
+        val e = env()
+        e.history(3)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        assertEquals(4L, e.state(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR))
+        assertEquals(today, e.repo.analyticsContext().firstUnsettled)
+
+        // Changing rollover hour immediately invalidates coverage even before reconcileSettings() runs.
+        settings = settings.copy(rolloverHour = 0)
+        val beforeReconcile = e.repo.analyticsContext()
+        assertTrue(beforeReconcile.firstUnsettled.isBefore(today.minusDays(10)))
+        assertEquals(Long.MIN_VALUE, beforeReconcile.derivedThroughMs)
+
+        // Still unsettled after reconcileSettings() queues the rebuild.
+        assertTrue(e.repo.reconcileSettings())
+        val whilePending = e.repo.analyticsContext()
+        assertTrue(whilePending.firstUnsettled.isBefore(today.minusDays(10)))
+
+        // Settled again only after the full rebuild commits under the new rollover hour.
+        e.repo.runPending()
+        assertEquals(0L, e.state(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR))
+        assertEquals(today, e.repo.analyticsContext().firstUnsettled)
+        assertEquals(now, e.repo.analyticsContext().derivedThroughMs)
+    }
+
     private companion object {
         const val INSTAGRAM = "com.instagram.android"
         const val WHATSAPP = "com.whatsapp"

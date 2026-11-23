@@ -273,7 +273,7 @@ data class TrendReport(
     val partialDays: Int,
     val noDataDays: Int,
     val inProgressDays: Int,
-    /** Sum of [DaySample.value] over every day with data, partial ones included (it all really happened). */
+    /** Sum of [DaySample.trend] over every day with data, partial ones included (net valued time for self-report; [DaySample.value] for all other metrics). */
     val observedTotal: Double,
     val coveredMean: Double?,
     /** Self-report over the window (all days with data). */
@@ -373,7 +373,7 @@ object TrendCalculator {
             partialDays = inRange.count { it.quality == DayQuality.PARTIAL },
             noDataDays = inRange.count { it.quality == DayQuality.NO_DATA },
             inProgressDays = inRange.count { it.quality == DayQuality.IN_PROGRESS },
-            observedTotal = inRange.sumOf { it.value ?: 0.0 },
+            observedTotal = inRange.sumOf { it.trend ?: 0.0 },
             coveredMean = covered.mapNotNull { it.trend }.takeIf { it.isNotEmpty() }?.average(),
             worth = range.dates().mapNotNull { days[it]?.worth }.fold(WorthTotals()) { a, b -> a + b },
         )

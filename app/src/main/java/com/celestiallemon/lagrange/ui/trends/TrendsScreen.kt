@@ -124,13 +124,13 @@ fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsVi
                 }
             }
         }
-        if (ui.loading || ui.stale) {
+        if (ui.loading) {
             item("loading") {
                 if (r == null) {
                     SectionCard(title = "Gathering your history", eyebrow = "Trends", icon = Icons.Outlined.Sync) {
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                     }
-                } else if (ui.loading) {
+                } else {
                     LinearProgressIndicator(
                         Modifier
                             .fillMaxWidth()

@@ -135,6 +135,14 @@ interface AnalyticsDao {
     )
     suspend fun runStarts(pkgId: Long, fromMs: Long, toMs: Long): List<Long>
 
+    /** Latest end of a real (not blocked) run of the app that started before [beforeMs]: context for a loop across the window start. */
+    @Query(
+        "SELECT MAX(g.end_ms) FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
+            "WHERE g.pkg_id = :pkgId AND g.is_blocked_attempt = 0 AND g.duration_ms > 0 AND s.is_glance_only = 0 " +
+            "AND g.start_ms < :beforeMs",
+    )
+    suspend fun lastRunEndBefore(pkgId: Long, beforeMs: Long): Long?
+
     @Query(
         "SELECT timestamp_utc_ms AS timestampMs, event_kind AS eventKind, outcome FROM friction_events " +
             "WHERE pkg_id = :pkgId AND timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs ORDER BY timestamp_utc_ms, id",

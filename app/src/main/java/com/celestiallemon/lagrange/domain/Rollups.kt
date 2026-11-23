@@ -159,6 +159,10 @@ object HourSlots {
         var a = window.startMs
         while (a < window.endMs) {
             val zone = zones.zoneAt(a)
+            val startZ = Instant.ofEpochMilli(a).atZone(zone)
+            if (startZ.offset != startZ.withEarlierOffsetAtOverlap().offset) {
+                return (startZ.hour - rolloverHour + 24) % 24
+            }
             val b = minOf(zones.nextChangeAfter(a) ?: Long.MAX_VALUE, window.endMs)
             var t = zone.rules.nextTransition(Instant.ofEpochMilli(a - 1))
             while (t != null && t.instant.toEpochMilli() < b) {
