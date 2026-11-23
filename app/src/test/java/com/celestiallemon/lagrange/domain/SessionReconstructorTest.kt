@@ -565,6 +565,31 @@ class SessionReconstructorTest {
     }
 
     @Test
+    fun `a short check whose listener heartbeat came at its screen-off is still fully covered`() {
+        // Listener alive all along, last heartbeat at the screen-off 6 s in: well short of unlock + 15 s.
+        val l = Ledger().listener(-HOUR_MS, 6 * SEC)
+        l.session(0, P.WHATSAPP to 3 * SEC)
+        val ep = l.reconstruct().single()
+        assertEquals(l.at(6 * SEC), ep.endMs)
+        assertEquals(TriggerEvidence.NO_OBSERVED_TRIGGER, ep.triggerEvidence)
+        val glance = Ledger().listener(-HOUR_MS, 4 * SEC).glance(0).reconstruct().single()
+        assertEquals(TriggerEvidence.NO_OBSERVED_TRIGGER, glance.triggerEvidence)
+    }
+
+    @Test
+    fun `a splash handing over to the main activity is one stretch, so a launch pause blocks the whole open`() {
+        val l = covered()
+        l.screenOn(0).unlock(SEC)
+        l.use(P.INSTAGRAM, 2_000, 2_300, cls = 31).use(P.INSTAGRAM, 2_320, 7_600, cls = 32)
+        l.lock(8 * SEC).screenOff(8 * SEC)
+        l.blocked(P.INSTAGRAM, 2_100)
+        val ep = l.reconstruct().single()
+        val insta = ep.segments.single { it.pkgId == P.INSTAGRAM }
+        assertTrue(insta.isBlockedAttempt)
+        assertEquals(Archetype.BLOCKED_ATTEMPT, ep.archetype)
+    }
+
+    @Test
     fun `a switch never borrows the tap that opened a later switch`() {
         val l = covered()
         // Unlock at 1 s into Maps, Chrome from 4 s (nothing tapped), WhatsApp from 12 s, opened by a shade tap at 11 s.

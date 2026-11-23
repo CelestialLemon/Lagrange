@@ -350,11 +350,15 @@ class DerivedRepository(
             // An episode cut off by the read margins (still "open" at loadTo, or already running when the read began)
             // would be stored or counted short: widen the read until every episode touching the chunk is whole.
             val cutAhead = loadTo <= ctx.dataEnd && episodes.any { it.inProgress && it.startMs < ce }
-            val firstEvent = events.minOfOrNull { it.timestampMs }
+            // Only what the reconstructor reads counts as the read's edge (not unrelated background events).
+            val firstEvent = events.firstOrNull { it.type in FOREGROUND_TYPES || it.type in SCREEN_EVENT_TYPES }?.timestampMs
             // The screen was already on when the read began and stayed on into the chunk: whatever opened that
             // episode lies before the read, even if no event of it made it in.
             val firstScreen = events.firstOrNull { it.type == UsageEventTypes.SCREEN_INTERACTIVE || it.type == UsageEventTypes.SCREEN_NON_INTERACTIVE }
-            val openAtRead = if (firstScreen == null) events.any { it.timestampMs >= cs && it.type in FOREGROUND_TYPES } else firstScreen.type == UsageEventTypes.SCREEN_NON_INTERACTIVE && firstScreen.timestampMs > cs
+            val firstFg = events.firstOrNull { it.type in FOREGROUND_TYPES }
+            val openAtRead = (if (firstScreen == null) events.any { it.timestampMs >= cs && it.type in FOREGROUND_TYPES } else firstScreen.type == UsageEventTypes.SCREEN_NON_INTERACTIVE && firstScreen.timestampMs > cs) ||
+                // An app already in front when the read began (its first event is a close) and still there in the chunk.
+                (firstFg != null && firstFg.type != UsageEventTypes.ACTIVITY_RESUMED && firstFg.timestampMs > cs)
             val cutBehind = loadFrom > ctx.earliest && firstEvent != null &&
                 (openAtRead || episodes.any { it.startMs - firstEvent < MARGIN_EDGE_MS && it.endMs > cs })
             if ((cutAhead || cutBehind) && attempt < MAX_MARGIN_DOUBLINGS) {
@@ -491,11 +495,8 @@ class DerivedRepository(
         }
         val nowLocal = java.time.Instant.ofEpochMilli(ctx.dataEnd).atZone(nowZone).toLocalDateTime()
         val partialHour = base.matchedDays.associateWith { date ->
-            val local = nowLocal.minusDays(ChronoUnit.DAYS.between(date, ctx.today))
-            val zone = ctx.zones.zoneAt(ctx.zones.window(date, ctx.rollover).startMs)
-            val cut = local.atZone(zone).toInstant().toEpochMilli()
-            val hourStart = minOf(cut, local.truncatedTo(ChronoUnit.HOURS).atZone(zone).toInstant().toEpochMilli())
-            if (cut <= hourStart) 0L else activeUseBetween(ctx, hourStart, cut, activePkgs)
+            PartialDayBaseline.currentHourOn(date, nowLocal, ctx.rollover, ctx.zones)
+                ?.let { activeUseBetween(ctx, it.startMs, it.endMs, activePkgs) } ?: 0L
         }
         // A matched day with no hourly rows was a confirmed zero-use day.
         val withZeros = base.matchedDays.associateWith { (prior[it] ?: 0L) + (partialHour[it] ?: 0L) }
@@ -715,6 +716,9 @@ class DerivedRepository(
         private const val MAX_MARGIN_DOUBLINGS = 5
         /** A changed episode crossing a range start widens the range at most this many days back per run. */
         private const val MAX_SPILL_RESTARTS = 16
+        private val SCREEN_EVENT_TYPES = setOf(
+            UsageEventTypes.SCREEN_INTERACTIVE, UsageEventTypes.SCREEN_NON_INTERACTIVE, UsageEventTypes.KEYGUARD_SHOWN, UsageEventTypes.KEYGUARD_HIDDEN,
+        )
         private val FOREGROUND_TYPES = setOf(UsageEventTypes.ACTIVITY_RESUMED, UsageEventTypes.ACTIVITY_PAUSED, UsageEventTypes.ACTIVITY_STOPPED)
     }
 }

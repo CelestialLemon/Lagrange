@@ -331,7 +331,7 @@ object SessionReconstructor {
                 )
             }
 
-            var segments = cleanChain(raw.slices, frictionUsed)
+            var segments = cleanChain(raw.slices, frictionUsed, raw.activeSpans)
 
             val entry = segments.firstOrNull { !it.isBlockedAttempt && !isTransient(it.pkgId) }
                 ?: segments.firstOrNull { !isTransient(it.pkgId) }
@@ -386,7 +386,7 @@ object SessionReconstructor {
          * brief system dialog joined. Friction is matched to the original stretches *before* joining, so a blocked open
          * followed by a quick hop and a real reopen of the same app stays two segments (the reopen still counts).
          */
-        fun cleanChain(slices: List<Fg>, frictionUsed: MutableSet<Int> = HashSet()): List<Segment> {
+        fun cleanChain(slices: List<Fg>, frictionUsed: MutableSet<Int> = HashSet(), activeSpans: List<Span> = emptyList()): List<Segment> {
             if (slices.isEmpty()) return emptyList()
             // Custom Tabs opened straight from an app belong to that app (Reddit → link → Reddit stays Reddit).
             val attributed = ArrayList<Pair<Long, Span>>(slices.size)
@@ -401,8 +401,11 @@ object SessionReconstructor {
             val stretches = ArrayList<Segment>()
             for ((pkg, span) in attributed) {
                 val last = stretches.lastOrNull()
-                // Only back-to-back activities of one app form a stretch; a screen-off gap starts a new one (a reopen).
-                if (last != null && last.pkgId == pkg && span.startMs <= last.endMs) stretches[stretches.lastIndex] = last.copy(spans = last.spans + span)
+                // Consecutive activities of one app form a stretch (a splash handing over to the main activity leaves a
+                // few ms between them); only a screen-off gap starts a new one (a reopen).
+                val sameScreenOn = span.startMs <= (last?.endMs ?: Long.MIN_VALUE) ||
+                    (last != null && activeSpans.any { it.startMs <= last.endMs && span.startMs <= it.endMs })
+                if (last != null && last.pkgId == pkg && sameScreenOn) stretches[stretches.lastIndex] = last.copy(spans = last.spans + span)
                 else stretches += Segment(pkg, listOf(span))
             }
             val joined = scrubBlocked(stretches, frictionUsed)
@@ -516,8 +519,10 @@ object SessionReconstructor {
                 if (pending != null) return Trigger(TriggerEvidence.PENDING_NOTIFICATION, entryPkg, pending.id)
             }
             // Spec §4.1: alerts count within [-60 s, 0] of the unlock, taps within [-5 s, +15 s]: that's what had to be seen.
+            // Only up to where a tap could still have counted: a short episode (or a glance) isn't "partially covered"
+            // just because its listener heartbeat came at its screen-off.
             val from = unlockMs - maxOf(rules.alertBeforeMs, rules.clickBeforeMs)
-            val to = unlockMs + rules.clickAfterMs
+            val to = if (clicksAllowed) minOf(unlockMs + rules.clickAfterMs, endMs) else unlockMs
             val covered = Spans.coveredMs(listenerSpans, from, to) >= to - from
             return when {
                 covered -> Trigger(TriggerEvidence.NO_OBSERVED_TRIGGER, null, null)

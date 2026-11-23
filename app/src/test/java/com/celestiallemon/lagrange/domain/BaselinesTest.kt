@@ -95,6 +95,22 @@ class BaselinesTest {
     }
 
     @Test
+    fun `the current hour on a past day uses that day's own minute, zone and calendar date`() {
+        val ny = ZoneId.of("America/New_York")
+        fun ms(s: String, z: ZoneId = ny) = LocalDateTime.parse(s).atZone(z).toInstant().toEpochMilli()
+        val fixed = ZoneTimeline.fixed(ny)
+        // 02:30 after midnight belongs to the previous logical day; on 2026-03-08 that minute was skipped.
+        val now = LocalDateTime.parse("2026-03-15T02:30")
+        assertNull(PartialDayBaseline.currentHourOn(LocalDate.parse("2026-03-07"), now, 4, fixed))
+        assertEquals(Span(ms("2026-03-01T02:00"), ms("2026-03-01T02:30")), PartialDayBaseline.currentHourOn(LocalDate.parse("2026-02-28"), now, 4, fixed))
+        // Mid-day travel NY → LA at 15:00 EST: 16:30 that day was Pacific time, as the hourly buckets saw it.
+        val la = ZoneId.of("America/Los_Angeles")
+        val trip = ZoneTimeline(listOf(0L to ny, ms("2026-11-20T15:00") to la, ms("2026-11-21T09:00", la) to ny), ny)
+        val afternoon = LocalDateTime.parse("2026-11-23T16:30")
+        assertEquals(Span(ms("2026-11-20T16:00", la), ms("2026-11-20T16:30", la)), PartialDayBaseline.currentHourOn(LocalDate.parse("2026-11-20"), afternoon, 4, trip))
+    }
+
+    @Test
     fun `the slice is hidden while the full-day baseline is`() {
         val zone = ZoneId.of("Asia/Kolkata")
         val cutoff = PartialDayBaseline.cutoff(LocalDateTime.parse("2026-11-23T14:30").atZone(zone).toInstant().toEpochMilli(), 4, zone)

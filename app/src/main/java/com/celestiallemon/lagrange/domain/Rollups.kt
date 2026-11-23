@@ -481,6 +481,22 @@ data class SliceBaseline(val todayMs: Long, val medianMs: Long?, val days: Int, 
  * weekday/weekend days, built from their hourly buckets (the current hour pro-rated).
  */
 object PartialDayBaseline {
+    /**
+     * On logical day [date], the current hour up to the wall-clock minute [now] shows today: `[hour start, cut)` as
+     * instants, in the zone in force at that moment of that day. After midnight but before the rollover the minute
+     * falls on the next calendar date. Null when that minute never happened that day (a spring-forward gap) or the
+     * hour has no length.
+     */
+    fun currentHourOn(date: LocalDate, now: java.time.LocalDateTime, rolloverHour: Int, zones: ZoneTimeline): Span? {
+        val local = (if (now.hour < rolloverHour) date.plusDays(1) else date).atTime(now.toLocalTime())
+        val dayZone = zones.zoneAt(zones.window(date, rolloverHour).startMs)
+        val zone = zones.zoneAt(local.atZone(dayZone).toInstant().toEpochMilli())
+        if (zone.rules.getTransition(local)?.isGap == true) return null
+        val cut = local.atZone(zone).toInstant().toEpochMilli()
+        val hourStart = minOf(cut, local.truncatedTo(ChronoUnit.HOURS).atZone(zone).toInstant().toEpochMilli())
+        return if (cut > hourStart) Span(hourStart, cut) else null
+    }
+
     fun cutoff(nowMs: Long, rolloverHour: Int, zone: ZoneId): SliceCutoff {
         val z = Instant.ofEpochMilli(nowMs).atZone(zone)
         val slot = (z.hour - rolloverHour + 24) % 24
