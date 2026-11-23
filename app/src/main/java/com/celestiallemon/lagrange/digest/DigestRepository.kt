@@ -46,7 +46,8 @@ class DigestRepository(
     suspend fun composeDaily(dueAtMs: Long? = null): Digest? = read {
         val now = clock()
         val ctx = derived.analyticsContext()
-        val anchor = dueAtMs?.coerceAtMost(now) ?: now
+        // The supplied due instant is kept even if the wall clock was moved back: the run is about its occurrence.
+        val anchor = dueAtMs ?: now
         val anchorDate = ctx.zones.dateOf(anchor, ctx.rolloverHour)
         val anchorStart = ctx.zones.window(anchorDate, ctx.rolloverHour).startMs
         val target = DigestComposer.dailyTarget(anchor, anchorDate, anchorStart)
@@ -80,7 +81,8 @@ class DigestRepository(
     suspend fun composeWeekly(dueAtMs: Long? = null): Digest? = read {
         val now = clock()
         val ctx = derived.analyticsContext()
-        val anchor = dueAtMs?.coerceAtMost(now) ?: now
+        // The supplied due instant is kept even if the wall clock was moved back: the run is about its occurrence.
+        val anchor = dueAtMs ?: now
         val anchorDate = ctx.zones.dateOf(anchor, ctx.rolloverHour)
         val (current, previous) = DigestComposer.weeklyRanges(anchorDate)
         val days = days(ctx, DateRange(previous.first(), current.last()))

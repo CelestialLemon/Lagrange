@@ -20,6 +20,7 @@ class WidgetStateCalculatorTest {
         coverage: DayCoverage? = DayCoverage.COMPLETE,
         status: DayStatus? = DayStatus.NORMAL,
         lastHarvest: Long? = now - 10 * min,
+        dataThrough: Long? = lastHarvest,
         friction: Boolean = true,
         a11y: Boolean = true,
         boost: Long? = null,
@@ -29,7 +30,7 @@ class WidgetStateCalculatorTest {
     ) = WidgetInput(
         nowMs = now, hasUsageAccess = access, hasRollup = rollup, distractingMs = distracting, budgetMs = budget,
         dayCoverage = coverage, dayStatus = status, inProgressStartMs = inProgress, lastEndedMs = lastEnded,
-        longestFocusGapMs = 95 * min, lastHarvestAtMs = lastHarvest, frictionEnabled = friction,
+        longestFocusGapMs = 95 * min, lastHarvestAtMs = lastHarvest, dataThroughMs = dataThrough, frictionEnabled = friction,
         accessibilityConnected = a11y, focusBoostUntilMs = boost, snoozeUntilMs = snooze,
     )
 
@@ -101,6 +102,10 @@ class WidgetStateCalculatorTest {
         assertEquals("—", stale.streakText)
         // Over budget stays over: the recorded part alone already passed it.
         assertEquals(WidgetStatus.OVER_BUDGET, WidgetStateCalculator.compute(input(distracting = 2 * hour, lastHarvest = now - 3 * hour), clock).status)
+        // A harvest that landed without a rebuild doesn't make hours-old totals current.
+        val unbuilt = WidgetStateCalculator.compute(input(lastHarvest = now - 5 * min, dataThrough = now - 3 * hour, lastEnded = now - 4 * hour), clock)
+        assertEquals("As of T+-180", unbuilt.statusLabel)
+        assertEquals("—", unbuilt.streakText)
         // Fresh data redraws itself when it would go stale.
         val fresh = WidgetStateCalculator.compute(input(lastHarvest = now - 10 * min), clock)
         assertEquals(now - 10 * min + WidgetStateCalculator.STALE_TAIL_MS + 1, fresh.nextChangeAtMs)

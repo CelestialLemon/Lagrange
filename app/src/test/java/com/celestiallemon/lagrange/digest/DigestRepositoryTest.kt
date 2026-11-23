@@ -128,4 +128,13 @@ class DigestRepositoryTest {
         // Run on time on Monday's own schedule, the key would be the next week.
         assertEquals("2026-W48", repo.composeWeekly()!!.key)
     }
+
+    @Test
+    fun `a due instant ahead of a clock moved back is kept, not pulled to now`() = runBlocking {
+        recordedThrough(now)
+        val tuesday = today.plusDays(1)
+        (7 downTo 1).forEach { rollup(tuesday.minusDays(it.toLong()), 30) }
+        // The run was due Tuesday 20:00, but the wall clock now reads Monday 21:00.
+        assertEquals("2026-W48", repo.composeWeekly(dueAtMs = at(tuesday, 20))!!.key)
+    }
 }

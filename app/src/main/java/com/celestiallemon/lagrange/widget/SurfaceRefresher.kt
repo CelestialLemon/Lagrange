@@ -4,6 +4,7 @@ import android.app.Application
 import android.util.Log
 import androidx.glance.appwidget.GlanceAppWidgetManager
 import androidx.glance.appwidget.updateAll
+import androidx.room3.withReadTransaction
 import com.celestiallemon.lagrange.AppGraph
 import com.celestiallemon.lagrange.data.IngestionKeys
 import com.celestiallemon.lagrange.data.db.DayCoverage
@@ -131,15 +132,17 @@ class SurfaceRefresher(private val app: Application, private val graph: AppGraph
         val prefs = graph.preferences.current()
         val live = graph.friction.liveStatus.value
         val hasAccess = AndroidUsageEventSource.hasUsageAccess(app)
-        val dao = graph.database.derivedDao()
-        val today = graph.derived.dateOf(now).toString()
-        val rollup = dao.dailyRollup(today)
-        val unlocked = if (rollup == null) emptyList() else dao.sessionsFor(today).filter { !it.isGlanceOnly }.sortedBy { it.startMs }
-        val last = unlocked.lastOrNull()
-        val inProgress = last?.takeIf { it.contextFlags?.contains("IN_PROGRESS") == true }
-        val lastEnded = unlocked.lastOrNull { it.contextFlags?.contains("IN_PROGRESS") != true }
-        fun wall(untilElapsed: Long?) = untilElapsed?.takeIf { it > nowElapsed }?.let { now + (it - nowElapsed) }
-        WidgetStateCalculator.compute(
+        // Rollup, sessions and the derived watermark from one snapshot, so freshness describes what is shown.
+        val input = graph.database.withReadTransaction {
+            val dao = graph.database.derivedDao()
+            val ctx = graph.derived.analyticsContext()
+            val today = ctx.zones.dateOf(now, ctx.rolloverHour).toString()
+            val rollup = dao.dailyRollup(today)
+            val unlocked = if (rollup == null) emptyList() else dao.sessionsFor(today).filter { !it.isGlanceOnly }.sortedBy { it.startMs }
+            val last = unlocked.lastOrNull()
+            val inProgress = last?.takeIf { it.contextFlags?.contains("IN_PROGRESS") == true }
+            val lastEnded = unlocked.lastOrNull { it.contextFlags?.contains("IN_PROGRESS") != true }
+            fun wall(untilElapsed: Long?) = untilElapsed?.takeIf { it > nowElapsed }?.let { now + (it - nowElapsed) }
             WidgetInput(
                 nowMs = now,
                 hasUsageAccess = hasAccess,
@@ -152,13 +155,14 @@ class SurfaceRefresher(private val app: Application, private val graph: AppGraph
                 lastEndedMs = lastEnded?.endMs,
                 longestFocusGapMs = rollup?.longestFocusGapMs ?: 0,
                 lastHarvestAtMs = graph.database.ingestionStateDao().get(IngestionKeys.LAST_HARVEST_AT_MS),
+                dataThroughMs = ctx.derivedThroughMs.takeIf { it != Long.MIN_VALUE },
                 frictionEnabled = prefs.frictionEnabled,
                 accessibilityConnected = LagrangeAccessibilityService.readyState.value,
                 focusBoostUntilMs = wall(live.focusBoostUntilElapsedMs),
                 snoozeUntilMs = wall(live.snoozeUntilElapsedMs),
-            ),
-            clock = { formatClock(it) },
-        )
+            )
+        }
+        WidgetStateCalculator.compute(input, clock = { formatClock(it) })
     }
 
     private companion object {

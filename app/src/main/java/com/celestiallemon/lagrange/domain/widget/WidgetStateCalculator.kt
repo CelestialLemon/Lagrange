@@ -20,6 +20,11 @@ data class WidgetInput(
     val lastEndedMs: Long? = null,
     val longestFocusGapMs: Long = 0,
     val lastHarvestAtMs: Long? = null,
+    /**
+     * How far the derived numbers shown (rollup, sessions) actually reach; null when nothing was derived. A harvest
+     * that landed without a rebuild doesn't move it, so it is what freshness is judged by.
+     */
+    val dataThroughMs: Long? = null,
     val frictionEnabled: Boolean = false,
     val accessibilityConnected: Boolean = false,
     val focusBoostUntilMs: Long? = null,
@@ -83,13 +88,13 @@ object WidgetStateCalculator {
 
     fun compute(input: WidgetInput, clock: (Long) -> String): WidgetState {
         val badge = badge(input, clock)
-        val lastHarvest = input.lastHarvestAtMs
-        val tailStale = lastHarvest == null || input.nowMs - lastHarvest > STALE_TAIL_MS
+        val dataThrough = input.dataThroughMs
+        val tailStale = dataThrough == null || input.nowMs - dataThrough > STALE_TAIL_MS
         val nextChange = listOfNotNull(
             input.focusBoostUntilMs?.takeIf { it > input.nowMs },
             input.snoozeUntilMs?.takeIf { it > input.nowMs },
-            // Redraw when the data goes stale, so "On track" can't outlive the last harvest unnoticed.
-            lastHarvest?.let { it + STALE_TAIL_MS + 1 }?.takeIf { it > input.nowMs },
+            // Redraw when the data goes stale, so "On track" can't outlive the last rebuild unnoticed.
+            dataThrough?.let { it + STALE_TAIL_MS + 1 }?.takeIf { it > input.nowMs },
         ).minOrNull()
         val dayGap = input.dayCoverage == DayCoverage.PARTIAL_HARVEST || input.dayStatus == DayStatus.UNCERTAIN_COVERAGE
         val (streakLabel, streakText) = if (tailStale || dayGap) "Phone-free" to "—" else streak(input, clock)
@@ -120,8 +125,8 @@ object WidgetStateCalculator {
         val label = when (status) {
             WidgetStatus.OVER_BUDGET -> "Over by ${DigestComposer.duration(used - budget)}"
             WidgetStatus.COVERAGE_GAP -> when {
-                harvestStale || dayGap || lastHarvest == null -> "Coverage gap"
-                else -> "As of ${clock(lastHarvest)}"
+                harvestStale || dayGap || dataThrough == null -> "Coverage gap"
+                else -> "As of ${clock(dataThrough)}"
             }
             WidgetStatus.NEAR_BUDGET -> if (used >= budget) "At budget" else "Near budget · ${DigestComposer.duration(budget - used)} left"
             else -> if (budget > 0) "On track · ${DigestComposer.duration(budget - used)} left" else "On track"

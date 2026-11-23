@@ -41,16 +41,38 @@ class DigestService(
     suspend fun runScheduled(kind: DigestKind, dueAtMs: Long? = null): Outcome {
         if (!poster.canPost()) return Outcome.NOTIFICATIONS_OFF
         val digest = compose(kind, dueAtMs) ?: return Outcome.NOTHING_TO_SAY
-        if (!claim(kind, digest.key)) return Outcome.ALREADY_POSTED
-        val posted = try {
-            poster.post(digest)
+        // Claim, post and give back as one non-cancellable step: a cancellation can't land between a committed
+        // claim and the post (which would make the retry skip a digest that was never shown).
+        return withContext(NonCancellable) {
+            claimPostRelease(
+                claim = { claim(kind, digest.key) },
+                post = { poster.post(digest) },
+                release = { release(kind, digest.key) },
+                posted = Outcome.POSTED,
+                claimed = Outcome.ALREADY_POSTED,
+                failed = Outcome.NOTIFICATIONS_OFF,
+            )
+        }
+    }
+
+    private suspend fun <T> claimPostRelease(
+        claim: suspend () -> Boolean,
+        post: () -> Boolean,
+        release: suspend () -> Unit,
+        posted: T,
+        claimed: T,
+        failed: T,
+    ): T {
+        if (!claim()) return claimed
+        val ok = try {
+            post()
         } catch (e: Throwable) {
-            withContext(NonCancellable) { release(kind, digest.key) }
+            release()
             throw e
         }
-        if (posted) return Outcome.POSTED
-        release(kind, digest.key)
-        return Outcome.NOTIFICATIONS_OFF
+        if (ok) return posted
+        release()
+        return failed
     }
 
     /** "Preview / Send test digest": posts what the digest would say right now, without claiming it. */
@@ -69,10 +91,16 @@ class DigestService(
         val last = lastHarvestAtMs() ?: return false
         val silent = clock() - last
         if (silent <= gapAlertMs || !poster.canPost()) return false
-        if (!claimCoverageAlert(last)) return false
-        if (poster.postCoverageAlert(silent / HOUR_MS)) return true
-        releaseCoverageAlert(last)
-        return false
+        return withContext(NonCancellable) {
+            claimPostRelease(
+                claim = { claimCoverageAlert(last) },
+                post = { poster.postCoverageAlert(silent / HOUR_MS) },
+                release = { releaseCoverageAlert(last) },
+                posted = true,
+                claimed = false,
+                failed = false,
+            )
+        }
     }
 
     companion object {

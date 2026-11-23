@@ -42,24 +42,36 @@ class DigestWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         } catch (_: StartupFailedException) {
             return Result.failure() // never read an unrecovered database
         }
-        val prefs = graph.preferences.current()
-        if (!DigestScheduler.enabled(prefs, kind)) return Result.success()
-        try {
-            // Fresh numbers first; a failed harvest still leaves whatever was derived before.
-            runCatching { graph.harvestAndDerive(HarvestTrigger.PERIODIC, recomputeInline = true) }
-                .onFailure { if (it is CancellationException) throw it }
-            val dueAt = inputData.getLong(KEY_DUE_AT_MS, -1L).takeIf { it > 0 }
-            val outcome = graph.digests.runScheduled(kind, dueAt)
-            Log.i(TAG, "$kind digest: $outcome")
-            runCatching { graph.digests.checkCoverage() }.onFailure { if (it is CancellationException) throw it }
+        // Even when this kind was switched off meanwhile, the run ends through the locked hand-off: it re-reads the
+        // settings there, so an off-then-on toggle while this ran (which ensureScheduled left alone) still queues the
+        // next occurrence.
+        if (DigestScheduler.enabled(graph.preferences.current(), kind)) {
+            try {
+                // Fresh numbers first; a failed harvest still leaves whatever was derived before.
+                runCatching { graph.harvestAndDerive(HarvestTrigger.PERIODIC, recomputeInline = true) }
+                    .onFailure { if (it is CancellationException) throw it }
+                val dueAt = inputData.getLong(KEY_DUE_AT_MS, -1L).takeIf { it > 0 }
+                val outcome = graph.digests.runScheduled(kind, dueAt)
+                Log.i(TAG, "$kind digest: $outcome")
+                runCatching { graph.digests.checkCoverage() }.onFailure { if (it is CancellationException) throw it }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "$kind digest failed", e)
+                if (runAttemptCount < MAX_RETRIES) return Result.retry()
+            }
+        }
+        return try {
+            DigestScheduler.scheduleNext(applicationContext, kind) { DigestScheduler.Settings.of(graph.preferences.current()) }
+            Result.success()
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            Log.e(TAG, "$kind digest failed", e)
-            if (runAttemptCount < MAX_RETRIES) return Result.retry()
+            // This run still owns the chain: retrying it is the only way the schedule continues. Its digest is
+            // already claimed, so the retry posts nothing twice.
+            Log.e(TAG, "$kind hand-off failed", e)
+            Result.retry()
         }
-        DigestScheduler.scheduleNext(applicationContext, kind) { DigestScheduler.Settings.of(graph.preferences.current()) }
-        return Result.success()
     }
 
     companion object {

@@ -2,6 +2,7 @@ package com.celestiallemon.lagrange.digest
 
 import com.celestiallemon.lagrange.domain.digest.Digest
 import com.celestiallemon.lagrange.domain.digest.DigestKind
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -144,5 +145,28 @@ class DigestServiceTest {
         assertEquals(null, coverageClaim)
         // Once notifications work again the same silence is still alerted.
         assertTrue(service(Poster()).checkCoverage())
+    }
+
+    @Test
+    fun `a cancellation landing on the claim still posts, so a retry can't skip an unseen digest`() = runBlocking {
+        val poster = Poster()
+        var outer: kotlinx.coroutines.Job? = null
+        val s = DigestService(
+            compose = { kind, _ -> digest?.copy(kind = kind) },
+            claim = { kind, key ->
+                outer!!.cancel() // e.g. WorkManager stops the worker right as DataStore commits the claim
+                claims[kind] = key
+                true
+            },
+            release = { kind, key -> if (claims[kind] == key) claims.remove(kind) },
+            poster = poster,
+            lastHarvestAtMs = { lastHarvest },
+            claimCoverageAlert = { true },
+            clock = { now },
+        )
+        outer = launch { s.runScheduled(DigestKind.DAILY) }
+        outer.join()
+        assertEquals(1, poster.posted.size)
+        assertEquals("2026-11-24", claims[DigestKind.DAILY])
     }
 }

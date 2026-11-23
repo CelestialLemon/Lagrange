@@ -46,6 +46,9 @@ class FocusBoostTileService : TileService() {
     /** The friction switch as last observed while listening; read on click without suspending. */
     @Volatile private var frictionEnabled = false
 
+    /** True once [frictionEnabled] reflects a real preference emission (not the default). */
+    @Volatile private var hydrated = false
+
     override fun onStartListening() {
         super.onStartListening()
         listening?.cancel()
@@ -75,6 +78,7 @@ class FocusBoostTileService : TileService() {
                 ticks,
             ) { _, enabled, _, _ -> enabled }.collect { enabled ->
                 frictionEnabled = enabled
+                hydrated = true
                 render()
             }
         }
@@ -102,9 +106,13 @@ class FocusBoostTileService : TileService() {
             openApp(Destination.TODAY)
             return
         }
-        // Read the friction switch fresh: a newly bound tile may not have seen its first preference emission yet,
-        // and a stale "off" would misroute a boost tap to setup.
-        val service = this
+        // Normally the tile already observed the friction switch while listening, so the tap is handled right here
+        // in the click callback (setup must launch while System UI's click token is valid). Only a tap that beats
+        // the first preference emission reads it first, so a stale default "off" can't misroute a boost to setup.
+        if (hydrated) {
+            act(frictionEnabled)
+            return
+        }
         graph.applicationScope.launch(Dispatchers.Main.immediate) {
             val enabled = try {
                 graph.preferences.current().frictionEnabled
@@ -115,16 +123,21 @@ class FocusBoostTileService : TileService() {
                 frictionEnabled
             }
             frictionEnabled = enabled
-            val live = graph.friction.liveStatus.value
-            val elapsed = SystemClock.elapsedRealtime()
-            val ready = enabled && LagrangeAccessibilityService.readyState.value
-            when (FocusBoostTileModel.onClick(ready, live.focusBoostRemainingMs(elapsed), live.snoozeRemainingMs(elapsed))) {
-                TileAction.OPEN_SETUP -> service.openApp(Destination.FRICTION)
-                TileAction.ACTIVATE_BOOST -> runCommand { graph.friction.activateFocusBoost1h() }
-                // Snoozing ends the boost in the same engine step (one persisted state change, never both active).
-                TileAction.SNOOZE -> runCommand { graph.friction.activateSnooze1h() }
-                TileAction.CANCEL_SNOOZE -> runCommand { graph.friction.cancelSnooze() }
-            }
+            hydrated = true
+            act(enabled)
+        }
+    }
+
+    private fun act(enabled: Boolean) {
+        val live = graph.friction.liveStatus.value
+        val elapsed = SystemClock.elapsedRealtime()
+        val ready = enabled && LagrangeAccessibilityService.readyState.value
+        when (FocusBoostTileModel.onClick(ready, live.focusBoostRemainingMs(elapsed), live.snoozeRemainingMs(elapsed))) {
+            TileAction.OPEN_SETUP -> openApp(Destination.FRICTION)
+            TileAction.ACTIVATE_BOOST -> runCommand { graph.friction.activateFocusBoost1h() }
+            // Snoozing ends the boost in the same engine step (one persisted state change, never both active).
+            TileAction.SNOOZE -> runCommand { graph.friction.activateSnooze1h() }
+            TileAction.CANCEL_SNOOZE -> runCommand { graph.friction.cancelSnooze() }
         }
     }
 
