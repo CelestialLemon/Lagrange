@@ -52,7 +52,7 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
-private val Application.graph get() = (this as LagrangeApplication).graph
+internal val Application.graph get() = (this as LagrangeApplication).graph
 
 /** What the collectors have gathered so far, for Today and System & Data. */
 data class CollectorStats(
@@ -75,7 +75,7 @@ data class CollectorStats(
  * Waits for startup (database verified, restored preferences applied), then mirrors [source]. If startup failed it
  * never emits: the UI shows the recovery error from [AppGraph.startupState] instead.
  */
-private fun <T> AppGraph.afterReady(source: AppGraph.() -> Flow<T>): Flow<T> = flow {
+internal fun <T> AppGraph.afterReady(source: AppGraph.() -> Flow<T>): Flow<T> = flow {
     try {
         awaitReady()
     } catch (_: StartupFailedException) {
@@ -98,12 +98,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     val harvesting: StateFlow<Boolean> = graph.afterReady { harvester.running }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val lastHarvest: StateFlow<HarvestResult?> = graph.afterReady { harvester.lastResult }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
-    private val minuteTicks = flow {
-        while (true) {
-            emit(System.currentTimeMillis())
-            delay(60_000)
-        }
-    }
+    private val minuteTicks = minuteTickFlow()
 
     val stats: StateFlow<CollectorStats> = graph.afterReady {
         // Start of the current logical day; moves forward when the day rolls over while the app is open.
@@ -351,6 +346,14 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
 
     private companion object {
         const val GRANT_FLAGS = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    }
+}
+
+/** The wall clock, once a minute (and immediately on collection). */
+internal fun minuteTickFlow(): Flow<Long> = flow {
+    while (true) {
+        emit(System.currentTimeMillis())
+        delay(60_000)
     }
 }
 

@@ -20,6 +20,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonObject
 
 /** A plain snapshot of the user's preferences. */
@@ -30,9 +31,14 @@ data class UserPrefs(
     val backupTreeUri: String? = null,
     val lastBackupAtMs: Long? = null,
     val lastBackupStatus: String? = null,
+    /** Daily distracting-time budget. */
+    val dailyBudgetMs: Long = DEFAULT_DAILY_BUDGET_MS,
 ) {
     companion object {
         const val DEFAULT_ROLLOVER_HOUR = 4
+        const val DEFAULT_DAILY_BUDGET_MS = 60L * 60 * 1000
+        /** Budgets are whole minutes from 5 minutes to 12 hours. */
+        val BUDGET_RANGE_MS = 5L * 60 * 1000..12L * 60 * 60 * 1000
     }
 }
 
@@ -63,15 +69,46 @@ class LagrangePreferences(
 
     suspend fun current(): UserPrefs = prefs.first()
 
+    // History rows are written before the preference: the history is what past days are rebuilt from, and a crash
+    // between the two writes is repaired at startup ([repairFromHistory]) instead of leaving them disagreeing.
+
     suspend fun setRolloverHour(hour: Int) {
         require(hour in 0..23) { "rollover hour must be 0..23" }
-        val before = current().rolloverHour
-        store.edit { it[ROLLOVER_HOUR] = hour }
-        if (before != hour) {
+        if (current().rolloverHour != hour) {
             db.settingsHistoryDao().insert(
                 SettingsHistoryEntity(timestampUtcMs = clock(), settingKey = ROLLOVER_HOUR.name, valueJson = hour.toString()),
             )
         }
+        store.edit { it[ROLLOVER_HOUR] = hour }
+    }
+
+    /** Changes the daily distracting budget; every change is kept in `settings_history` so past days keep their budget. */
+    suspend fun setDailyBudgetMs(budgetMs: Long) {
+        require(budgetMs in UserPrefs.BUDGET_RANGE_MS) { "budget must be within ${UserPrefs.BUDGET_RANGE_MS}" }
+        if (current().dailyBudgetMs != budgetMs) {
+            db.settingsHistoryDao().insert(
+                SettingsHistoryEntity(timestampUtcMs = clock(), settingKey = DAILY_BUDGET_MS.name, valueJson = budgetMs.toString()),
+            )
+        }
+        store.edit { it[DAILY_BUDGET_MS] = budgetMs }
+    }
+
+    /**
+     * Brings the rollover hour and budget preferences in line with the latest `settings_history` row, finishing a
+     * change whose preference write was lost to a crash. Returns true if anything changed.
+     */
+    suspend fun repairFromHistory(): Boolean {
+        val history = db.settingsHistoryDao()
+        val rollover = history.lastWritten(HISTORY_ROLLOVER_HOUR)?.valueJson?.trim()?.toIntOrNull()?.takeIf { it in 0..23 }
+        val budget = history.lastWritten(HISTORY_DAILY_BUDGET_MS)?.valueJson?.trim()?.toLongOrNull()
+            ?.takeIf { it in UserPrefs.BUDGET_RANGE_MS }
+        val now = current()
+        if ((rollover == null || rollover == now.rolloverHour) && (budget == null || budget == now.dailyBudgetMs)) return false
+        store.edit {
+            if (rollover != null) it[ROLLOVER_HOUR] = rollover
+            if (budget != null) it[DAILY_BUDGET_MS] = budget
+        }
+        return true
     }
 
     suspend fun setOnboardingComplete(done: Boolean) = store.edit { it[ONBOARDING_COMPLETE] = done }
@@ -130,6 +167,7 @@ class LagrangePreferences(
             put(ROLLOVER_HOUR.name, JsonPrimitive(p.rolloverHour))
             put(ONBOARDING_COMPLETE.name, JsonPrimitive(p.onboardingComplete))
             put(USE_DYNAMIC_COLOR.name, JsonPrimitive(p.useDynamicColor))
+            put(DAILY_BUDGET_MS.name, JsonPrimitive(p.dailyBudgetMs))
         }
         return obj.toString()
     }
@@ -140,6 +178,7 @@ class LagrangePreferences(
             (obj[ROLLOVER_HOUR.name] as? JsonPrimitive)?.intOrNull?.takeIf { it in 0..23 }?.let { prefs[ROLLOVER_HOUR] = it }
             (obj[ONBOARDING_COMPLETE.name] as? JsonPrimitive)?.booleanOrNull?.let { prefs[ONBOARDING_COMPLETE] = it }
             (obj[USE_DYNAMIC_COLOR.name] as? JsonPrimitive)?.booleanOrNull?.let { prefs[USE_DYNAMIC_COLOR] = it }
+            (obj[DAILY_BUDGET_MS.name] as? JsonPrimitive)?.longOrNull?.takeIf { it in UserPrefs.BUDGET_RANGE_MS }?.let { prefs[DAILY_BUDGET_MS] = it }
         }
     }
 
@@ -149,6 +188,11 @@ class LagrangePreferences(
         private val ROLLOVER_HOUR = intPreferencesKey("rollover_hour")
         private val ONBOARDING_COMPLETE = booleanPreferencesKey("onboarding_complete")
         private val USE_DYNAMIC_COLOR = booleanPreferencesKey("use_dynamic_color")
+        private val DAILY_BUDGET_MS = longPreferencesKey("daily_budget_ms")
+
+        /** `settings_history.setting_key` values. */
+        const val HISTORY_ROLLOVER_HOUR = "rollover_hour"
+        const val HISTORY_DAILY_BUDGET_MS = "daily_budget_ms"
         private val BACKUP_TREE_URI = stringPreferencesKey("backup_tree_uri")
         private val LAST_BACKUP_AT_MS = longPreferencesKey("last_backup_at_ms")
         private val LAST_BACKUP_STATUS = stringPreferencesKey("last_backup_status")
@@ -185,6 +229,7 @@ class LagrangePreferences(
             backupTreeUri = this[BACKUP_TREE_URI],
             lastBackupAtMs = this[LAST_BACKUP_AT_MS],
             lastBackupStatus = this[LAST_BACKUP_STATUS],
+            dailyBudgetMs = this[DAILY_BUDGET_MS] ?: UserPrefs.DEFAULT_DAILY_BUDGET_MS,
         )
     }
 }

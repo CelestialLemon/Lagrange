@@ -1,0 +1,398 @@
+{
+    "formatVersion": 1,
+    "algorithmVersion": 1,
+    "logicalDate": "2026-11-23",
+    "zoneId": "Asia/Kolkata",
+    "rolloverHour": 4,
+    "windowStartMs": 1795386600000,
+    "windowEndMs": 1795473000000,
+    "dataEndMs": 1795411800000,
+    "apps": [
+        {
+            "id": 1,
+            "packageName": "com.google.android.apps.nexuslauncher",
+            "category": "NEUTRAL",
+            "systemSurface": true
+        },
+        {
+            "id": 2,
+            "packageName": "com.android.systemui",
+            "category": "NEUTRAL",
+            "systemSurface": true
+        },
+        {
+            "id": 3,
+            "packageName": "com.instagram.android",
+            "category": "DISTRACTING",
+            "systemSurface": false
+        },
+        {
+            "id": 4,
+            "packageName": "com.google.android.youtube",
+            "category": "DISTRACTING",
+            "systemSurface": false
+        },
+        {
+            "id": 5,
+            "packageName": "com.google.android.apps.maps",
+            "category": "UTILITY",
+            "systemSurface": false
+        },
+        {
+            "id": 6,
+            "packageName": "com.whatsapp",
+            "category": "NEUTRAL",
+            "systemSurface": false
+        },
+        {
+            "id": 7,
+            "packageName": "com.android.chrome",
+            "category": "NEUTRAL",
+            "systemSurface": false
+        },
+        {
+            "id": 8,
+            "packageName": "com.google.android.dialer",
+            "category": "UTILITY",
+            "systemSurface": false
+        },
+        {
+            "id": 9,
+            "packageName": "com.google.android.permissioncontroller",
+            "category": "NEUTRAL",
+            "systemSurface": true
+        },
+        {
+            "id": 10,
+            "packageName": "com.reddit.frontpage",
+            "category": "DISTRACTING",
+            "systemSurface": false
+        },
+        {
+            "id": 11,
+            "packageName": "com.zhiliaoapp.musically",
+            "category": "DISTRACTING",
+            "systemSurface": false
+        },
+        {
+            "id": 12,
+            "packageName": "com.android.settings",
+            "category": "UTILITY",
+            "systemSurface": false
+        }
+    ],
+    "classes": [],
+    "customTabClassIds": [],
+    "events": [
+        {
+            "t": 1795397400000,
+            "type": 17,
+            "pkg": 0,
+            "cls": 0,
+            "order": 1
+        },
+        {
+            "t": 1795397400000,
+            "type": 15,
+            "pkg": 0,
+            "cls": 0,
+            "order": 2
+        },
+        {
+            "t": 1795397404000,
+            "type": 16,
+            "pkg": 0,
+            "cls": 0,
+            "order": 3
+        },
+        {
+            "t": 1795398000000,
+            "type": 15,
+            "pkg": 0,
+            "cls": 0,
+            "order": 4
+        },
+        {
+            "t": 1795398001000,
+            "type": 18,
+            "pkg": 0,
+            "cls": 0,
+            "order": 5
+        },
+        {
+            "t": 1795398002000,
+            "type": 1,
+            "pkg": 6,
+            "cls": 60,
+            "order": 6
+        },
+        {
+            "t": 1795398242000,
+            "type": 2,
+            "pkg": 6,
+            "cls": 60,
+            "order": 7
+        },
+        {
+            "t": 1795398243000,
+            "type": 17,
+            "pkg": 0,
+            "cls": 0,
+            "order": 8
+        },
+        {
+            "t": 1795398243000,
+            "type": 16,
+            "pkg": 0,
+            "cls": 0,
+            "order": 9
+        },
+        {
+            "t": 1795401000000,
+            "type": 15,
+            "pkg": 0,
+            "cls": 0,
+            "order": 10
+        },
+        {
+            "t": 1795401001000,
+            "type": 18,
+            "pkg": 0,
+            "cls": 0,
+            "order": 11
+        },
+        {
+            "t": 1795401002000,
+            "type": 1,
+            "pkg": 5,
+            "cls": 50,
+            "order": 12
+        },
+        {
+            "t": 1795401062000,
+            "type": 2,
+            "pkg": 5,
+            "cls": 50,
+            "order": 13
+        },
+        {
+            "t": 1795401062000,
+            "type": 1,
+            "pkg": 4,
+            "cls": 40,
+            "order": 14
+        },
+        {
+            "t": 1795401902000,
+            "type": 2,
+            "pkg": 4,
+            "cls": 40,
+            "order": 15
+        },
+        {
+            "t": 1795401903000,
+            "type": 17,
+            "pkg": 0,
+            "cls": 0,
+            "order": 16
+        },
+        {
+            "t": 1795401903000,
+            "type": 16,
+            "pkg": 0,
+            "cls": 0,
+            "order": 17
+        },
+        {
+            "t": 1795408200000,
+            "type": 15,
+            "pkg": 0,
+            "cls": 0,
+            "order": 18
+        },
+        {
+            "t": 1795408201000,
+            "type": 18,
+            "pkg": 0,
+            "cls": 0,
+            "order": 19
+        },
+        {
+            "t": 1795408202000,
+            "type": 1,
+            "pkg": 3,
+            "cls": 30,
+            "order": 20
+        },
+        {
+            "t": 1795408210000,
+            "type": 2,
+            "pkg": 3,
+            "cls": 30,
+            "order": 21
+        },
+        {
+            "t": 1795408211000,
+            "type": 17,
+            "pkg": 0,
+            "cls": 0,
+            "order": 22
+        },
+        {
+            "t": 1795408211000,
+            "type": 16,
+            "pkg": 0,
+            "cls": 0,
+            "order": 23
+        }
+    ],
+    "notifications": [
+        {
+            "id": 1,
+            "pkg": 6,
+            "postedAtMs": 1795397700000,
+            "removedAtMs": 1795398002000,
+            "removalReason": "CLICK",
+            "importance": 4,
+            "ongoing": false,
+            "foregroundService": false,
+            "groupSummary": false,
+            "ambient": false,
+            "matchedInterruptionFilter": true,
+            "dndOrSilent": false
+        },
+        {
+            "id": 2,
+            "pkg": 3,
+            "postedAtMs": 1795408180000,
+            "removedAtMs": null,
+            "removalReason": "ACTIVE",
+            "importance": 4,
+            "ongoing": false,
+            "foregroundService": false,
+            "groupSummary": false,
+            "ambient": false,
+            "matchedInterruptionFilter": true,
+            "dndOrSilent": false
+        }
+    ],
+    "friction": [
+        {
+            "t": 1795408202000,
+            "pkg": 3,
+            "kind": "LAUNCH_PAUSE",
+            "pauseSec": 5,
+            "reactionMs": 800,
+            "outcome": "CLOSED_GO_HOME"
+        }
+    ],
+    "coverage": [
+        {
+            "kind": "NOTIFICATION_LISTENER",
+            "status": "ACTIVE",
+            "startMs": 1795383000000,
+            "endMs": 1795469400000
+        },
+        {
+            "kind": "USAGE_HARVEST",
+            "status": "ACTIVE",
+            "startMs": 1795383000000,
+            "endMs": 1795469400000
+        }
+    ],
+    "expected": [
+        {
+            "key": "1795397400000:g",
+            "startMs": 1795397400000,
+            "endMs": 1795397404000,
+            "activeDurationMs": 4000,
+            "pickups": 1,
+            "glance": true,
+            "trigger": "NO_OBSERVED_TRIGGER",
+            "entryPkg": null,
+            "archetype": "GLANCE",
+            "rabbitHoleReasons": [],
+            "segments": []
+        },
+        {
+            "key": "1795398001000:6",
+            "startMs": 1795398001000,
+            "endMs": 1795398243000,
+            "activeDurationMs": 242000,
+            "pickups": 1,
+            "glance": false,
+            "trigger": "OBSERVED_CLICK",
+            "entryPkg": 6,
+            "archetype": "FOCUSED",
+            "rabbitHoleReasons": [],
+            "segments": [
+                {
+                    "pkg": 6,
+                    "startMs": 1795398002000,
+                    "endMs": 1795398242000,
+                    "durationMs": 240000,
+                    "blockedMs": 0,
+                    "blocked": false,
+                    "trigger": "OBSERVED_CLICK"
+                }
+            ]
+        },
+        {
+            "key": "1795401001000:5",
+            "startMs": 1795401001000,
+            "endMs": 1795401903000,
+            "activeDurationMs": 902000,
+            "pickups": 1,
+            "glance": false,
+            "trigger": "NO_OBSERVED_TRIGGER",
+            "entryPkg": 5,
+            "archetype": "RABBIT_HOLE",
+            "rabbitHoleReasons": [
+                "HIJACKED_PICKUP"
+            ],
+            "segments": [
+                {
+                    "pkg": 5,
+                    "startMs": 1795401002000,
+                    "endMs": 1795401062000,
+                    "durationMs": 60000,
+                    "blockedMs": 0,
+                    "blocked": false,
+                    "trigger": "NO_OBSERVED_TRIGGER"
+                },
+                {
+                    "pkg": 4,
+                    "startMs": 1795401062000,
+                    "endMs": 1795401902000,
+                    "durationMs": 840000,
+                    "blockedMs": 0,
+                    "blocked": false,
+                    "trigger": null
+                }
+            ]
+        },
+        {
+            "key": "1795408201000:3",
+            "startMs": 1795408201000,
+            "endMs": 1795408211000,
+            "activeDurationMs": 2200,
+            "pickups": 1,
+            "glance": false,
+            "trigger": "RECENT_POSSIBLE_ALERT",
+            "entryPkg": 3,
+            "archetype": "BLOCKED_ATTEMPT",
+            "rabbitHoleReasons": [],
+            "segments": [
+                {
+                    "pkg": 3,
+                    "startMs": 1795408202000,
+                    "endMs": 1795408210000,
+                    "durationMs": 8000,
+                    "blockedMs": 7800,
+                    "blocked": true,
+                    "trigger": "RECENT_POSSIBLE_ALERT"
+                }
+            ]
+        }
+    ]
+}

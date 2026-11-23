@@ -8,6 +8,7 @@ import com.celestiallemon.lagrange.FakeResolver
 import com.celestiallemon.lagrange.FakeUsageEventSource
 import com.celestiallemon.lagrange.HOUR
 import com.celestiallemon.lagrange.MutableClock
+import com.celestiallemon.lagrange.data.DerivedDirty
 import com.celestiallemon.lagrange.data.IngestionKeys
 import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.db.CoverageStatus
@@ -327,5 +328,21 @@ class UsageStatsHarvesterTest {
         harvester().requestRescan()
         harvester().harvest(HarvestTrigger.TIME_CHANGED)
         assertEquals(2L, count())
+    }
+
+    @Test
+    fun `committed batches carry their derived rebuild request even when the run dies part-way`() = runBlocking {
+        source.events += listOf(ev(start - 13 * DAY), ev(start - 12 * DAY), ev(start - 2 * HOUR))
+        source.failFromMs = start - 5 * DAY
+        assertTrue(harvester(windowMs = DAY).harvest(HarvestTrigger.APP_OPEN) is HarvestResult.Unavailable)
+        assertEquals(2L, count())
+        // The rows that did commit are queued for derivation in the same transaction.
+        assertEquals(start - 13 * DAY - DerivedDirty.HARVEST_LOOKBACK_MS, db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_FROM_MS))
+        assertEquals(Long.MAX_VALUE, db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_TO_MS))
+
+        source.failFromMs = null
+        clock.now = start + HOUR
+        assertTrue(harvester(windowMs = DAY).harvest(HarvestTrigger.PERIODIC) is HarvestResult.Success)
+        assertEquals(start - 13 * DAY - DerivedDirty.HARVEST_LOOKBACK_MS, db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_FROM_MS))
     }
 }

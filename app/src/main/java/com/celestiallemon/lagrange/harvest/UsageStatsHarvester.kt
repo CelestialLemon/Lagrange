@@ -2,6 +2,7 @@ package com.celestiallemon.lagrange.harvest
 
 import android.util.Log
 import androidx.room3.withWriteTransaction
+import com.celestiallemon.lagrange.data.DerivedDirty
 import com.celestiallemon.lagrange.data.IngestionKeys
 import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.db.CoverageIntervalEntity
@@ -150,6 +151,8 @@ class UsageStatsHarvester(
             val backfillFrom = if (isBackfill) state.get(IngestionKeys.BACKFILL_EARLIEST_MS) ?: begin else null
             if (isBackfill) state.put(IngestionStateEntity(IngestionKeys.FIRST_HARVEST_AT_MS, now))
             recordCoverage(begin, now, backfillFrom, if (gap) lastHarvestAt else null)
+            // Coverage changed and the trailing day may hold late notification data: derive it with this commit.
+            DerivedDirty.mark(state, minOf(begin - DerivedDirty.HARVEST_LOOKBACK_MS, now - DerivedDirty.HARVEST_TRAIL_MS))
         }
         return HarvestResult.Success(seen, inserted, begin, now, isBackfill, gap)
     }
@@ -184,6 +187,8 @@ class UsageStatsHarvester(
             // backward clock jump comes back to the present. Lowering the cursor is always safe: it only re-reads.
             val next = if (run.rescan) run.maxSeen!! else maxOf(current ?: batchMax, batchMax)
             state.put(IngestionStateEntity(IngestionKeys.USAGE_CURSOR_MS, next))
+            // The rebuild request commits with the rows, so a death right after this batch can't strand them underived.
+            DerivedDirty.mark(state, batchMin - DerivedDirty.HARVEST_LOOKBACK_MS)
             if (run.backfill) {
                 val earliest = state.get(IngestionKeys.BACKFILL_EARLIEST_MS)
                 state.put(IngestionStateEntity(IngestionKeys.BACKFILL_EARLIEST_MS, minOf(earliest ?: batchMin, batchMin)))

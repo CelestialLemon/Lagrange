@@ -35,7 +35,7 @@ class HarvestWorker(context: Context, params: WorkerParameters) : CoroutineWorke
         val trigger = inputData.getString(KEY_TRIGGER)?.let { name -> HarvestTrigger.entries.firstOrNull { it.name == name } }
             ?: HarvestTrigger.PERIODIC
         return run(
-            harvest = { graph.harvester.harvest(trigger) },
+            harvest = { graph.harvestAndDerive(trigger, recomputeInline = true) },
             sideTasks = listOf({ graph.timezoneTracker.check() }, { graph.heartbeatListenerIfConnected() }),
         )
     }

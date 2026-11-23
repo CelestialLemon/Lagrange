@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
+import com.celestiallemon.lagrange.data.db.SettingsHistoryEntity
 import java.io.File
 import java.time.ZoneId
 import kotlinx.coroutines.CoroutineScope
@@ -51,9 +52,34 @@ class TimezoneAndPreferencesTest {
         assertFalse(tracker.check())
         zone = ZoneId.of("Europe/Berlin")
         now += 1000
+        db.ingestionStateDao().remove(IngestionKeys.DERIVED_PENDING_FROM_MS)
         assertTrue(tracker.check())
         assertEquals("Europe/Berlin", db.tzHistoryDao().latest()!!.zoneId)
+        // A zone change re-derives the days around it, in the same transaction as the tz_history row.
+        assertEquals(now - 2 * 24 * 60 * 60 * 1000L, db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_FROM_MS))
         assertEquals(3, db.tzHistoryDao().all().size)
+    }
+
+    @Test
+    fun `a settings change whose preference write was lost is finished from history at startup`() = runBlocking {
+        val p = prefs()
+        assertFalse(p.repairFromHistory())
+        val history = db.settingsHistoryDao()
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 1, settingKey = LagrangePreferences.HISTORY_DAILY_BUDGET_MS, valueJson = "${30 * 60_000L}"))
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 2, settingKey = LagrangePreferences.HISTORY_ROLLOVER_HOUR, valueJson = "6"))
+        assertTrue(p.repairFromHistory())
+        assertEquals(30 * 60_000L, p.current().dailyBudgetMs)
+        assertEquals(6, p.current().rolloverHour)
+        assertFalse(p.repairFromHistory())
+        // The clock was set back before the last change: the row written last wins, not the later timestamp.
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 100, settingKey = LagrangePreferences.HISTORY_ROLLOVER_HOUR, valueJson = "5"))
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 50, settingKey = LagrangePreferences.HISTORY_ROLLOVER_HOUR, valueJson = "7"))
+        assertTrue(p.repairFromHistory())
+        assertEquals(7, p.current().rolloverHour)
+        // A normal change writes history and preference together.
+        p.setDailyBudgetMs(45 * 60_000L)
+        assertEquals("${45 * 60_000L}", history.byKey(LagrangePreferences.HISTORY_DAILY_BUDGET_MS).last().valueJson)
+        assertFalse(p.repairFromHistory())
     }
 
     @Test
@@ -66,6 +92,24 @@ class TimezoneAndPreferencesTest {
         val history = db.settingsHistoryDao().all()
         assertEquals(1, history.size)
         assertEquals("5", history.single().valueJson)
+    }
+
+    @Test
+    fun `daily budget defaults to an hour, is range-checked and every change is kept in history`() = runBlocking {
+        val p = prefs()
+        assertEquals(60 * 60_000L, p.current().dailyBudgetMs)
+        p.setDailyBudgetMs(60 * 60_000L) // unchanged: no history row
+        p.setDailyBudgetMs(45 * 60_000L)
+        assertEquals(45 * 60_000L, p.current().dailyBudgetMs)
+        val rows = db.settingsHistoryDao().byKey(LagrangePreferences.HISTORY_DAILY_BUDGET_MS)
+        assertEquals(listOf("${45 * 60_000L}"), rows.map { it.valueJson })
+        assertTrue(runCatching { p.setDailyBudgetMs(60_000L) }.isFailure)
+        assertTrue(runCatching { p.setDailyBudgetMs(13 * 3_600_000L) }.isFailure)
+        assertEquals(45 * 60_000L, p.current().dailyBudgetMs)
+
+        val b = prefs()
+        b.importJson(p.exportJson())
+        assertEquals(45 * 60_000L, b.current().dailyBudgetMs)
     }
 
     @Test

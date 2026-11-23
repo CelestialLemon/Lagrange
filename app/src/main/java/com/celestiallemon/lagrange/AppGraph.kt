@@ -11,11 +11,14 @@ import com.celestiallemon.lagrange.backup.RestoreCoordinator
 import com.celestiallemon.lagrange.data.AndroidPackageMetaResolver
 import com.celestiallemon.lagrange.data.AppCatalogRepository
 import com.celestiallemon.lagrange.data.CoverageRepository
+import com.celestiallemon.lagrange.data.DerivedRepository
+import com.celestiallemon.lagrange.data.DerivedSettings
 import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.data.TimezoneTracker
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
+import com.celestiallemon.lagrange.harvest.HarvestResult
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import com.celestiallemon.lagrange.harvest.UsageStatsHarvester
 import com.celestiallemon.lagrange.notifications.NotificationRecorder
@@ -27,6 +30,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -85,6 +93,13 @@ class AppGraph(private val app: Application) {
 
     val timezoneTracker by lazy { TimezoneTracker(database) }
 
+    /** Sessions, segments and rollups, rebuilt from the raw ledger whenever something they depend on changes. */
+    val derived by lazy {
+        DerivedRepository(database, settings = { preferences.current().let { DerivedSettings(it.rolloverHour, it.dailyBudgetMs) } })
+    }
+
+    private val recomputeKicks = Channel<Unit>(Channel.CONFLATED)
+
     val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages, packageResolver) }
 
     val backups by lazy {
@@ -121,14 +136,87 @@ class AppGraph(private val app: Application) {
             } catch (e: Exception) {
                 Log.e(TAG, "startup housekeeping failed", e)
             }
+            startDerivedPipeline()
         }
+    }
+
+    /** Asks for a rebuild of whatever is marked dirty. Coalesced: bursts of requests run once. */
+    fun requestRecompute() {
+        recomputeKicks.trySend(Unit)
+    }
+
+    private suspend fun startDerivedPipeline() {
+        try {
+            preferences.repairFromHistory()
+            derived.ensureAlgorithmVersion()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "derived version check failed", e)
+        }
+        applicationScope.launch(Dispatchers.IO) {
+            for (kick in recomputeKicks) {
+                delay(RECOMPUTE_DEBOUNCE_MS)
+                try {
+                    derived.runPending()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "derived recompute failed; it stays queued", e)
+                }
+            }
+        }
+        // Rollover hour, budget and categories are reconciled against a persisted fingerprint (DerivedRepository
+        // .reconcileSettings), so a change made while nothing was listening, or just before the process died, still
+        // queues its rebuild. These watchers only make it prompt; tz changes mark dirty where tz_history is written.
+        applicationScope.launch {
+            combine(
+                preferences.prefs.map { it.rolloverHour to it.dailyBudgetMs }.distinctUntilChanged(),
+                database.packageDao().observeAll().map { rows -> rows.associate { it.id to it.category } }.distinctUntilChanged(),
+            ) { _, _ -> Unit }.collect {
+                try {
+                    if (derived.reconcileSettings()) requestRecompute()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "derived settings reconcile failed", e)
+                }
+            }
+        }
+        if (derived.hasPending()) requestRecompute()
+    }
+
+    /**
+     * Harvests, then rebuilds the stretch the new events touch. The harvester records that range in the same
+     * transactions as the rows themselves (reaching back far enough for episodes still open at the previous harvest
+     * and late notification metadata); this only wakes the processor.
+     */
+    suspend fun harvestAndDerive(trigger: HarvestTrigger, recomputeInline: Boolean = false): HarvestResult {
+        val result = harvester.harvest(trigger)
+        if (result is HarvestResult.Success) {
+            // Listener coverage only counts up to its last heartbeat; extend it to now before deriving.
+            runCatching { heartbeatListenerIfConnected() }.onFailure { if (it is CancellationException) throw it }
+            if (!recomputeInline) {
+                requestRecompute()
+            } else {
+                try {
+                    derived.runPending()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    // The harvest itself succeeded; the range stays queued for the next run.
+                    Log.e(TAG, "inline derived recompute failed", e)
+                }
+            }
+        }
+        return result
     }
 
     fun harvestInBackground(trigger: HarvestTrigger) {
         applicationScope.launch {
             try {
                 awaitReady()
-                harvester.harvest(trigger)
+                harvestAndDerive(trigger)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -192,5 +280,6 @@ class AppGraph(private val app: Application) {
 
     private companion object {
         const val TAG = "Lagrange"
+        const val RECOMPUTE_DEBOUNCE_MS = 1_500L
     }
 }
