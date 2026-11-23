@@ -151,6 +151,29 @@ object HourSlots {
         return (t.dateTimeAfter.hour - rolloverHour + 24) % 24
     }
 
+    /**
+     * As [repeatedSlot], but following the zones in force through the day (a travel day), the way the rollup itself
+     * assigns slot 24: the first fall-back overlap of whichever zone was in force when it happened.
+     */
+    fun repeatedSlot(window: DayWindow, rolloverHour: Int, zones: ZoneTimeline): Int? {
+        var a = window.startMs
+        while (a < window.endMs) {
+            val zone = zones.zoneAt(a)
+            val startZ = Instant.ofEpochMilli(a).atZone(zone)
+            if (startZ.offset != startZ.withEarlierOffsetAtOverlap().offset) {
+                return (startZ.hour - rolloverHour + 24) % 24
+            }
+            val b = minOf(zones.nextChangeAfter(a) ?: Long.MAX_VALUE, window.endMs)
+            var t = zone.rules.nextTransition(Instant.ofEpochMilli(a - 1))
+            while (t != null && t.instant.toEpochMilli() < b) {
+                if (t.isOverlap) return (t.dateTimeAfter.hour - rolloverHour + 24) % 24
+                t = zone.rules.nextTransition(t.instant)
+            }
+            a = b
+        }
+        return null
+    }
+
     const val REPEATED_SLOT = 24
 }
 

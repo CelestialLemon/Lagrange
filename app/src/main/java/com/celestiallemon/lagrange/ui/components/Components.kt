@@ -18,6 +18,9 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
@@ -51,6 +54,7 @@ fun LagrangeScreen(
     subtitle: String?,
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
+    onBack: (() -> Unit)? = null,
     content: LazyListScope.() -> Unit,
 ) {
     val glow = MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)
@@ -76,6 +80,13 @@ fun LagrangeScreen(
         ),
         verticalArrangement = Arrangement.spacedBy(Space.m),
     ) {
+        if (onBack != null) {
+            item(key = "back") {
+                FilledTonalIconButton(onClick = onBack) {
+                    Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back")
+                }
+            }
+        }
         item(key = "header") { ScreenHeader(eyebrow, title, subtitle) }
         content()
     }

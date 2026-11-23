@@ -62,6 +62,16 @@ import kotlinx.coroutines.withContext
 /** The settings that shape derived tables. */
 data class DerivedSettings(val rolloverHour: Int, val dailyBudgetMs: Long)
 
+/** See [DerivedRepository.analyticsContext]. Days from [firstUnsettled] on are drawn but never counted. */
+data class AnalyticsContext(
+    val zones: com.celestiallemon.lagrange.domain.ZoneTimeline,
+    val rolloverHour: Int,
+    val today: LocalDate,
+    val firstUnsettled: LocalDate,
+    val derivedThroughMs: Long,
+    val coverage: List<com.celestiallemon.lagrange.domain.CoverageSpan>,
+)
+
 /** Today's same-time-of-day comparison, for the Today screen. */
 data class TodayComparison(
     val date: LocalDate,
@@ -135,6 +145,9 @@ class DerivedRepository(
             var queued = false
             val rollover = state.get(IngestionKeys.DERIVED_ROLLOVER_HOUR)
             if (rollover != null && rollover != s.rolloverHour.toLong()) {
+                if (state.get(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR) == null) {
+                    state.put(IngestionStateEntity(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR, rollover))
+                }
                 markDirtyLocked(0, Long.MAX_VALUE) // every day boundary moved
                 queued = true
             }
@@ -187,10 +200,16 @@ class DerivedRepository(
         from to to
     }
 
-    private suspend fun finishActive() = db.withWriteTransaction {
+    private suspend fun finishActive(dataEnd: Long? = null, rollover: Int? = null, fullRebuild: Boolean = false) = db.withWriteTransaction {
         state.remove(IngestionKeys.DERIVED_ACTIVE_FROM_MS)
         state.remove(IngestionKeys.DERIVED_ACTIVE_TO_MS)
         state.remove(IngestionKeys.DERIVED_BASELINE_FROM_MS)
+        if (dataEnd != null) {
+            state.put(IngestionStateEntity(IngestionKeys.DERIVED_DATA_END_MS, dataEnd))
+        }
+        if (rollover != null && (fullRebuild || state.get(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR) == null)) {
+            state.put(IngestionStateEntity(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR, rollover.toLong()))
+        }
         state.put(IngestionStateEntity(IngestionKeys.DERIVED_LAST_RUN_AT_MS, clock()))
     }
 
@@ -261,7 +280,7 @@ class DerivedRepository(
     private suspend fun recompute(fromMs: Long, toMs: Long, restarts: Int = 0): Int {
         val ctx = context()
         if (ctx == null) {
-            finishActive()
+            finishActive(rollover = settings().rolloverHour, fullRebuild = true)
             return 0
         }
         val earliest = ctx.earliest
@@ -270,13 +289,15 @@ class DerivedRepository(
         val baselineFromMs = state.get(IngestionKeys.DERIVED_BASELINE_FROM_MS) ?: fromMs
         val baselineFirst = ctx.zones.dateOf(maxOf(minOf(baselineFromMs, fromMs), earliest), ctx.rollover)
         val baselineLast = minOf(maxOf(lastDate, baselineFirst).plusDays(BASELINE_TRAIL_DAYS), ctx.today)
+        val toEnd = toMs >= ctx.dataEnd
+        val fullRebuild = minOf(fromMs, baselineFromMs) <= earliest && toEnd
         if (firstDate > lastDate) {
             // Every chunk already committed (a run killed after its last chunk): only the baselines remain.
             refreshBaselines(ctx, baselineFirst, baselineLast)
-            finishActive()
+            finishActive(dataEnd = ctx.dataEnd.takeIf { toEnd }, rollover = ctx.rollover, fullRebuild = fullRebuild)
             return 0
         }
-        pruneOutside(ctx, fromMs <= earliest, toMs >= ctx.dataEnd, firstDate, lastDate)
+        pruneOutside(ctx, fromMs <= earliest, toEnd, firstDate, lastDate)
         val total = (ChronoUnit.DAYS.between(firstDate, lastDate) + 1).toInt()
         var done = 0
         _progress.value = RecomputeProgress(true, 0, total)
@@ -305,7 +326,7 @@ class DerivedRepository(
             d = chunkLast.plusDays(1)
         }
         refreshBaselines(ctx, baselineFirst, baselineLast)
-        finishActive()
+        finishActive(dataEnd = ctx.dataEnd.takeIf { toEnd }, rollover = ctx.rollover, fullRebuild = fullRebuild)
         Log.i(TAG, "rebuilt $total day(s) $firstDate..$lastDate")
         return total
     }
@@ -573,6 +594,61 @@ class DerivedRepository(
     suspend fun windowOf(date: LocalDate): com.celestiallemon.lagrange.domain.DayWindow = zoneTimeline().window(date, settings().rolloverHour)
 
     /**
+     * What Trends needs to read the derived tables honestly: the zone timeline, how far derived tables have caught up,
+     * the coverage spans, and the first logical day that isn't settled yet. A day is settled only when collection ran
+     * past its end, the derived tables were built under the current rollover hour up to that cutoff, and no rebuild
+     * touching it is still queued or running; until then its rollup may be clipped or built under old day boundaries.
+     */
+    suspend fun analyticsContext(): AnalyticsContext {
+        val s = settings()
+        val zones = zoneTimeline()
+        val now = clock()
+        val latest = db.rawUsageEventDao().latest()
+        val harvested = state.get(IngestionKeys.LAST_HARVEST_AT_MS)
+        val collectedEnd = listOfNotNull(latest, harvested).maxOrNull()
+        val derivedDataEnd = state.get(IngestionKeys.DERIVED_DATA_END_MS)
+        val appliedRollover = state.get(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR)?.toInt()
+            ?: state.get(IngestionKeys.DERIVED_ROLLOVER_HOUR)?.toInt()
+        val rolloverMismatch = appliedRollover != null && appliedRollover != s.rolloverHour
+        // Keep one consistent rollover (the one that built the stored rollups and hourly slots) until the rebuild lands.
+        val effectiveRollover = if (rolloverMismatch) appliedRollover else s.rolloverHour
+        val today = zones.dateOf(now, effectiveRollover)
+        val rebuildFrom = listOfNotNull(
+            state.get(IngestionKeys.DERIVED_PENDING_FROM_MS),
+            state.get(IngestionKeys.DERIVED_ACTIVE_FROM_MS),
+        ).minOrNull()
+        val baseDerivedEnd = when {
+            derivedDataEnd != null && collectedEnd != null -> minOf(derivedDataEnd, collectedEnd)
+            derivedDataEnd != null -> derivedDataEnd
+            else -> collectedEnd
+        }
+        val derivedThrough = when {
+            rolloverMismatch -> Long.MIN_VALUE
+            rebuildFrom != null && baseDerivedEnd != null -> minOf(baseDerivedEnd, rebuildFrom)
+            rebuildFrom != null -> rebuildFrom
+            else -> baseDerivedEnd ?: now
+        }
+        var unsettled = when {
+            rolloverMismatch -> UNSETTLED_ALL
+            baseDerivedEnd != null -> minOf(zones.dateOf(baseDerivedEnd, effectiveRollover), today)
+            else -> today
+        }
+        if (!rolloverMismatch && rebuildFrom != null) {
+            val rebuildDate = if (rebuildFrom <= 0L) UNSETTLED_ALL else zones.dateOf(rebuildFrom, effectiveRollover)
+            unsettled = minOf(unsettled, rebuildDate)
+        }
+        val coverageEnd = collectedEnd ?: now
+        return AnalyticsContext(
+            zones = zones,
+            rolloverHour = effectiveRollover,
+            today = today,
+            firstUnsettled = unsettled,
+            derivedThroughMs = derivedThrough,
+            coverage = db.coverageDao().all().map { it.toSpan(coverageEnd) },
+        )
+    }
+
+    /**
      * One logical day as a replayable fixture: the ledger slice the rebuild itself would read for that day (same
      * adaptive margins) plus its reconstruction.
      */
@@ -723,6 +799,8 @@ class DerivedRepository(
 
     companion object {
         private const val TAG = "LagrangeDerived"
+        /** Sentinel date before all real rollups, used when every day is unsettled (e.g. a pending rollover change). */
+        private val UNSETTLED_ALL: LocalDate = LocalDate.of(1, 1, 1)
         const val DEFAULT_CHUNK_DAYS = 3
         /** How far before/after a chunk the ledger is read so episodes crossing its edges reconstruct correctly. */
         const val LOOKBACK_MS = 12 * HOUR_MS

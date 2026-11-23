@@ -16,6 +16,7 @@ import com.celestiallemon.lagrange.data.DerivedSettings
 import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.data.TimezoneTracker
+import com.celestiallemon.lagrange.data.TrendsRepository
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
 import com.celestiallemon.lagrange.harvest.HarvestResult
@@ -94,9 +95,12 @@ class AppGraph(private val app: Application) {
     val timezoneTracker by lazy { TimezoneTracker(database) }
 
     /** Sessions, segments and rollups, rebuilt from the raw ledger whenever something they depend on changes. */
-    val derived by lazy {
-        DerivedRepository(database, settings = { preferences.current().let { DerivedSettings(it.rolloverHour, it.dailyBudgetMs) } })
-    }
+    private val derivedSettings: suspend () -> DerivedSettings = { preferences.current().let { DerivedSettings(it.rolloverHour, it.dailyBudgetMs) } }
+
+    val derived by lazy { DerivedRepository(database, settings = derivedSettings) }
+
+    /** Trends, the apps breakdown and the per-app deep dive, read from the derived tables. */
+    val trends by lazy { TrendsRepository(database, derived) }
 
     private val recomputeKicks = Channel<Unit>(Channel.CONFLATED)
 
