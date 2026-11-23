@@ -95,6 +95,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _health = MutableStateFlow(PermissionHealthChecker.check(app))
     val health: StateFlow<PermissionHealth> = _health
 
+    init {
+        viewModelScope.launch {
+            com.celestiallemon.lagrange.friction.LagrangeAccessibilityService.readyState.collect {
+                _health.value = PermissionHealthChecker.check(getApplication())
+            }
+        }
+    }
+
     val harvesting: StateFlow<Boolean> = graph.afterReady { harvester.running }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
     val lastHarvest: StateFlow<HarvestResult?> = graph.afterReady { harvester.lastResult }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
@@ -216,6 +224,10 @@ class CatalogViewModel(app: Application) : AndroidViewModel(app) {
 
     fun setCategory(packageName: String, category: AppCategory) = viewModelScope.launch {
         withContext(Dispatchers.IO) { graph.catalog.setCategory(packageName, category) }
+    }
+
+    fun setFrictionOverride(packageName: String, override: com.celestiallemon.lagrange.domain.friction.AppFrictionOverride?) = viewModelScope.launch {
+        withContext(Dispatchers.IO) { graph.catalog.setFrictionOverride(packageName, override) }
     }
 
     fun confirmAndFinishOnboarding() = viewModelScope.launch {

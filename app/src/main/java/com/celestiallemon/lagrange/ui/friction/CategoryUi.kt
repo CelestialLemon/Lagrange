@@ -8,10 +8,17 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -52,9 +59,15 @@ fun categoryColor(category: AppCategory): Color = when (category) {
 
 private val choosable = listOf(AppCategory.DISTRACTING, AppCategory.NEUTRAL, AppCategory.UTILITY, AppCategory.EXCLUDED)
 
-/** One app with its category choices laid out as chips. */
+/** One app with its category choices laid out as chips, and optional per-app friction controls. */
 @Composable
-fun AppCategoryRow(app: CatalogApp, onChange: (AppCategory) -> Unit) {
+fun AppCategoryRow(
+    app: CatalogApp,
+    showFrictionControls: Boolean = false,
+    onToggleFriction: ((Boolean) -> Unit)? = null,
+    onCustomizeFriction: (() -> Unit)? = null,
+    onChange: (AppCategory) -> Unit,
+) {
     Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = Space.l, vertical = Space.m)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -87,6 +100,41 @@ fun AppCategoryRow(app: CatalogApp, onChange: (AppCategory) -> Unit) {
                             ),
                         )
                     }
+                }
+            }
+            val canToggleFriction = showFrictionControls &&
+                (app.category == AppCategory.DISTRACTING || app.category == AppCategory.NEUTRAL) &&
+                onToggleFriction != null
+            if (canToggleFriction) {
+                Spacer(Modifier.height(Space.s))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Spacer(Modifier.height(Space.xs))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        val overrideSummary = buildList {
+                            app.frictionOverride?.fixedPauseSec?.let { add("${it}s fixed") }
+                            when (app.frictionOverride?.requireTimerPrompt) {
+                                true -> add("timer on")
+                                false -> add("timer hidden")
+                                null -> Unit
+                            }
+                        }.joinToString(" · ")
+                        Text(
+                            if (app.isFrictionEligible) "Launch pause on" else "Launch pause off",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (app.isFrictionEligible) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (overrideSummary.isNotEmpty()) {
+                            Text(overrideSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                    if (onCustomizeFriction != null) {
+                        IconButton(onClick = onCustomizeFriction) {
+                            Icon(Icons.Outlined.Tune, contentDescription = "Customize ${app.displayName} friction")
+                        }
+                        Spacer(Modifier.width(Space.xs))
+                    }
+                    Switch(checked = app.isFrictionEligible, onCheckedChange = onToggleFriction)
                 }
             }
         }

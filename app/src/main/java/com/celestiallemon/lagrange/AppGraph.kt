@@ -3,6 +3,7 @@ package com.celestiallemon.lagrange
 import android.app.Application
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.provider.Settings
 import android.util.Log
 import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.preferencesDataStoreFile
@@ -13,11 +14,14 @@ import com.celestiallemon.lagrange.data.AppCatalogRepository
 import com.celestiallemon.lagrange.data.CoverageRepository
 import com.celestiallemon.lagrange.data.DerivedRepository
 import com.celestiallemon.lagrange.data.DerivedSettings
+import com.celestiallemon.lagrange.data.FrictionRepository
 import com.celestiallemon.lagrange.data.Interner
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.data.TimezoneTracker
 import com.celestiallemon.lagrange.data.TrendsRepository
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
+import com.celestiallemon.lagrange.data.db.ServiceKind
+import com.celestiallemon.lagrange.friction.LagrangeAccessibilityService
 import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
 import com.celestiallemon.lagrange.harvest.HarvestResult
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
@@ -102,7 +106,24 @@ class AppGraph(private val app: Application) {
     /** Trends, the apps breakdown and the per-app deep dive, read from the derived tables. */
     val trends by lazy { TrendsRepository(database, derived) }
 
+    /** Schedules, friction event logs, and monotonic live friction state (snooze, focus boost, timers). */
+    val friction by lazy {
+        FrictionRepository(
+            db = database,
+            preferences = preferences,
+            interner = interner,
+            derived = derived,
+            ownPackage = app.packageName,
+            onDirty = ::requestRecompute,
+            bootCountProvider = {
+                runCatching { Settings.Global.getInt(app.contentResolver, Settings.Global.BOOT_COUNT, 0) }.getOrDefault(0)
+            },
+        )
+    }
+
     private val recomputeKicks = Channel<Unit>(Channel.CONFLATED)
+
+    private val lastScreenOffHarvestElapsedMs = java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
 
     val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages, packageResolver) }
 
@@ -134,6 +155,7 @@ class AppGraph(private val app: Application) {
             try {
                 backups.clearSnapshots()
                 timezoneTracker.check()
+                friction.refreshLiveStatusFromDisk()
                 if (preferences.current().backupTreeUri != null) WorkScheduler.setWeeklyBackup(app, true)
             } catch (e: CancellationException) {
                 throw e
@@ -217,6 +239,14 @@ class AppGraph(private val app: Application) {
     }
 
     fun harvestInBackground(trigger: HarvestTrigger) {
+        if (trigger == HarvestTrigger.SCREEN_OFF) {
+            // Both NotificationListenerService and AccessibilityService receive ACTION_SCREEN_OFF; coalesce
+            // simultaneous triggers so we never run two redundant harvests back-to-back on every screen lock.
+            val now = android.os.SystemClock.elapsedRealtime()
+            val prev = lastScreenOffHarvestElapsedMs.get()
+            if (prev != Long.MIN_VALUE && now - prev in 0 until SCREEN_OFF_HARVEST_COALESCE_MS) return
+            if (!lastScreenOffHarvestElapsedMs.compareAndSet(prev, now)) return
+        }
         applicationScope.launch {
             try {
                 awaitReady()
@@ -229,10 +259,14 @@ class AppGraph(private val app: Application) {
         }
     }
 
-    /** Extends the notification listener's coverage, but only while it really is connected in this process. */
+    /** Extends live collector coverage (notification listener and accessibility), only while ready in this process. */
     suspend fun heartbeatListenerIfConnected() {
+        val now = System.currentTimeMillis()
         if (LagrangeNotificationListenerService.connected) {
-            withContext(Dispatchers.IO) { notificationRecorder.heartbeat(System.currentTimeMillis()) }
+            withContext(Dispatchers.IO) { notificationRecorder.heartbeat(now) }
+        }
+        if (LagrangeAccessibilityService.readyState.value) {
+            withContext(Dispatchers.IO) { coverage.heartbeat(ServiceKind.ACCESSIBILITY, now) }
         }
     }
 
@@ -285,5 +319,6 @@ class AppGraph(private val app: Application) {
     private companion object {
         const val TAG = "Lagrange"
         const val RECOMPUTE_DEBOUNCE_MS = 1_500L
+        const val SCREEN_OFF_HARVEST_COALESCE_MS = 3_000L
     }
 }

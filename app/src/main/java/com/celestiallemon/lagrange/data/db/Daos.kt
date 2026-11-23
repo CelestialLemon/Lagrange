@@ -25,6 +25,9 @@ interface PackageDao {
     @Query("SELECT * FROM packages WHERE package_name = :name")
     suspend fun byName(name: String): PackageEntity?
 
+    @Query("SELECT * FROM packages WHERE id = :id")
+    suspend fun byId(id: Long): PackageEntity?
+
     @Query("SELECT * FROM packages ORDER BY display_name COLLATE NOCASE")
     fun observeAll(): Flow<List<PackageEntity>>
 
@@ -39,6 +42,18 @@ interface PackageDao {
             "WHERE package_name = :name",
     )
     suspend fun setCategory(name: String, category: String, nowMs: Long): Int
+
+    @Query(
+        "UPDATE packages SET friction_override_json = :overrideJson, updated_at_ms = :nowMs " +
+            "WHERE package_name = :name",
+    )
+    suspend fun setFrictionOverride(name: String, overrideJson: String?, nowMs: Long): Int
+
+    @Query(
+        "UPDATE packages SET is_installed = :installed, uninstalled_at_ms = :uninstalledAtMs, updated_at_ms = :nowMs " +
+            "WHERE id = :id",
+    )
+    suspend fun setInstallState(id: Long, installed: Boolean, uninstalledAtMs: Long?, nowMs: Long): Int
 
     @Query("UPDATE packages SET category_confirmed = 1, updated_at_ms = :nowMs WHERE id IN (:ids)")
     suspend fun confirm(ids: List<Long>, nowMs: Long)
@@ -195,7 +210,7 @@ interface CoverageDao {
     )
     suspend fun latest(kind: String, status: String): CoverageIntervalEntity?
 
-    @Query("UPDATE service_coverage_intervals SET last_seen_ms = :nowMs WHERE service_kind = :kind AND end_ms IS NULL")
+    @Query("UPDATE service_coverage_intervals SET last_seen_ms = MAX(last_seen_ms, :nowMs) WHERE service_kind = :kind AND end_ms IS NULL")
     suspend fun heartbeat(kind: String, nowMs: Long)
 
     @Query("SELECT * FROM service_coverage_intervals ORDER BY start_ms, id")
@@ -251,6 +266,21 @@ interface DerivedDao {
     @Insert
     suspend fun insertSchedule(row: FrictionScheduleEntity): Long
 
+    @Update
+    suspend fun updateSchedule(row: FrictionScheduleEntity)
+
+    @Query("UPDATE friction_schedules SET enabled = :enabled WHERE id = :id")
+    suspend fun setScheduleEnabled(id: Long, enabled: Boolean): Int
+
+    @Query("SELECT * FROM friction_schedules ORDER BY id")
+    fun observeSchedules(): Flow<List<FrictionScheduleEntity>>
+
+    @Query("SELECT * FROM friction_schedules ORDER BY id")
+    suspend fun allSchedules(): List<FrictionScheduleEntity>
+
+    @Query("SELECT * FROM friction_schedules WHERE id = :id")
+    suspend fun scheduleById(id: Long): FrictionScheduleEntity?
+
     @Query("DELETE FROM friction_schedules WHERE id = :id")
     suspend fun deleteSchedule(id: Long)
 
@@ -259,6 +289,30 @@ interface DerivedDao {
 
     @Query("SELECT * FROM friction_events WHERE id = :id")
     suspend fun frictionEvent(id: Long): FrictionEventEntity?
+
+    @Query("SELECT * FROM friction_events WHERE logical_date = :logicalDate ORDER BY timestamp_utc_ms, id")
+    suspend fun frictionOn(logicalDate: String): List<FrictionEventEntity>
+
+    @Query("SELECT COUNT(*) FROM friction_events WHERE timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs AND event_kind = 'LAUNCH_PAUSE'")
+    suspend fun launchPauseCountBetween(fromMs: Long, toMs: Long): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM friction_events WHERE timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs AND pkg_id = :pkgId " +
+            "AND event_kind = 'LAUNCH_PAUSE' AND outcome = 'CONTINUED'",
+    )
+    suspend fun continuedLaunchPausesBetween(fromMs: Long, toMs: Long, pkgId: Long): Int
+
+    @Query(
+        "SELECT COUNT(*) FROM friction_events WHERE timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs AND event_kind = 'LAUNCH_PAUSE' " +
+            "AND outcome IN ('CLOSED_GO_HOME', 'CLOSED_SYSTEM_NAV', 'REDIRECTED')",
+    )
+    fun observeBlockedCountBetween(fromMs: Long, toMs: Long): Flow<Int>
+
+    @Query("SELECT * FROM daily_app_rollups WHERE logical_date = :logicalDate AND pkg_id = :pkgId")
+    suspend fun appRollup(logicalDate: String, pkgId: Long): DailyAppRollupEntity?
+
+    @Query("SELECT * FROM daily_app_rollups WHERE logical_date = :logicalDate")
+    suspend fun appRollupsOn(logicalDate: String): List<DailyAppRollupEntity>
 
     @Insert
     suspend fun insertSession(row: SessionEntity): Long

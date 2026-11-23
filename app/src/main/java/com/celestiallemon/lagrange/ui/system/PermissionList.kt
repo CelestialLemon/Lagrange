@@ -86,10 +86,25 @@ fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> 
         HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
         PermissionRow(
             icon = Icons.Outlined.AccessibilityNew,
-            title = "Accessibility (friction)",
-            body = "Only needed once gentle friction ships in Phase 3. Collection works without it.",
-            state = if (health.accessibilityEnabled) "On" to status.good else "Not needed yet" to status.neutral,
-            action = null,
+            title = "Accessibility (gentle friction)",
+            body = when {
+                health.advancedProtection == Check.YES && !health.accessibilityEnabled ->
+                    "Blocked while Android Advanced Protection is on. Analytics still work without it."
+                health.accessibilityConnected ->
+                    "Connected. Observes foreground app switches only (never screen content) for calm launch pauses and timers."
+                health.accessibilityEnabled ->
+                    "Enabled in Android Settings, waiting for the system to bind the service."
+                else ->
+                    "Needed for real-time launch pauses, soft session timers and nudges. Analytics work without it."
+            },
+            state = when {
+                health.accessibilityConnected -> "Connected" to status.good
+                health.accessibilityEnabled -> "Enabled" to status.warn
+                else -> "Off" to status.neutral
+            },
+            action = if (health.accessibilityConnected) null else "Open settings" to {
+                context.launch(PermissionHealthChecker.accessibilityIntent())
+            },
         )
         PermissionRow(
             icon = Icons.Outlined.NotificationsNone,
@@ -113,7 +128,7 @@ fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> 
             icon = Icons.Outlined.GppGood,
             title = "Advanced Protection",
             body = when (health.advancedProtection) {
-                Check.YES -> "On. Android restricts sideloaded accessibility tools, so Phase 3 friction may be unavailable. Collection is unaffected."
+                Check.YES -> "On. Android restricts accessibility access to verified accessibility tools, so gentle friction may be unavailable. Analytics are unaffected."
                 Check.NO -> "Off. Nothing restricts Lagrange's services."
                 Check.UNKNOWN -> "Android didn't say whether Advanced Protection is on."
             },

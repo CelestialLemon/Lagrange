@@ -11,6 +11,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.security.advancedprotection.AdvancedProtectionManager
 import androidx.core.app.NotificationManagerCompat
+import com.celestiallemon.lagrange.friction.LagrangeAccessibilityService
 import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
 import com.celestiallemon.lagrange.notifications.LagrangeNotificationListenerService
 
@@ -20,8 +21,10 @@ enum class Check { YES, NO, UNKNOWN }
 data class PermissionHealth(
     val usageAccess: Boolean,
     val notificationAccess: Boolean,
-    /** Accessibility-based friction arrives in Phase 3; reported so the dashboard is complete. */
+    /** True when Lagrange's AccessibilityService is enabled in Android Settings. */
     val accessibilityEnabled: Boolean,
+    /** True when Lagrange's AccessibilityService is actively bound and running in this process. */
+    val accessibilityConnected: Boolean = false,
     val postNotifications: Boolean,
     /** True when Android won't auto-revoke permissions if the app goes unused for months. */
     val hibernationExempt: Check,
@@ -29,6 +32,7 @@ data class PermissionHealth(
     val batteryUnrestricted: Boolean,
 ) {
     val coreReady: Boolean get() = usageAccess && notificationAccess
+    val frictionReady: Boolean get() = accessibilityEnabled && accessibilityConnected
 }
 
 object PermissionHealthChecker {
@@ -36,15 +40,23 @@ object PermissionHealthChecker {
         usageAccess = AndroidUsageEventSource.hasUsageAccess(context),
         notificationAccess = context.packageName in NotificationManagerCompat.getEnabledListenerPackages(context),
         accessibilityEnabled = isAccessibilityEnabled(context),
+        accessibilityConnected = LagrangeAccessibilityService.readyState.value,
         postNotifications = context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED,
         hibernationExempt = hibernationExempt(context),
         advancedProtection = advancedProtection(context),
         batteryUnrestricted = context.getSystemService(PowerManager::class.java)?.isIgnoringBatteryOptimizations(context.packageName) == true,
     )
 
-    private fun isAccessibilityEnabled(context: Context): Boolean {
+    internal fun isAccessibilityEnabled(context: Context): Boolean {
         val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
-        return enabled.split(':').any { it.startsWith(context.packageName + "/") }
+        val expected = ComponentName(context, LagrangeAccessibilityService::class.java)
+        val flattened = expected.flattenToString()
+        val shortFlattened = expected.flattenToShortString()
+        return enabled.split(':').any { raw ->
+            val trimmed = raw.trim()
+            trimmed == flattened || trimmed == shortFlattened ||
+                ComponentName.unflattenFromString(trimmed) == expected
+        }
     }
 
     @Suppress("DEPRECATION") // isAutoRevokeWhitelisted is the platform name for the hibernation exemption.

@@ -126,7 +126,7 @@ fun LagrangeShell(main: MainViewModel) {
                 Tab.Today -> TodayScreen(main, padding, onOpenSystem = { tab = Tab.System })
                 Tab.Trends -> TrendsTab(padding, deepDive, onDeepDive = ::setDeepDive, saveable = trendsSaveable)
                 Tab.Lab -> LabScreen(padding)
-                Tab.Friction -> FrictionScreen(padding)
+                Tab.Friction -> FrictionScreen(main, padding)
                 Tab.System -> SystemScreen(main, padding)
             }
         }

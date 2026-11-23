@@ -62,9 +62,33 @@ enum class DayCoverage { COMPLETE, PARTIAL_HARVEST, NO_NOTIF_COVERAGE, BACKFILL 
 /** `daily_rollups.day_status`. */
 enum class DayStatus { NORMAL, SPIKE, GOOD_DAY, INSUFFICIENT_BASELINE, UNCERTAIN_COVERAGE }
 
-/** `friction_events.event_kind` and `friction_events.outcome` values the reconstructor understands. */
+/** `friction_events.event_kind`, `outcome`, and `intention_tag` values (spec §3.3). */
 object FrictionVocab {
     const val LAUNCH_PAUSE = "LAUNCH_PAUSE"
+    const val TIMER_EXPIRED = "TIMER_EXPIRED"
+    const val TIME_BLINDNESS_NUDGE = "TIME_BLINDNESS_NUDGE"
+    const val SNOOZE_1H = "SNOOZE_1H"
+
+    const val OUTCOME_CLOSED_GO_HOME = "CLOSED_GO_HOME"
+    const val OUTCOME_CLOSED_SYSTEM_NAV = "CLOSED_SYSTEM_NAV"
+    const val OUTCOME_REDIRECTED = "REDIRECTED"
+    const val OUTCOME_CONTINUED = "CONTINUED"
+    const val OUTCOME_EXTENDED_5M = "EXTENDED_5M"
+    const val OUTCOME_DISMISSED_SESSION = "DISMISSED_SESSION"
+    const val OUTCOME_NUDGE_DISMISSED = "NUDGE_DISMISSED"
+    const val OUTCOME_NUDGE_IGNORED = "NUDGE_IGNORED"
+    const val OUTCOME_SNOOZE_ACTIVATED = "SNOOZE_ACTIVATED"
+    /** An incoming call took over the screen while the card was up: neither a block nor a continue. */
+    const val OUTCOME_INTERRUPTED = "INTERRUPTED"
+
     /** Outcomes where the user left during the pause: the open never became real use. */
-    val BLOCKING_OUTCOMES = setOf("CLOSED_GO_HOME", "CLOSED_SYSTEM_NAV", "REDIRECTED")
+    val BLOCKING_OUTCOMES = setOf(OUTCOME_CLOSED_GO_HOME, OUTCOME_CLOSED_SYSTEM_NAV, OUTCOME_REDIRECTED)
+}
+
+enum class IntentionTag(val label: String) {
+    REPLY("Reply"),
+    LOOKUP("Look something up"),
+    UNWIND("Unwind"),
+    BORED("Bored"),
+    CUSTOM("Custom"),
 }
