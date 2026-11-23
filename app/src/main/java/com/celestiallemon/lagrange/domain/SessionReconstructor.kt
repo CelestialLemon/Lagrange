@@ -36,9 +36,14 @@ object SessionReconstructor {
         val ctx = Context(input, rules)
         val timeline = ctx.sweep()
         val raw = ctx.mergeEpisodes(timeline)
+        // Pass 1: direct evidence only (taps, app self-cancels). Those notifications are then off limits to the
+        // circumstantial "recent alert" rule, so a glance or an earlier pickup can't use up a notification that a
+        // later pickup or switch was observed tapping.
+        val direct = HashSet<Long>()
+        raw.forEach { ctx.finish(it, direct, HashSet(), alertsAllowed = false) }
         val consumed = HashSet<Long>()
         val frictionUsed = HashSet<Int>()
-        return raw.map { ctx.finish(it, consumed, frictionUsed) }
+        return raw.map { ctx.finish(it, consumed, frictionUsed, alertExcluded = direct) }
     }
 
     // -----------------------------------------------------------------------------------------------------------------
@@ -95,7 +100,9 @@ object SessionReconstructor {
             val intervals = ArrayList<ScreenInterval>()
             val fgOut = ArrayList<Fg>()
 
-            var keyguardHidden = false
+            // Keyguard state at the start of the slice is unknown; if the first keyguard event is SHOWN, it was hidden.
+            var keyguardHidden = events.firstOrNull { it.type == T.KEYGUARD_SHOWN || it.type == T.KEYGUARD_HIDDEN }?.type == T.KEYGUARD_SHOWN
+            var screenSeen = false
             var open: ScreenInterval? = null
             var lastEventMs = Long.MIN_VALUE
 
@@ -104,7 +111,7 @@ object SessionReconstructor {
             var fgKey: ActKey? = null
             var fgSince = 0L
             // Call UI activities survive a proximity screen-off: they're carried across and restored at screen-on.
-            var carry: Map<ActKey, Long> = emptyMap()
+            val carry = HashMap<ActKey, Long>()
             var carryAtMs = 0L
 
             fun refreshFg(t: Long) {
@@ -136,12 +143,13 @@ object SessionReconstructor {
                     for ((k, _) in carry) resumed[k] = ++resumeSeq
                     refreshFg(t)
                 }
-                carry = emptyMap()
+                carry.clear()
                 return iv
             }
 
             fun screenOff(t: Long, keepCalls: Boolean) {
-                carry = if (keepCalls) resumed.filterKeys { it.pkgId in callPkgIds } else emptyMap()
+                carry.clear()
+                if (keepCalls) carry.putAll(resumed.filterKeys { it.pkgId in callPkgIds })
                 carryAtMs = t
                 resumed.clear()
                 refreshFg(t)
@@ -149,6 +157,7 @@ object SessionReconstructor {
 
             for (e in events) {
                 val t = e.timestampMs
+                if (e.type in SCREEN_TYPES) screenSeen = true
                 when (e.type) {
                     T.SCREEN_INTERACTIVE -> {
                         val iv = open
@@ -192,16 +201,23 @@ object SessionReconstructor {
                         }
                     }
                     T.ACTIVITY_RESUMED -> {
+                        // An app already in use when the slice begins (no screen event yet): the screen was on.
+                        if (open == null && !screenSeen && !isTransient(e.pkgId)) screenOn(t).unlockMs = t
                         resumed[ActKey(e.pkgId, e.clsId)] = ++resumeSeq
                         refreshFg(t)
                     }
                     T.ACTIVITY_PAUSED, T.ACTIVITY_STOPPED -> {
-                        resumed.remove(ActKey(e.pkgId, e.clsId))
+                        val key = ActKey(e.pkgId, e.clsId)
+                        resumed.remove(key)
+                        // A call that ended while the screen was off must not come back at the next screen-on.
+                        carry.remove(key)
                         refreshFg(t)
                     }
                     else -> Unit
                 }
-                lastEventMs = maxOf(lastEventMs, t)
+                // Only device-lifecycle events show the user was there; background noise (standby buckets,
+                // foreground services, config changes, notifications) must not stretch a dangling interval.
+                if (e.type in LIFECYCLE_TYPES) lastEventMs = maxOf(lastEventMs, t)
             }
 
             open?.let { iv ->
@@ -262,13 +278,12 @@ object SessionReconstructor {
             }
 
             val out = ArrayList<RawEpisode>()
-            val absorbed = HashSet<Piece>()
             merged.forEachIndexed { i, group ->
                 val start = group.first().active.startMs
                 val end = group.last().active.endMs
-                // Glances inside a merged gap belong to the episode (each is one more pickup, never active time).
+                // Glances inside a merged gap add a pickup to the episode (never active time). They stay glances too,
+                // so the glance count and the lit-screen time still see them; day pickups only sum unlocked episodes.
                 val inside = if (group.size < 2) emptyList() else glances.filter { it.pickupAtMs >= start && it.active.endMs <= end }
-                absorbed += inside
                 out += RawEpisode(
                     pickupAtMs = group.first().pickupAtMs,
                     activeSpans = group.map { it.active },
@@ -280,7 +295,6 @@ object SessionReconstructor {
                 )
             }
             for (g in glances) {
-                if (g in absorbed) continue
                 out += RawEpisode(g.pickupAtMs, listOf(g.active), glance = true, slices = emptyList(), pickups = 1, g.uncertainTail, g.inProgress)
             }
             return out.sortedBy { it.activeSpans.first().startMs }
@@ -291,12 +305,21 @@ object SessionReconstructor {
 
         // -- Pass 4-6: chain cleaning, triggers, classification ----------------------------------------------------
 
-        fun finish(raw: RawEpisode, consumed: MutableSet<Long>, frictionUsed: MutableSet<Int>): Episode {
+        fun finish(
+            raw: RawEpisode,
+            consumed: MutableSet<Long>,
+            frictionUsed: MutableSet<Int>,
+            alertsAllowed: Boolean = true,
+            alertExcluded: Set<Long> = emptySet(),
+        ): Episode {
+            this.alertsAllowed = alertsAllowed
+            this.alertExcluded = alertExcluded
             val start = raw.activeSpans.first().startMs
             val end = raw.activeSpans.last().endMs
             val spanTotal = raw.activeSpans.sumOf { it.durationMs }
             if (raw.glance) {
-                val trigger = attributeEpisode(raw.pickupAtMs, start, null, null, consumed)
+                // A lockscreen-only glance can't open a notification: taps need an unlock.
+                val trigger = attributeEpisode(raw.pickupAtMs, start, end, null, null, consumed, clicksAllowed = false)
                 return Episode(
                     startMs = start, endMs = end, pickupAtMs = raw.pickupAtMs, activeSpans = raw.activeSpans,
                     activeDurationMs = spanTotal, physicalPickupCount = 1, isGlanceOnly = true,
@@ -307,13 +330,19 @@ object SessionReconstructor {
                 )
             }
 
-            var segments = cleanChain(raw.slices)
-            segments = scrubBlocked(segments, frictionUsed)
+            var segments = cleanChain(raw.slices, frictionUsed)
 
             val entry = segments.firstOrNull { !it.isBlockedAttempt && !isTransient(it.pkgId) }
                 ?: segments.firstOrNull { !isTransient(it.pkgId) }
                 ?: segments.firstOrNull()
-            val trigger = attributeEpisode(raw.pickupAtMs, start, entry?.pkgId, entry?.startMs, consumed)
+            // A shade tap that opened a later app in this episode belongs to that switch, not to the pickup.
+            val switches = segments.filterIndexed { i, seg -> i > 0 && seg !== entry && !isTransient(seg.pkgId) && seg.pkgId != segments[i - 1].pkgId }
+            val reserved = eligible.filter { n ->
+                val r = n.removedAtMs
+                n.removalReason == RemovalReason.CLICK && r != null && n.pkgId != entry?.pkgId &&
+                    switches.any { sw -> sw.pkgId == n.pkgId && r >= sw.startMs - rules.clickBeforeMs && r <= sw.startMs + rules.clickAfterMs }
+            }.map { it.id }.toSet()
+            val trigger = attributeEpisode(raw.pickupAtMs, start, end, entry?.pkgId, entry?.startMs, consumed, reserved)
             segments = segments.mapIndexed { i, seg ->
                 when {
                     seg === entry || (i == 0 && entry == null) -> seg.copy(triggerEvidence = trigger.evidence, triggerPkgId = trigger.pkgId)
@@ -347,8 +376,12 @@ object SessionReconstructor {
             )
         }
 
-        /** Custom Tabs → host, same-app stretches joined, short system hops dropped. */
-        fun cleanChain(slices: List<Fg>): List<Segment> {
+        /**
+         * Custom Tabs → host, launch-pause blocked opens marked, short system hops dropped, same-app stretches around a
+         * brief system dialog joined. Friction is matched to the original stretches *before* joining, so a blocked open
+         * followed by a quick hop and a real reopen of the same app stays two segments (the reopen still counts).
+         */
+        fun cleanChain(slices: List<Fg>, frictionUsed: MutableSet<Int> = HashSet()): List<Segment> {
             if (slices.isEmpty()) return emptyList()
             // Custom Tabs opened straight from an app belong to that app (Reddit → link → Reddit stays Reddit).
             val attributed = ArrayList<Pair<Long, Span>>(slices.size)
@@ -360,12 +393,14 @@ object SessionReconstructor {
                 }
                 attributed += pkg to f.span
             }
-            val joined = ArrayList<Segment>()
+            val stretches = ArrayList<Segment>()
             for ((pkg, span) in attributed) {
-                val last = joined.lastOrNull()
-                if (last != null && last.pkgId == pkg) joined[joined.lastIndex] = last.copy(spans = last.spans + span)
-                else joined += Segment(pkg, listOf(span))
+                val last = stretches.lastOrNull()
+                // Only back-to-back activities of one app form a stretch; a screen-off gap starts a new one (a reopen).
+                if (last != null && last.pkgId == pkg && span.startMs <= last.endMs) stretches[stretches.lastIndex] = last.copy(spans = last.spans + span)
+                else stretches += Segment(pkg, listOf(span))
             }
+            val joined = scrubBlocked(stretches, frictionUsed)
             if (joined.none { !isTransient(it.pkgId) }) return joined
 
             val out = ArrayList<Segment>()
@@ -376,7 +411,7 @@ object SessionReconstructor {
                     continue
                 }
                 val last = out.lastOrNull()
-                if (last != null && last.pkgId == seg.pkgId) {
+                if (last != null && last.pkgId == seg.pkgId && !last.isBlockedAttempt && !seg.isBlockedAttempt) {
                     // The same app on both sides of a brief system dialog is one stretch, dialog included.
                     out[out.lastIndex] = last.copy(spans = mergeSpans(last.spans + hops + seg.spans))
                 } else {
@@ -405,7 +440,9 @@ object SessionReconstructor {
                 if (idx in used || f.eventKind != FrictionVocab.LAUNCH_PAUSE || f.outcome !in FrictionVocab.BLOCKING_OUTCOMES) return@forEachIndexed
                 val match = out.withIndex()
                     .filter { (_, s) -> s.pkgId == f.pkgId && !s.isBlockedAttempt }
-                    .filter { (_, s) -> kotlin.math.abs(s.startMs - f.timestampMs) <= rules.frictionMatchMs || f.timestampMs in s.startMs..s.endMs }
+                    // A launch pause starts as the app opens: match it near the stretch's start (allowing for the pause
+                    // itself), never deep inside an earlier stretch of real use.
+                    .filter { (_, s) -> f.timestampMs >= s.startMs - rules.frictionMatchMs && f.timestampMs <= s.startMs + rules.frictionMatchMs + f.pauseDurationSec * 1000L }
                     .minByOrNull { (_, s) -> kotlin.math.abs(s.startMs - f.timestampMs) }
                     ?: return@forEachIndexed
                 val seg = match.value
@@ -426,16 +463,29 @@ object SessionReconstructor {
             .map { it.span }
         private val backfillSpans = input.coverage.filter { it.status == CoverageStatus.BACKFILL }.map { it.span }
         private val eligible = input.notifications.filter { it.isTriggerEligible }
+        private var alertsAllowed = true
+        private var alertExcluded: Set<Long> = emptySet()
 
         /**
          * Positive evidence (an observed tap, an app self-cancel, a fresh alert, a waiting notification) is reported
          * whenever it was recorded. Only when nothing was seen does coverage decide between "nothing happened"
          * ([TriggerEvidence.NO_OBSERVED_TRIGGER]) and "we couldn't have seen it" (BACKFILL / PARTIAL_COVERAGE).
          */
-        fun attributeEpisode(pickupAtMs: Long, unlockMs: Long, entryPkg: Long?, entryAtMs: Long?, consumed: MutableSet<Long>): Trigger {
-            val click = eligible
-                .filter { it.id !in consumed && it.removalReason == RemovalReason.CLICK }
-                .filter { val r = it.removedAtMs ?: return@filter false; r >= pickupAtMs - rules.clickBeforeMs && r <= unlockMs + rules.clickAfterMs }
+        fun attributeEpisode(
+            pickupAtMs: Long,
+            unlockMs: Long,
+            endMs: Long,
+            entryPkg: Long?,
+            entryAtMs: Long?,
+            consumed: MutableSet<Long>,
+            reserved: Set<Long> = emptySet(),
+            clicksAllowed: Boolean = true,
+        ): Trigger {
+            // Spec §4.1: a tap removed within [-5 s, +15 s] of the episode start (the unlock, not the screen-on, so a
+            // long lockscreen dwell can't widen the window), and never after the episode ended.
+            val click = if (!clicksAllowed) null else eligible
+                .filter { it.id !in consumed && it.id !in reserved && it.removalReason == RemovalReason.CLICK }
+                .filter { val r = it.removedAtMs ?: return@filter false; r >= unlockMs - rules.clickBeforeMs && r <= minOf(unlockMs + rules.clickAfterMs, endMs) }
                 .minWithOrNull(compareBy<NotificationMeta>({ if (it.pkgId == entryPkg) 0 else 1 }, { kotlin.math.abs(it.removedAtMs!! - unlockMs) }))
             if (click != null) {
                 consumed += click.id
@@ -444,8 +494,8 @@ object SessionReconstructor {
             if (entryPkg != null && entryAtMs != null) {
                 appCancel(entryPkg, entryAtMs, consumed)?.let { return it }
             }
-            val alert = eligible
-                .filter { it.id !in consumed && it.isAlerting && it.postedAtMs >= pickupAtMs - rules.alertBeforeMs && it.postedAtMs <= unlockMs }
+            val alert = if (!alertsAllowed) null else eligible
+                .filter { it.id !in consumed && it.id !in alertExcluded && it.isAlerting && it.postedAtMs >= pickupAtMs - rules.alertBeforeMs && it.postedAtMs <= unlockMs }
                 .maxWithOrNull(compareBy<NotificationMeta>({ if (it.pkgId == entryPkg) 1 else 0 }, { it.postedAtMs }))
             if (alert != null) {
                 consumed += alert.id
@@ -482,15 +532,15 @@ object SessionReconstructor {
             val at = seg.startMs
             val click = eligible
                 .filter { it.id !in consumed && it.removalReason == RemovalReason.CLICK }
-                .filter { val r = it.removedAtMs ?: return@filter false; r >= at - rules.clickBeforeMs && r <= at + rules.clickAfterMs }
+                .filter { val r = it.removedAtMs ?: return@filter false; r >= at - rules.clickBeforeMs && r <= minOf(at + rules.clickAfterMs, seg.endMs) }
                 .minWithOrNull(compareBy<NotificationMeta>({ if (it.pkgId == seg.pkgId) 0 else 1 }, { kotlin.math.abs(it.removedAtMs!! - at) }))
             if (click != null) {
                 consumed += click.id
                 return Trigger(TriggerEvidence.OBSERVED_CLICK, click.pkgId, click.id)
             }
             appCancel(seg.pkgId, at, consumed)?.let { return it }
-            val alert = eligible
-                .filter { it.id !in consumed && it.isAlerting && it.pkgId == seg.pkgId && it.postedAtMs >= at - rules.alertBeforeMs && it.postedAtMs <= at }
+            val alert = if (!alertsAllowed) null else eligible
+                .filter { it.id !in consumed && it.id !in alertExcluded && it.isAlerting && it.pkgId == seg.pkgId && it.postedAtMs >= at - rules.alertBeforeMs && it.postedAtMs <= at }
                 .maxByOrNull { it.postedAtMs }
             if (alert != null) {
                 consumed += alert.id
@@ -539,6 +589,10 @@ object SessionReconstructor {
     }
 
     private val CALM = setOf(AppCategory.UTILITY, AppCategory.NEUTRAL)
+    private val SCREEN_TYPES = setOf(T.SCREEN_INTERACTIVE, T.SCREEN_NON_INTERACTIVE, T.KEYGUARD_SHOWN, T.KEYGUARD_HIDDEN)
+    private val LIFECYCLE_TYPES = SCREEN_TYPES + setOf(
+        T.ACTIVITY_RESUMED, T.ACTIVITY_PAUSED, T.ACTIVITY_STOPPED, T.DEVICE_SHUTDOWN, T.DEVICE_STARTUP,
+    )
     private val NOTIFICATION_EVIDENCE = setOf(
         TriggerEvidence.OBSERVED_CLICK,
         TriggerEvidence.LIKELY_APP_CANCEL_CLICK,

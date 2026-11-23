@@ -35,6 +35,22 @@ object IngestionKeys {
     const val DERIVED_ACTIVE_FROM_MS = "derived_active_from_ms"
     const val DERIVED_ACTIVE_TO_MS = "derived_active_to_ms"
 
+    /**
+     * Where the claimed run's baseline refresh must start (UTC ms). Set when a range is claimed and kept until the
+     * refresh commits, so a run killed after its last chunk still refreshes every rebuilt day's baselines.
+     */
+    const val DERIVED_BASELINE_FROM_MS = "derived_baseline_from_ms"
+
+    /**
+     * The settings the derived tables were last reconciled against. Compared at startup and on every change, so an
+     * edit made while the pipeline was down (or the process died before reacting) still queues its rebuild.
+     */
+    const val DERIVED_ROLLOVER_HOUR = "derived_rollover_hour"
+    const val DERIVED_BUDGET_MS = "derived_budget_ms"
+    /** Hash of (package id, category) for every package up to [DERIVED_CATEGORY_MAX_ID]: a change means a recategorization. */
+    const val DERIVED_CATEGORY_HASH = "derived_category_hash"
+    const val DERIVED_CATEGORY_MAX_ID = "derived_category_max_id"
+
     /** The reconstruction algorithm version the derived tables were built with. */
     const val DERIVED_ALGORITHM_VERSION = "derived_algorithm_version"
     const val DERIVED_LAST_RUN_AT_MS = "derived_last_run_at_ms"

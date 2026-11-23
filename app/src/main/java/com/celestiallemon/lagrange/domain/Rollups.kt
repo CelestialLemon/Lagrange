@@ -25,14 +25,60 @@ class ZoneTimeline(entries: List<Pair<Long, ZoneId>>, private val fallback: Zone
         return zone ?: sorted.firstOrNull()?.second ?: fallback
     }
 
-    fun dateOf(ms: Long, rolloverHour: Int): LocalDate = LogicalDay.dateOf(ms, rolloverHour, zoneAt(ms))
+    /**
+     * The logical day whose window contains [ms]. Windows are canonical: on a westward trip the local clock runs some
+     * hours twice, and those hours stay in the (longer) day they started in instead of jumping back a date.
+     */
+    fun dateOf(ms: Long, rolloverHour: Int): LocalDate {
+        var d = localDateOf(ms, rolloverHour)
+        repeat(6) {
+            val start = dayStartMs(d, rolloverHour)
+            val end = dayStartMs(d.plusDays(1), rolloverHour)
+            d = when {
+                ms < start -> d.minusDays(1)
+                ms >= maxOf(start, end) -> d.plusDays(1)
+                else -> return d
+            }
+        }
+        return d
+    }
 
-    /** When the logical day [date] begins. A rollover hour inside a DST gap resolves forward. */
+    /** The date by [ms]'s own local clock and rollover, ignoring travel (may repeat or skip around a zone change). */
+    private fun localDateOf(ms: Long, rolloverHour: Int): LocalDate = LogicalDay.dateOf(ms, rolloverHour, zoneAt(ms))
+
+    /** The first recorded zone change strictly after [ms], or null. */
+    fun nextChangeAfter(ms: Long): Long? {
+        var current = zoneAt(ms)
+        for ((from, z) in sorted) {
+            if (from <= ms) continue
+            if (z != current) return from
+            current = z
+        }
+        return null
+    }
+
+    /**
+     * When the logical day [date] begins: the earliest instant whose own zone puts it at the rollover hour on [date].
+     * Every recorded zone is tried (never just the device's current one), so windows agree with [dateOf] on travel
+     * days. When a zone change skips the rollover entirely (flying east across it), the day begins at the change.
+     * A rollover hour inside a DST gap resolves forward.
+     */
     fun dayStartMs(date: LocalDate, rolloverHour: Int): Long {
         val local = date.atTime(rolloverHour, 0)
+        val candidates = ArrayList<Long>()
+        for (z in zones) {
+            val t = local.atZone(z).toInstant().toEpochMilli()
+            if (zoneAt(t) == z) candidates += t
+        }
+        for ((from, _) in sorted) {
+            if (localDateOf(from, rolloverHour) >= date && localDateOf(from - 1, rolloverHour) < date) candidates += from
+        }
+        candidates.minOrNull()?.let { return it }
         val guess = local.atZone(zoneAt(local.atZone(fallback).toInstant().toEpochMilli())).toInstant().toEpochMilli()
         return local.atZone(zoneAt(guess)).toInstant().toEpochMilli()
     }
+
+    private val zones: List<ZoneId> = (sorted.map { it.second } + fallback).distinct()
 
     fun window(date: LocalDate, rolloverHour: Int): DayWindow {
         val start = dayStartMs(date, rolloverHour)
@@ -58,9 +104,22 @@ object HourSlots {
         return (z.hour - rolloverHour + 24) % 24
     }
 
-    /** The next local hour boundary after [ms] (instant arithmetic, so DST and half-hour zones are exact). */
-    fun nextHourBoundary(ms: Long, zone: ZoneId): Long =
-        Instant.ofEpochMilli(ms).atZone(zone).truncatedTo(ChronoUnit.HOURS).plusHours(1).toInstant().toEpochMilli()
+    /**
+     * The first instant strictly after [ms] where the local hour changes: the next wall-clock hour (either
+     * occurrence, if it repeats) or the next offset transition, whichever comes first. Always moves forward, even
+     * across half-hour DST shifts (Lord Howe) where "one hour later on the wall" can lie before [ms].
+     */
+    fun nextHourBoundary(ms: Long, zone: ZoneId): Long {
+        val instant = Instant.ofEpochMilli(ms)
+        val local = instant.atZone(zone).toLocalDateTime().truncatedTo(ChronoUnit.HOURS).plusHours(1)
+        val at = local.atZone(zone)
+        val candidates = listOfNotNull(
+            at.withEarlierOffsetAtOverlap().toInstant().toEpochMilli(),
+            at.withLaterOffsetAtOverlap().toInstant().toEpochMilli(),
+            zone.rules.nextTransition(instant)?.instant?.toEpochMilli(),
+        )
+        return candidates.filter { it > ms }.minOrNull() ?: (ms + HOUR_MS)
+    }
 
     /** The ordinary slot the repeated (slot 24) hour shares a wall-clock hour with on this day, or null when nothing repeats. */
     fun repeatedSlot(window: DayWindow, rolloverHour: Int): Int? {
@@ -133,14 +192,17 @@ data class RollupInput(
     /** The ledger is complete up to here; today's figures stop at this instant. */
     val dataEndMs: Long,
     val budgetFor: (LocalDate) -> Long? = { null },
+    /** Which zone applied when; hour slots follow it through mid-day travel. Defaults to each window's zone. */
+    val zones: ZoneTimeline? = null,
 )
 
 data class RollupRules(
     /** Below this share of harvested time a day is "uncertain" and never feeds a baseline. */
     val minUsageCoverage: Double = 0.95,
     val minNotifCoverage: Double = 0.90,
+    /** A gap is this day's sleep proxy when its midpoint falls in [rollover - before, rollover + after): 22:00-10:00 by default. */
     val nightBeforeRolloverMs: Long = 6 * HOUR_MS,
-    val nightAfterRolloverMs: Long = 10 * HOUR_MS,
+    val nightAfterRolloverMs: Long = 6 * HOUR_MS,
     val minOvernightGapMs: Long = 2 * HOUR_MS,
 )
 
@@ -178,6 +240,7 @@ object RollupEngine {
             else -> DayCoverage.COMPLETE
         }
 
+        val zones = input.zones ?: ZoneTimeline.fixed(w.zone)
         // Durations, split by day and hour.
         var screen = 0L
         var totals = CategoryTotals()
@@ -194,7 +257,7 @@ object RollupEngine {
                     totals = totals.plus(cat, part.durationMs)
                     appMs.merge(seg.pkgId, part.durationMs, Long::plus)
                     if (ep.isRabbitHole) appRabbit.merge(seg.pkgId, part.durationMs, Long::plus)
-                    forEachHour(part, w.zone, input.rolloverHour) { slot, ms ->
+                    forEachHour(part, zones, input.rolloverHour) { slot, ms ->
                         hourly.getOrPut(slot to seg.pkgId) { LongArray(2) }[0] += ms
                     }
                 }
@@ -223,7 +286,7 @@ object RollupEngine {
                 val at = seg.effectiveSpans().firstOrNull()?.startMs ?: continue
                 if (at < w.startMs || at >= w.endMs) continue
                 appOpens.merge(seg.pkgId, 1, Int::plus)
-                val slot = HourSlots.slotOf(at, input.rolloverHour, w.zone)
+                val slot = HourSlots.slotOf(at, input.rolloverHour, zones.zoneAt(at))
                 hourly.getOrPut(slot to seg.pkgId) { LongArray(2) }[1] += 1
             }
         }
@@ -280,8 +343,10 @@ object RollupEngine {
     private fun isTransient(app: AppInfo?) = app?.isSystemSurface == true
 
     /**
-     * Sleep proxy: the longest phone-free stretch between two unlocked episodes that overlaps the night around this
-     * day's rollover (by default 22:00 → 14:00) and has already ended. Returns (end, length).
+     * Sleep proxy: the longest phone-free stretch between two unlocked episodes whose midpoint lies in the night around
+     * this day's rollover (by default 22:00 → 10:00) and that has already ended. The windows of consecutive days never
+     * overlap, so one gap is never one day's sleep and the next day's too, and a long morning at work doesn't count.
+     * Returns (end, length).
      */
     private fun overnightGap(sorted: List<Episode>, w: DayWindow, clip: Long, rules: RollupRules): Pair<Long, Long>? {
         val nightFrom = w.startMs - rules.nightBeforeRolloverMs
@@ -293,7 +358,8 @@ object RollupEngine {
                 val gapStart = prevEnd
                 val gapEnd = ep.startMs
                 val len = gapEnd - gapStart
-                if (gapEnd <= clip && len >= rules.minOvernightGapMs && gapEnd > nightFrom && gapStart < nightTo) {
+                val mid = gapStart + len / 2
+                if (gapEnd <= clip && len >= rules.minOvernightGapMs && mid >= nightFrom && mid < nightTo) {
                     if (best == null || len > best.second) best = gapEnd to len
                 }
             }
@@ -302,11 +368,16 @@ object RollupEngine {
         return best
     }
 
-    /** Splits [span] at local hour boundaries, reporting each piece with its slot. */
-    inline fun forEachHour(span: Span, zone: ZoneId, rolloverHour: Int, action: (slot: Int, ms: Long) -> Unit) {
+    /**
+     * Splits [span] at local hour boundaries and at zone changes (travel), reporting each piece with the slot of the
+     * zone in force at that instant.
+     */
+    inline fun forEachHour(span: Span, zones: ZoneTimeline, rolloverHour: Int, action: (slot: Int, ms: Long) -> Unit) {
         var t = span.startMs
         while (t < span.endMs) {
-            val next = minOf(span.endMs, HourSlots.nextHourBoundary(t, zone))
+            val zone = zones.zoneAt(t)
+            val zoneChange = zones.nextChangeAfter(t) ?: Long.MAX_VALUE
+            val next = minOf(span.endMs, HourSlots.nextHourBoundary(t, zone), zoneChange).coerceAtLeast(t + 1)
             action(HourSlots.slotOf(t, rolloverHour, zone), next - t)
             t = next
         }

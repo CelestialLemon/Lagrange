@@ -301,6 +301,19 @@ interface DerivedDao {
     @Query("DELETE FROM hourly_app_usage WHERE logical_date >= :fromDate AND logical_date <= :toDate")
     suspend fun deleteHourly(fromDate: String, toDate: String)
 
+    // Rows outside the days a full rebuild covers (left behind when the rollover hour moved a boundary).
+    @Query("DELETE FROM daily_rollups WHERE logical_date < :fromDate OR logical_date > :toDate")
+    suspend fun deleteDailyOutside(fromDate: String, toDate: String)
+
+    @Query("DELETE FROM daily_app_rollups WHERE logical_date < :fromDate OR logical_date > :toDate")
+    suspend fun deleteAppRollupsOutside(fromDate: String, toDate: String)
+
+    @Query("DELETE FROM hourly_app_usage WHERE logical_date < :fromDate OR logical_date > :toDate")
+    suspend fun deleteHourlyOutside(fromDate: String, toDate: String)
+
+    @Query("DELETE FROM sessions WHERE start_ms < :fromMs OR start_ms >= :toMs")
+    suspend fun deleteSessionsOutside(fromMs: Long, toMs: Long)
+
     @Insert
     suspend fun insertAppRollups(rows: List<DailyAppRollupEntity>)
 
@@ -345,8 +358,17 @@ interface DerivedDao {
     @Query("SELECT * FROM sessions ORDER BY start_ms")
     suspend fun allSessions(): List<SessionEntity>
 
-    @Query("UPDATE sessions SET worth_it_rating = :rating WHERE id = :sessionId")
-    suspend fun setRating(sessionId: Long, rating: Int?): Int
+    @Query("SELECT * FROM session_segments WHERE end_ms > :fromMs AND start_ms < :toMs ORDER BY start_ms")
+    suspend fun segmentsOverlapping(fromMs: Long, toMs: Long): List<SessionSegmentEntity>
+
+    @Query("UPDATE sessions SET worth_it_rating = :rating WHERE episode_key = :episodeKey AND is_glance_only = 0")
+    suspend fun setRatingByKey(episodeKey: String, rating: Int?): Int
+
+    @Query(
+        "UPDATE sessions SET worth_it_rating = :rating WHERE id = (SELECT id FROM sessions WHERE is_glance_only = 0 " +
+            "AND start_ms <= :atMs AND end_ms >= :atMs ORDER BY start_ms DESC LIMIT 1)",
+    )
+    suspend fun setRatingContaining(atMs: Long, rating: Int?): Int
 
     @Query("SELECT * FROM daily_notes WHERE logical_date = :date")
     fun observeNote(date: String): Flow<DailyNoteEntity?>

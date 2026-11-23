@@ -166,14 +166,19 @@ class SessionReconstructorTest {
     }
 
     @Test
-    fun `a glance inside a micro-lock gap is absorbed as an extra pickup`() {
+    fun `a glance inside a micro-lock gap adds a pickup and still counts as a glance with its lit time`() {
         val l = covered()
         l.session(0, P.INSTAGRAM to MIN) // off at 63 s
         l.glance(66 * SEC, 3 * SEC)
         l.session(72 * SEC, P.INSTAGRAM to MIN)
         val eps = l.reconstruct()
-        val ep = eps.single()
+        val ep = eps.single { !it.isGlanceOnly }
         assertEquals(3, ep.physicalPickupCount)
+        val glance = eps.single { it.isGlanceOnly }
+        assertEquals(l.at(66 * SEC), glance.startMs)
+        assertEquals(3 * SEC, glance.activeDurationMs)
+        // The merged gap is never active time, so the glance's lit span is not counted twice.
+        assertTrue(ep.activeSpans.none { it.startMs < glance.endMs && glance.startMs < it.endMs })
     }
 
     @Test
@@ -377,14 +382,99 @@ class SessionReconstructorTest {
     @Test
     fun `one notification is never credited twice`() {
         val l = covered()
+        l.notification(P.WHATSAPP, postedAt = -MIN, removedAt = 12 * SEC, reason = RemovalReason.CLICK)
+        // The tap at 12 s lies in the episode's window and in the window of the switch back to WhatsApp at 12 s.
+        l.session(0, P.WHATSAPP to 5 * SEC, P.INSTAGRAM to 5 * SEC, P.WHATSAPP to MIN)
+        val ep = l.reconstruct().unlocked().single()
+        val credits = listOf(ep.triggerEvidence) + ep.segments.drop(1).map { it.triggerEvidence }
+        assertEquals(1, credits.count { it == TriggerEvidence.OBSERVED_CLICK })
+    }
+
+    @Test
+    fun `a click after an episode ended is never credited to it`() {
+        val l = covered()
         l.notification(P.WHATSAPP, postedAt = -MIN, removedAt = 16 * SEC, reason = RemovalReason.CLICK)
-        // Two pickups whose click windows ([-5 s, 16 s] and [16 s, 37 s]) both contain the tap at 16 s.
         l.session(0, P.WHATSAPP to 2 * SEC) // off at 5 s
-        l.session(21 * SEC, P.WHATSAPP to MIN) // 16 s later: a separate episode
+        l.session(21 * SEC, P.WHATSAPP to MIN) // unlock at 22 s: the 16 s tap is outside its window too
+        assertTrue(l.reconstruct().none { it.triggerEvidence == TriggerEvidence.OBSERVED_CLICK })
+    }
+
+    @Test
+    fun `a glance lit by an alert never uses up the tap that follows it`() {
+        val l = covered()
+        l.notification(P.WHATSAPP, postedAt = 0, removedAt = 21 * SEC, reason = RemovalReason.CLICK)
+        l.glance(SEC, 5 * SEC)
+        l.session(20 * SEC, P.WHATSAPP to MIN)
+        val eps = l.reconstruct()
+        val glance = eps.single { it.isGlanceOnly }
+        val ep = eps.single { !it.isGlanceOnly }
+        assertEquals(TriggerEvidence.OBSERVED_CLICK, ep.triggerEvidence)
+        assertTrue(glance.triggerEvidence != TriggerEvidence.OBSERVED_CLICK)
+        assertNull(glance.triggerNotificationId)
+    }
+
+    @Test
+    fun `background events while the screen-off went missing do not keep the screen on all night`() {
+        val l = covered()
+        l.screenOn(0).unlock(SEC).resume(2 * SEC, P.INSTAGRAM)
+        // No SCREEN_NON_INTERACTIVE. Standby-bucket and foreground-service events keep arriving overnight.
+        var t = 10 * MIN
+        while (t < 5 * HOUR_MS) {
+            l.ev(t, 11, P.YOUTUBE)
+            l.ev(t + SEC, 19, P.MAPS)
+            t += 15 * MIN
+        }
+        l.session(5 * HOUR_MS, P.WHATSAPP to MIN)
         val eps = l.reconstruct().unlocked()
         assertEquals(2, eps.size)
-        assertEquals(1, eps.count { it.triggerEvidence == TriggerEvidence.OBSERVED_CLICK })
+        assertTrue(eps[0].uncertainTail)
+        assertTrue(eps[0].endMs <= l.at(2 * SEC) + 30 * MIN)
     }
+
+    @Test
+    fun `a call that ended while the screen was off does not come back at the next screen-on`() {
+        val l = covered()
+        l.screenOn(0).unlock(SEC).resume(2 * SEC, P.DIALER)
+        l.screenOff(30 * SEC) // held to the ear
+        l.pause(3 * MIN, P.DIALER) // the other side hung up with the screen off
+        l.glance(HOUR_MS)
+        val eps = l.reconstruct()
+        assertEquals(2, eps.size)
+        val call = eps.single { !it.isGlanceOnly }
+        assertTrue(call.endMs <= l.at(30 * SEC))
+        assertTrue(eps.single { it.isGlanceOnly }.startMs == l.at(HOUR_MS))
+    }
+
+    @Test
+    fun `a slice that starts mid-use keeps the app time`() {
+        val l = covered()
+        // The read began after the screen-on: the first thing seen is the app.
+        l.resume(0, P.INSTAGRAM).pause(5 * MIN, P.INSTAGRAM).lock(5 * MIN).screenOff(5 * MIN)
+        val ep = l.reconstruct().unlocked().single()
+        assertEquals(5 * MIN, ep.totals.distractingMs)
+
+        // Screen on with no unlock in the slice, but the keyguard is only shown later: it was already unlocked.
+        val m = covered()
+        m.screenOn(0).resume(SEC, P.INSTAGRAM).pause(10 * MIN, P.INSTAGRAM).screenOff(10 * MIN).lock(10 * MIN)
+        m.session(HOUR_MS, P.WHATSAPP to MIN)
+        val first = m.reconstruct().unlocked().first()
+        assertEquals(10 * MIN - SEC, first.totals.distractingMs)
+    }
+
+    @Test
+    fun `a blocked reopen after a micro-lock never erases the use before it`() {
+        val l = covered()
+        l.session(0, P.INSTAGRAM to 20 * MIN) // off at 20m03s
+        l.session(20 * MIN + 13 * SEC, P.INSTAGRAM to 6 * SEC) // reopened 10 s later and blocked
+        l.blocked(P.INSTAGRAM, 20 * MIN + 15 * SEC)
+        val ep = l.reconstruct().single()
+        val insta = ep.segments.filter { it.pkgId == P.INSTAGRAM }
+        assertEquals(2, insta.size)
+        assertEquals(20 * MIN, insta[0].effectiveMs)
+        assertTrue(insta[1].isBlockedAttempt)
+        assertEquals(20 * MIN, ep.totals.distractingMs)
+    }
+
 
     // -- Archetypes -----------------------------------------------------------------------------------------------------
 
@@ -460,5 +550,42 @@ class SessionReconstructorTest {
     private companion object {
         const val UNCERTAIN_FLAG = "UNCERTAIN_TAIL"
         const val IN_PROGRESS_FLAG = "IN_PROGRESS"
+    }
+
+    @Test
+    fun `a shade tap that opens a later app goes to that switch, not to the pickup`() {
+        val l = covered()
+        // Unlock into Maps, then tap a WhatsApp notification 11 s after unlocking.
+        l.notification(P.WHATSAPP, postedAt = -10 * MIN, removedAt = 12 * SEC, reason = RemovalReason.CLICK)
+        l.session(0, P.MAPS to 10 * SEC, P.WHATSAPP to 2 * MIN)
+        val ep = l.reconstruct().single()
+        assertEquals(TriggerEvidence.NO_OBSERVED_TRIGGER, ep.triggerEvidence)
+        assertEquals(TriggerEvidence.OBSERVED_CLICK, ep.segments[1].triggerEvidence)
+        assertEquals(P.WHATSAPP, ep.segments[1].triggerPkgId)
+    }
+
+    @Test
+    fun `a long lockscreen dwell does not widen the click window before the unlock`() {
+        val l = covered()
+        l.notification(P.WHATSAPP, postedAt = -10 * MIN, removedAt = 2 * SEC, reason = RemovalReason.CLICK)
+        l.screenOn(0).unlock(30 * SEC).use(P.WHATSAPP, 31 * SEC, 3 * MIN).lock(3 * MIN + SEC).screenOff(3 * MIN + SEC)
+        val ep = l.reconstruct().single()
+        assertEquals(l.at(30 * SEC), ep.startMs)
+        assertTrue(ep.triggerEvidence != TriggerEvidence.OBSERVED_CLICK)
+    }
+
+    @Test
+    fun `a blocked launch, a quick hop and a real reopen of the same app stay apart`() {
+        val l = covered()
+        l.session(0, P.REDDIT to 3 * SEC, P.LAUNCHER to 4 * SEC, P.REDDIT to 5 * MIN)
+        l.blocked(P.REDDIT, 2 * SEC)
+        val ep = l.reconstruct().single()
+        val reddit = ep.segments.filter { it.pkgId == P.REDDIT }
+        assertEquals(2, reddit.size)
+        assertTrue(reddit[0].isBlockedAttempt)
+        assertFalse(reddit[1].isBlockedAttempt)
+        assertEquals(5 * MIN, reddit[1].effectiveMs)
+        assertEquals(1, ep.blockedAttemptCount)
+        assertTrue(ep.archetype != Archetype.BLOCKED_ATTEMPT)
     }
 }

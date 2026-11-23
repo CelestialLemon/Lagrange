@@ -92,6 +92,8 @@ class DerivedRepository(
     private val fallbackZone: () -> ZoneId = ZoneId::systemDefault,
     private val rules: ReconstructionRules = ReconstructionRules(),
     private val chunkDays: Int = DEFAULT_CHUNK_DAYS,
+    private val lookbackMs: Long = LOOKBACK_MS,
+    private val lookaheadMs: Long = LOOKAHEAD_MS,
 ) {
     private val mutex = Mutex()
     private val _progress = MutableStateFlow(RecomputeProgress())
@@ -106,12 +108,7 @@ class DerivedRepository(
 
     suspend fun markAllDirty() = markDirty(0)
 
-    private suspend fun markDirtyLocked(fromMs: Long, toMs: Long) {
-        val pf = state.get(IngestionKeys.DERIVED_PENDING_FROM_MS)
-        val pt = state.get(IngestionKeys.DERIVED_PENDING_TO_MS)
-        state.put(IngestionStateEntity(IngestionKeys.DERIVED_PENDING_FROM_MS, minOf(pf ?: fromMs, fromMs)))
-        state.put(IngestionStateEntity(IngestionKeys.DERIVED_PENDING_TO_MS, maxOf(pt ?: toMs, toMs)))
-    }
+    private suspend fun markDirtyLocked(fromMs: Long, toMs: Long) = DerivedDirty.mark(state, fromMs, toMs)
 
     /** Queues a full rebuild when the derived tables were built by another algorithm version. Returns true if it did. */
     suspend fun ensureAlgorithmVersion(): Boolean = db.withWriteTransaction {
@@ -120,6 +117,49 @@ class DerivedRepository(
         markDirtyLocked(0, Long.MAX_VALUE)
         state.put(IngestionStateEntity(IngestionKeys.DERIVED_ALGORITHM_VERSION, DerivedAlgorithm.VERSION.toLong()))
         true
+    }
+
+    /**
+     * Compares the settings that shape derived rows (rollover hour, budget, app categories) with the ones last
+     * reconciled, queueing the rebuild each change needs, in one transaction with the new fingerprint. Safe to call
+     * any time; returns true if something was queued.
+     */
+    suspend fun reconcileSettings(): Boolean {
+        val s = settings()
+        val packages = db.packageDao().all().sortedBy { it.id }
+        return db.withWriteTransaction {
+            var queued = false
+            val rollover = state.get(IngestionKeys.DERIVED_ROLLOVER_HOUR)
+            if (rollover != null && rollover != s.rolloverHour.toLong()) {
+                markDirtyLocked(0, Long.MAX_VALUE) // every day boundary moved
+                queued = true
+            }
+            val budget = state.get(IngestionKeys.DERIVED_BUDGET_MS)
+            if (budget != null && budget != s.dailyBudgetMs) {
+                markDirtyLocked(clock() - BUDGET_DIRTY_MS, Long.MAX_VALUE) // past days keep the budget that applied then
+                queued = true
+            }
+            val maxId = state.get(IngestionKeys.DERIVED_CATEGORY_MAX_ID)
+            val hash = state.get(IngestionKeys.DERIVED_CATEGORY_HASH)
+            if (maxId != null && hash != null && categoryHash(packages.filter { it.id <= maxId }) != hash) {
+                markDirtyLocked(0, Long.MAX_VALUE) // every total the app ever contributed to changed
+                queued = true
+            }
+            state.put(IngestionStateEntity(IngestionKeys.DERIVED_ROLLOVER_HOUR, s.rolloverHour.toLong()))
+            state.put(IngestionStateEntity(IngestionKeys.DERIVED_BUDGET_MS, s.dailyBudgetMs))
+            state.put(IngestionStateEntity(IngestionKeys.DERIVED_CATEGORY_MAX_ID, packages.lastOrNull()?.id ?: 0L))
+            state.put(IngestionStateEntity(IngestionKeys.DERIVED_CATEGORY_HASH, categoryHash(packages)))
+            queued
+        }
+    }
+
+    private fun categoryHash(rows: List<com.celestiallemon.lagrange.data.db.PackageEntity>): Long {
+        var h = -0x340d631b7bdddcdbL // FNV-1a 64
+        for (r in rows) for (c in "${r.id}:${r.category};") {
+            h = h xor c.code.toLong()
+            h *= 0x100000001b3L
+        }
+        return h
     }
 
     suspend fun hasPending(): Boolean =
@@ -133,6 +173,9 @@ class DerivedRepository(
         val at = state.get(IngestionKeys.DERIVED_ACTIVE_TO_MS)
         val from = listOfNotNull(pf, af).minOrNull() ?: return@withWriteTransaction null
         val to = listOfNotNull(pt, at).maxOrNull() ?: Long.MAX_VALUE
+        // The chunk cursor (ACTIVE_FROM) advances as chunks commit; the baseline start must not.
+        val bf = state.get(IngestionKeys.DERIVED_BASELINE_FROM_MS)
+        state.put(IngestionStateEntity(IngestionKeys.DERIVED_BASELINE_FROM_MS, minOf(bf ?: from, from)))
         state.put(IngestionStateEntity(IngestionKeys.DERIVED_ACTIVE_FROM_MS, from))
         state.put(IngestionStateEntity(IngestionKeys.DERIVED_ACTIVE_TO_MS, to))
         state.remove(IngestionKeys.DERIVED_PENDING_FROM_MS)
@@ -143,6 +186,7 @@ class DerivedRepository(
     private suspend fun finishActive() = db.withWriteTransaction {
         state.remove(IngestionKeys.DERIVED_ACTIVE_FROM_MS)
         state.remove(IngestionKeys.DERIVED_ACTIVE_TO_MS)
+        state.remove(IngestionKeys.DERIVED_BASELINE_FROM_MS)
         state.put(IngestionStateEntity(IngestionKeys.DERIVED_LAST_RUN_AT_MS, clock()))
     }
 
@@ -151,6 +195,7 @@ class DerivedRepository(
         withContext(Dispatchers.IO) {
             var days = 0
             try {
+                reconcileSettings()
                 for (round in 0 until MAX_ROUNDS) {
                     val (from, to) = claim() ?: break
                     days += recompute(from, to)
@@ -215,10 +260,16 @@ class DerivedRepository(
         }
         val firstDate = ctx.zones.dateOf(maxOf(fromMs, earliest), ctx.rollover)
         val lastDate = if (toMs >= ctx.dataEnd) ctx.today else minOf(ctx.today, ctx.zones.dateOf(maxOf(toMs, earliest), ctx.rollover))
+        val baselineFromMs = state.get(IngestionKeys.DERIVED_BASELINE_FROM_MS) ?: fromMs
+        val baselineFirst = ctx.zones.dateOf(maxOf(minOf(baselineFromMs, fromMs), earliest), ctx.rollover)
+        val baselineLast = minOf(maxOf(lastDate, baselineFirst).plusDays(BASELINE_TRAIL_DAYS), ctx.today)
         if (firstDate > lastDate) {
+            // Every chunk already committed (a run killed after its last chunk): only the baselines remain.
+            refreshBaselines(ctx, baselineFirst, baselineLast)
             finishActive()
             return 0
         }
+        pruneOutside(ctx, fromMs <= earliest, toMs >= ctx.dataEnd, firstDate, lastDate)
         val total = (ChronoUnit.DAYS.between(firstDate, lastDate) + 1).toInt()
         var done = 0
         _progress.value = RecomputeProgress(true, 0, total)
@@ -234,43 +285,98 @@ class DerivedRepository(
             }
             d = chunkLast.plusDays(1)
         }
-        refreshBaselines(ctx, firstDate, minOf(lastDate.plusDays(BASELINE_TRAIL_DAYS), ctx.today))
+        refreshBaselines(ctx, baselineFirst, baselineLast)
         finishActive()
         Log.i(TAG, "rebuilt $total day(s) $firstDate..$lastDate")
         return total
     }
 
+    /**
+     * A rebuild reaching the start (or the end) of the ledger owns everything before (after) it: rows there belong to
+     * days that no longer exist under the current rollover hour or zone history, and would haunt baselines.
+     */
+    private suspend fun pruneOutside(ctx: Context, fromStart: Boolean, toEnd: Boolean, firstDate: LocalDate, lastDate: LocalDate) {
+        if (!fromStart && !toEnd) return
+        val from = if (fromStart) firstDate.toString() else "0000-01-01"
+        val to = if (toEnd) lastDate.toString() else "9999-12-31"
+        val fromMs = if (fromStart) ctx.zones.window(firstDate, ctx.rollover).startMs else Long.MIN_VALUE
+        val toMs = if (toEnd) ctx.zones.window(lastDate, ctx.rollover).endMs else Long.MAX_VALUE
+        db.withWriteTransaction {
+            val dao = db.derivedDao()
+            dao.deleteDailyOutside(from, to)
+            dao.deleteAppRollupsOutside(from, to)
+            dao.deleteHourlyOutside(from, to)
+            dao.deleteSessionsOutside(fromMs, toMs)
+        }
+    }
+
     private suspend fun rebuildChunk(ctx: Context, windows: List<com.celestiallemon.lagrange.domain.DayWindow>) {
         val cs = windows.first().startMs
         val ce = windows.last().endMs
-        val loadFrom = cs - LOOKBACK_MS
-        val loadTo = minOf(ce + LOOKAHEAD_MS, ctx.dataEnd + 1)
-        val events = db.rawUsageEventDao().between(loadFrom, loadTo).map { UsageEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) }
-        val notifications = db.rawNotificationDao().eligibleAlive(loadFrom, loadTo).map { it.toMeta() }
-        val friction = db.derivedDao().frictionBetween(loadFrom, loadTo).map { it.toMeta() }
-        val episodes = SessionReconstructor.reconstruct(
-            ReconstructionInput(events, ctx.apps, ctx.customTabs, notifications, friction, ctx.coverage, dataEndMs = minOf(ctx.dataEnd, loadTo)),
-            rules,
-        )
-        val results = RollupEngine.compute(
-            RollupInput(windows, episodes, ctx.apps, ctx.coverage, notifications, ctx.rollover, ctx.dataEnd, ctx.budgetFor),
-        )
-        val stored = episodes.filter { it.startMs >= cs && it.startMs < ce }
-        writeChunk(ctx, cs, ce, windows.first().date, windows.last().date, stored, results)
+        var back = lookbackMs
+        var ahead = lookaheadMs
+        var attempt = 0
+        while (true) {
+            val loadFrom = cs - back
+            val loadTo = minOf(ce + ahead, ctx.dataEnd + 1)
+            val events = db.rawUsageEventDao().between(loadFrom, loadTo).map { UsageEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) }
+            val notifications = db.rawNotificationDao().eligibleAlive(loadFrom, loadTo).map { it.toMeta() }
+            val friction = db.derivedDao().frictionBetween(loadFrom, loadTo).map { it.toMeta() }
+            val episodes = SessionReconstructor.reconstruct(
+                ReconstructionInput(events, ctx.apps, ctx.customTabs, notifications, friction, ctx.coverage, dataEndMs = minOf(ctx.dataEnd, loadTo)),
+                rules,
+            )
+            // An episode cut off by the read margins (still "open" at loadTo, or already running when the read began)
+            // would be stored or counted short: widen the read until every episode touching the chunk is whole.
+            val cutAhead = loadTo <= ctx.dataEnd && episodes.any { it.inProgress && it.startMs < ce }
+            val firstEvent = events.minOfOrNull { it.timestampMs }
+            val cutBehind = loadFrom > 0 && firstEvent != null &&
+                episodes.any { it.startMs - firstEvent < MARGIN_EDGE_MS && it.endMs > cs }
+            if ((cutAhead || cutBehind) && attempt < MAX_MARGIN_DOUBLINGS) {
+                if (cutAhead) ahead *= 2
+                if (cutBehind) back *= 2
+                attempt++
+                continue
+            }
+            val results = RollupEngine.compute(
+                RollupInput(windows, episodes, ctx.apps, ctx.coverage, notifications, ctx.rollover, ctx.dataEnd, ctx.budgetFor, ctx.zones),
+            )
+            writeChunk(ctx, cs, ce, windows.first().date, windows.last().date, episodes.filter { it.startMs >= cs }, results)
+            return
+        }
     }
 
+    /**
+     * Replaces the chunk's sessions. [candidates] are the reconstructed episodes starting at or after the chunk start,
+     * sorted. Normally only those starting inside `[cs, ce)` are written, but when one of them now runs past [ce]
+     * (late events merged a pickup across the boundary) every stored session it overlaps is superseded: the replaced
+     * range grows to cover it, and the ratings found there are carried over in the same transaction.
+     */
     private suspend fun writeChunk(
         ctx: Context,
         cs: Long,
         ce: Long,
         firstDate: LocalDate,
         lastDate: LocalDate,
-        episodes: List<Episode>,
+        candidates: List<Episode>,
         results: List<DayResult>,
     ) = db.withWriteTransaction {
         val dao = db.derivedDao()
-        val old = dao.ratingsStartingIn(cs, ce).map { RatingCarryOver.OldRating(it.episodeKey, it.startMs, it.worthItRating) }
-        dao.deleteSessionsStartingIn(cs, ce)
+        var end = ce
+        while (true) {
+            var grown = maxOf(end, candidates.filter { it.startMs < end }.maxOfOrNull { it.endMs + 1 } ?: end)
+            // A rated session whose rebuilt episode now starts past the boundary moves with it: write that episode
+            // here too, or the rating would be deleted with its old row and never seen by the next chunk.
+            for (o in dao.ratingsStartingIn(cs, grown)) {
+                val home = candidates.firstOrNull { !it.isGlanceOnly && o.startMs in it.pickupAtMs..it.endMs } ?: continue
+                if (home.startMs >= grown) grown = home.endMs + 1
+            }
+            if (grown == end) break
+            end = grown
+        }
+        val episodes = candidates.filter { it.startMs < end }
+        val old = dao.ratingsStartingIn(cs, end).map { RatingCarryOver.OldRating(it.episodeKey, it.startMs, it.worthItRating) }
+        dao.deleteSessionsStartingIn(cs, end)
         val ratings = RatingCarryOver.reattach(old, episodes)
         if (ratings.size < old.size) Log.w(TAG, "${old.size - ratings.size} rating(s) had no matching episode after rebuild")
         for ((i, ep) in episodes.withIndex()) {
@@ -324,13 +430,30 @@ class DerivedRepository(
         val base = Baselines.baseline(ctx.today, points)
         val activePkgs = ctx.apps.values.filter { RollupEngine.isActiveCategory(it.category) }.map { it.pkgId }.toSet()
         val hourly = if (base.matchedDays.isEmpty()) emptyList() else db.derivedDao().hourlyFor(base.matchedDays.map { it.toString() })
-        val cutoff = PartialDayBaseline.cutoff(ctx.dataEnd, ctx.rollover, ctx.zones.zoneAt(ctx.dataEnd))
+        val nowZone = ctx.zones.zoneAt(ctx.dataEnd)
+        val cutoff = PartialDayBaseline.cutoff(ctx.dataEnd, ctx.rollover, nowZone)
+        // Whole hours come from the hourly buckets; the current hour is cut at the same wall-clock minute from each
+        // day's own sessions, so use that happened after "now" on a past day is never credited to the slice.
+        val wholeHours = cutoff.copy(fraction = 0.0)
         val prior = hourly.filter { it.pkgId in activePkgs }.groupBy { LocalDate.parse(it.logicalDate) }.mapValues { (date, cells) ->
             val slots = cells.groupBy { it.hourSlot }.mapValues { (_, c) -> c.sumOf { it.durationMs } }
-            PartialDayBaseline.sliceMs(slots, cutoff, HourSlots.repeatedSlot(ctx.zones.window(date, ctx.rollover), ctx.rollover))
+            PartialDayBaseline.sliceMs(slots, wholeHours, HourSlots.repeatedSlot(ctx.zones.window(date, ctx.rollover), ctx.rollover))
+        }
+        val nowLocal = java.time.Instant.ofEpochMilli(ctx.dataEnd).atZone(nowZone).toLocalDateTime()
+        val partialHour = base.matchedDays.associateWith { date ->
+            val local = nowLocal.minusDays(ChronoUnit.DAYS.between(date, ctx.today))
+            val zone = ctx.zones.zoneAt(ctx.zones.window(date, ctx.rollover).startMs)
+            val cut = local.atZone(zone).toInstant().toEpochMilli()
+            val hourStart = minOf(cut, local.truncatedTo(ChronoUnit.HOURS).atZone(zone).toInstant().toEpochMilli())
+            if (cut <= hourStart) 0L
+            else db.derivedDao().segmentsOverlapping(hourStart, cut).filter { it.pkgId in activePkgs }.sumOf { seg ->
+                val len = seg.endMs - seg.startMs
+                val overlap = minOf(seg.endMs, cut) - maxOf(seg.startMs, hourStart)
+                if (len <= 0 || overlap <= 0) 0L else (seg.durationMs.toDouble() * overlap / len).toLong()
+            }
         }
         // A matched day with no hourly rows was a confirmed zero-use day.
-        val withZeros = base.matchedDays.associateWith { prior[it] ?: 0L }
+        val withZeros = base.matchedDays.associateWith { (prior[it] ?: 0L) + (partialHour[it] ?: 0L) }
         return PartialDayBaseline.compare(ctx.today, today.activeMs, cutoff, withZeros, points)
     }
 
@@ -347,9 +470,17 @@ class DerivedRepository(
 
     // -- Self-report, inspector, fixtures -------------------------------------------------------------------------------
 
-    suspend fun setWorthIt(sessionId: Long, rating: Int?) {
+    /**
+     * Rates an episode by its stable key. Session ids change whenever a rebuild replaces rows, so the key is resolved
+     * at write time; if the key itself changed, the rating goes to the unlocked episode that now contains [startMs].
+     * Returns false when no episode matches any more.
+     */
+    suspend fun setWorthIt(episodeKey: String, startMs: Long, rating: Int?): Boolean {
         require(rating == null || rating in 1..5) { "rating must be 1..5" }
-        db.derivedDao().setRating(sessionId, rating)
+        return db.withWriteTransaction {
+            val dao = db.derivedDao()
+            dao.setRatingByKey(episodeKey, rating) > 0 || dao.setRatingContaining(startMs, rating) > 0
+        }
     }
 
     /** The logical date containing [ms] under the current settings. */
@@ -415,8 +546,11 @@ class DerivedRepository(
     private fun CoverageIntervalEntity.toSpan(dataEnd: Long): CoverageSpan {
         val kind = runCatching { ServiceKind.valueOf(serviceKind) }.getOrDefault(ServiceKind.USAGE_HARVEST)
         val st = runCatching { CoverageStatus.valueOf(status) }.getOrDefault(CoverageStatus.GAP)
-        // An open interval is alive "now": as far as the ledger goes, or its last heartbeat if that is later.
-        return CoverageSpan(kind, st, startMs, endMs ?: maxOf(dataEnd, lastSeenMs))
+        // A collector service (listener, accessibility) can die without a callback, so an open interval only counts
+        // up to its last heartbeat: the last moment it was provably alive. Harvests heartbeat a connected listener
+        // before deriving. Usage-harvest intervals are always closed by the harvester itself.
+        val openEnd = if (kind == ServiceKind.USAGE_HARVEST) maxOf(dataEnd, lastSeenMs) else lastSeenMs
+        return CoverageSpan(kind, st, startMs, endMs ?: openEnd)
     }
 
     private fun RawNotificationEntity.toMeta() = NotificationMeta(
@@ -508,5 +642,9 @@ class DerivedRepository(
         const val LOOKAHEAD_MS = 12 * HOUR_MS
         const val BASELINE_TRAIL_DAYS = 28L
         private const val MAX_ROUNDS = 8
+        private const val BUDGET_DIRTY_MS = 24 * HOUR_MS
+        /** An episode starting this close to the first event read may have begun before the read: widen it. */
+        private const val MARGIN_EDGE_MS = 60_000L
+        private const val MAX_MARGIN_DOUBLINGS = 5
     }
 }

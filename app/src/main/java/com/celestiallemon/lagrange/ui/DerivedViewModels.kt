@@ -36,6 +36,7 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -60,7 +61,7 @@ data class TodayState(
 
 /** Blocked attempts and the trigger behind one session, loaded when its sheet opens. */
 data class SessionDetail(
-    val sessionId: Long,
+    val episodeKey: String,
     val triggerNotification: RawNotificationEntity?,
     val blockedAttempts: List<FrictionEventEntity>,
 )
@@ -89,7 +90,8 @@ class TodayViewModel(app: Application) : AndroidViewModel(app) {
         }
         val packages = graph.database.packageDao().observeAll().map { rows -> rows.associateBy { it.id } }
         // Re-read the slice whenever the rollup changes (each rebuild) or the clock moves the cutoff.
-        val comparison = combine(rollup, minuteTickFlow()) { r, now -> r?.activeUsageMs to now / COMPARISON_REFRESH_MS }
+        // Any rebuild of today's row (usage, baseline or status) or the clock moving the cutoff refreshes the slice.
+        val comparison = combine(rollup, minuteTickFlow()) { r, now -> listOf(r?.activeUsageMs, r?.baselineMedianMs, r?.dayStatus, now / COMPARISON_REFRESH_MS) }
             .distinctUntilChanged()
             .mapLatest { runCatching { graph.derived.todayComparison() }.getOrNull() }
         val first = combine(rollup, sessions, dao.observeAppRollups(key), packages) { r, s, a, p -> Partial(r, s, a, p) }
@@ -105,26 +107,33 @@ class TodayViewModel(app: Application) : AndroidViewModel(app) {
         val packages: Map<Long, PackageEntity>,
     )
 
-    private val openDetail = MutableStateFlow<Long?>(null)
+    private val openDetail = MutableStateFlow<String?>(null)
 
-    val detail: StateFlow<SessionDetail?> = openDetail.mapLatest { id ->
-        if (id == null) return@mapLatest null
+    val detail: StateFlow<SessionDetail?> = openDetail.mapLatest { key ->
+        if (key == null) return@mapLatest null
         withContext(Dispatchers.IO) {
-            val session = state.value?.episodes?.firstOrNull { it.id == id } ?: return@withContext null
+            val session = state.value?.episodes?.firstOrNull { it.session.episodeKey == key } ?: return@withContext null
             val notif = session.session.triggerNotificationId?.let { graph.database.rawNotificationDao().byId(it) }
             val blocked = session.segments.filter { it.isBlockedAttempt }.flatMap { seg ->
                 graph.database.derivedDao().frictionFor(seg.pkgId, seg.startMs - FRICTION_SLACK_MS, seg.endMs + FRICTION_SLACK_MS)
                     .filter { it.outcome in FrictionVocab.BLOCKING_OUTCOMES }
             }.distinctBy { it.id }
-            SessionDetail(id, notif, blocked)
+            SessionDetail(key, notif, blocked)
         }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    fun loadDetail(sessionId: Long?) {
-        openDetail.value = sessionId
+    fun loadDetail(episodeKey: String?) {
+        openDetail.value = episodeKey
     }
 
-    fun rate(sessionId: Long, rating: Int?) = launchIo { graph.derived.setWorthIt(sessionId, rating) }
+    /** Rates by episode key (resolved at write time, so a rebuild in between can't swallow the tap). */
+    fun rate(episodeKey: String, startMs: Long, rating: Int?) = launchIo {
+        if (!graph.derived.setWorthIt(episodeKey, startMs, rating)) {
+            withContext(Dispatchers.Main) {
+                android.widget.Toast.makeText(getApplication(), "That session changed while rebuilding. Please rate it again.", android.widget.Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     fun saveNote(date: LocalDate, text: String) = launchIo {
         val dao = graph.database.derivedDao()
@@ -222,9 +231,13 @@ class InspectorViewModel(app: Application) : AndroidViewModel(app) {
         load(_state.value.date)
     }
 
+    private var loadJob: Job? = null
+
     fun load(date: LocalDate) {
         _state.value = _state.value.copy(date = date, loading = true)
-        viewModelScope.launch {
+        // A newer request (another day, or the event-type toggle) always wins over one still running.
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             val next = try {
                 withContext(Dispatchers.IO) { build(date, _allTypes.value) }
             } catch (e: CancellationException) {
@@ -233,7 +246,7 @@ class InspectorViewModel(app: Application) : AndroidViewModel(app) {
                 Log.w(TAG, "inspector load failed", e)
                 InspectorState(date, null)
             }
-            if (_state.value.date == date) _state.value = next
+            _state.value = next
         }
     }
 

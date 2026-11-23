@@ -217,7 +217,7 @@ private fun RatingRow(current: Int?, onRate: (Int?) -> Unit) {
                 }
             }
             Text(
-                current?.let { ratingWords[it - 1] } ?: "Your answer stays attached to this session, even when history is rebuilt.",
+                current?.let { ratingWords.getOrNull(it - 1) } ?: "Your answer stays attached to this session, even when history is rebuilt.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

@@ -170,4 +170,65 @@ class RollupEngineTest {
         // A day entirely in the future produces nothing.
         assertTrue(compute(l, kolkata, "2026-11-25", dataEnd = l.at(HOUR_MS)).isEmpty())
     }
+
+    @Test
+    fun `a half-hour DST rollback never moves the hour split backwards`() {
+        val lordHowe = ZoneId.of("Australia/Lord_Howe")
+        // 2025-04-06: 02:00 (+11:00) falls back to 01:30 (+10:30), so 01:30-02:00 happens twice.
+        val firstHalf = instant("2025-04-06T01:00", lordHowe)
+        var t = firstHalf - 2 * HOUR_MS
+        while (t < firstHalf + 4 * HOUR_MS) {
+            val next = HourSlots.nextHourBoundary(t, lordHowe)
+            assertTrue("boundary after $t went to $next", next > t && next - t <= HOUR_MS)
+            t += MIN
+        }
+        val l = ledger("2025-04-06T00:30", lordHowe).session(0, P.YOUTUBE to 3 * HOUR_MS)
+        val day = compute(l, lordHowe, "2025-04-05").day("2025-04-05")
+        assertEquals(3 * HOUR_MS, day.hourly.filter { it.pkgId == P.YOUTUBE }.sumOf { it.durationMs })
+        assertEquals(3 * HOUR_MS, day.rollup.distractingMs)
+        assertTrue(day.hourly.any { it.hourSlot == HourSlots.REPEATED_SLOT })
+    }
+
+    @Test
+    fun `hour slots follow the zone in force after mid-day travel`() {
+        val la = ZoneId.of("America/Los_Angeles")
+        // Lands in Los Angeles at 20:00 UTC (15:00 in New York, 12:00 in LA) on a winter day.
+        val landed = java.time.Instant.parse("2026-01-15T20:00:00Z").toEpochMilli()
+        val zones = ZoneTimeline(listOf(0L to newYork, landed to la), newYork)
+        val l = Ledger(landed + 5 * MIN).usageCoverage(-DAY_MS, DAY_MS).listener(-DAY_MS, DAY_MS).session(0, P.YOUTUBE to 10 * MIN)
+        val episodes = SessionReconstructor.reconstruct(l.input().copy(dataEndMs = l.at(DAY_MS)))
+        val w = zones.window(LocalDate.parse("2026-01-15"), 4)
+        val day = RollupEngine.compute(RollupInput(listOf(w), episodes, P.apps, l.coverage, l.notifications, 4, l.at(DAY_MS), zones = zones)).single()
+        val slots = day.hourly.filter { it.pkgId == P.YOUTUBE }.map { it.hourSlot }.toSet()
+        assertEquals(setOf(12 - 4), slots)
+        assertEquals(1, day.hourly.single { it.pkgId == P.YOUTUBE }.openCount)
+    }
+
+    @Test
+    fun `travel days get windows that agree with dateOf whatever the device zone is now`() {
+        val kolkata = ZoneId.of("Asia/Kolkata")
+        val flew = java.time.Instant.parse("2026-11-23T06:30:00Z").toEpochMilli()
+        val zones = ZoneTimeline(listOf(0L to kolkata, flew to newYork), fallback = newYork)
+        val d23 = zones.window(LocalDate.parse("2026-11-23"), 4)
+        assertEquals(java.time.Instant.parse("2026-11-22T22:30:00Z").toEpochMilli(), d23.startMs)
+        assertEquals(d23.startMs, zones.window(LocalDate.parse("2026-11-22"), 4).endMs)
+        var t = d23.startMs - DAY_MS
+        while (t < d23.endMs + DAY_MS) {
+            val date = zones.dateOf(t, 4)
+            val w = zones.window(date, 4)
+            assertTrue("$t in $date", t >= w.startMs && t < w.endMs)
+            t += 17 * MIN
+        }
+    }
+
+    @Test
+    fun `a long phone-free morning is not mistaken for sleep`() {
+        val l = ledger("2026-11-22T23:30", kolkata)
+        l.session(0, P.INSTAGRAM to 5 * MIN) // 23:30
+        l.session(7 * HOUR_MS + 30 * MIN, P.WHATSAPP to 5 * MIN) // 07:00 next day
+        l.session(15 * HOUR_MS + 30 * MIN, P.CHROME to 5 * MIN) // 15:00: almost 8 hours phone-free at work
+        val r = compute(l, kolkata, "2026-11-22", "2026-11-23").day("2026-11-23").rollup
+        assertEquals(l.at(7 * HOUR_MS + 30 * MIN + SEC) - l.at(5 * MIN + 3 * SEC), r.overnightGapMs)
+        assertEquals(l.at(15 * HOUR_MS + 30 * MIN + SEC) - l.at(7 * HOUR_MS + 35 * MIN + 3 * SEC), r.longestFocusGapMs)
+    }
 }

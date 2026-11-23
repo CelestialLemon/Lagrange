@@ -105,7 +105,8 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
 
     var filter by rememberSaveable { mutableStateOf(TimelineFilter.ALL) }
     var showGlances by rememberSaveable { mutableStateOf(false) }
-    var openSessionId by rememberSaveable { mutableStateOf<Long?>(null) }
+    // Keyed by episode key, not row id: a rebuild replaces rows (new ids) but keeps keys, so the sheet stays open.
+    var openKey by rememberSaveable { mutableStateOf<String?>(null) }
     var editingBudget by remember { mutableStateOf(false) }
     var editingNote by remember { mutableStateOf(false) }
 
@@ -205,8 +206,8 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
             }
             items(visible, key = { "ep-${it.id}" }) { ep ->
                 EpisodeCard(ep, s.packages, onClick = {
-                    openSessionId = ep.id
-                    today.loadDetail(ep.id)
+                    openKey = ep.session.episodeKey
+                    today.loadDetail(ep.session.episodeKey)
                 })
             }
         }
@@ -233,15 +234,15 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
         }
     }
 
-    val open = openSessionId?.let { id -> s?.episodes?.firstOrNull { it.id == id } }
+    val open = openKey?.let { key -> s?.episodes?.firstOrNull { it.session.episodeKey == key } }
     if (open != null && s != null) {
         SessionDetailSheet(
             episode = open,
             packages = s.packages,
-            detail = detail?.takeIf { it.sessionId == open.id },
-            onRate = { today.rate(open.id, it) },
+            detail = detail?.takeIf { it.episodeKey == open.session.episodeKey },
+            onRate = { today.rate(open.session.episodeKey, open.session.startMs, it) },
             onDismiss = {
-                openSessionId = null
+                openKey = null
                 today.loadDetail(null)
             },
         )

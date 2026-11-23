@@ -30,10 +30,13 @@ class TimezoneTracker(
                     // Backfilled days predate the app, so their zone is an assumption, marked as such.
                     dao.insert(TzHistoryEntity(effectiveFromUtcMs = now - ASSUMED_BACKFILL_MS, zoneId = current, isAssumed = true))
                     dao.insert(TzHistoryEntity(effectiveFromUtcMs = now, zoneId = current, isAssumed = false))
+                    DerivedDirty.mark(db.ingestionStateDao(), now - ASSUMED_BACKFILL_MS)
                     true
                 }
                 latest.zoneId != current -> {
                     dao.insert(TzHistoryEntity(effectiveFromUtcMs = now, zoneId = current, isAssumed = false))
+                    // The day containing the change moves its boundaries; everything after follows the new zone.
+                    DerivedDirty.mark(db.ingestionStateDao(), now - TRAVEL_DIRTY_MS)
                     true
                 }
                 else -> false
@@ -44,5 +47,6 @@ class TimezoneTracker(
     companion object {
         /** Slightly more than the 14-day backfill window. */
         const val ASSUMED_BACKFILL_MS = 15L * 24 * 60 * 60 * 1000
+        private const val TRAVEL_DIRTY_MS = 2L * 24 * 60 * 60 * 1000
     }
 }

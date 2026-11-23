@@ -87,7 +87,7 @@ fun NoteDialog(initial: String, date: LocalDate, onDismiss: () -> Unit, onSave: 
                 )
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
                     listOf("Travel", "Sick", "Deadline", "Day off", "Bad sleep").forEach { tag ->
-                        FilterChip(selected = false, onClick = { text = if (text.isBlank()) tag else "$text · $tag" }, label = { Text(tag) })
+                        FilterChip(selected = false, onClick = { text = (if (text.isBlank()) tag else "$text · $tag").take(TodayViewModel.NOTE_MAX_CHARS) }, label = { Text(tag) })
                     }
                 }
                 Text("${text.length}/${TodayViewModel.NOTE_MAX_CHARS}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

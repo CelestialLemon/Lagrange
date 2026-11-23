@@ -51,9 +51,16 @@ class DerivedRepositoryTest {
 
     private class Env(val db: LagrangeDatabase, val repo: DerivedRepository, val interner: Interner)
 
-    private fun env(chunkDays: Int = DerivedRepository.DEFAULT_CHUNK_DAYS): Env {
+    private fun env(
+        chunkDays: Int = DerivedRepository.DEFAULT_CHUNK_DAYS,
+        lookbackMs: Long = DerivedRepository.LOOKBACK_MS,
+        lookaheadMs: Long = DerivedRepository.LOOKAHEAD_MS,
+    ): Env {
         val db = LagrangeDatabase.inMemory(context).also { dbs += it }
-        val repo = DerivedRepository(db, settings = { settings }, clock = { now }, fallbackZone = { zone }, chunkDays = chunkDays)
+        val repo = DerivedRepository(
+            db, settings = { settings }, clock = { now }, fallbackZone = { zone }, chunkDays = chunkDays,
+            lookbackMs = lookbackMs, lookaheadMs = lookaheadMs,
+        )
         return Env(db, repo, Interner(db, FakeResolver()))
     }
 
@@ -133,7 +140,7 @@ class DerivedRepositoryTest {
         e.repo.markAllDirty()
         e.repo.runPending()
         val target = e.sessions().first { it.logicalDate == today.minusDays(1).toString() && it.totalDistractingMs > 0 }
-        e.repo.setWorthIt(target.id, 2)
+        assertTrue(e.repo.setWorthIt(target.episodeKey, target.startMs, 2))
 
         e.repo.markAllDirty()
         e.repo.runPending()
@@ -266,6 +273,156 @@ class DerivedRepositoryTest {
         assertEquals(fixture.expected, fixture.replay())
         assertEquals(e.db.derivedDao().sessionsFor(day.toString()).map { it.episodeKey }, fixture.expected.map { it.key })
         assertTrue(fixture.apps.any { it.packageName == INSTAGRAM && it.category == "DISTRACTING" })
+    }
+
+    @Test
+    fun `a run killed after its last chunk still refreshes the baselines of every rebuilt day`() = runBlocking {
+        val e = env()
+        e.history(12)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val stale = today.minusDays(4).toString()
+        val good = e.db.derivedDao().dailyRollup(stale)!!
+        e.db.derivedDao().updateBaseline(stale, 1L, "SPIKE")
+        // Killed after the final chunk committed: the chunk cursor is past today, the baseline start is not.
+        val state = e.db.ingestionStateDao()
+        state.put(IngestionStateEntity(IngestionKeys.DERIVED_ACTIVE_FROM_MS, at(today.plusDays(1), 5)))
+        state.put(IngestionStateEntity(IngestionKeys.DERIVED_ACTIVE_TO_MS, Long.MAX_VALUE))
+        state.put(IngestionStateEntity(IngestionKeys.DERIVED_BASELINE_FROM_MS, at(today.minusDays(6), 5)))
+        assertTrue(e.repo.hasPending())
+        e.repo.runPending()
+        val refreshed = e.db.derivedDao().dailyRollup(stale)!!
+        assertEquals(good.baselineMedianMs, refreshed.baselineMedianMs)
+        assertEquals(good.dayStatus, refreshed.dayStatus)
+        assertFalse(e.repo.hasPending())
+        assertNull(e.state(IngestionKeys.DERIVED_BASELINE_FROM_MS))
+    }
+
+    @Test
+    fun `a rating follows its episode when late events merge it across a chunk boundary`() = runBlocking {
+        val e = env(chunkDays = 1)
+        e.history(2)
+        val boundary = at(today.minusDays(1), 4)
+        e.session(boundary + 5_000, INSTAGRAM, 5 * MINUTE_MS)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val rated = e.sessions().single { it.startMs == boundary + 6_000 }
+        assertEquals(today.minusDays(1).toString(), rated.logicalDate)
+        assertTrue(e.repo.setWorthIt(rated.episodeKey, rated.startMs, 4))
+
+        // A late-arriving pickup just before 04:00 whose screen-off is within the micro-lock merge window.
+        e.session(boundary - 12_000, WHATSAPP, 1_000)
+        e.repo.markDirty(boundary - HOUR_MS, boundary + HOUR_MS)
+        e.repo.runPending()
+        val merged = e.sessions().single { it.startMs <= boundary + 6_000 && it.endMs >= boundary + 6_000 }
+        assertEquals(boundary - 11_000, merged.startMs)
+        assertEquals(today.minusDays(2).toString(), merged.logicalDate)
+        assertEquals(4, merged.worthItRating)
+        assertEquals(1, e.sessions().count { it.worthItRating != null })
+    }
+
+    @Test
+    fun `episodes longer than the read margins are stored whole, whatever the chunking`() = runBlocking {
+        suspend fun build(e: Env): Pair<List<SessionEntity>, List<com.celestiallemon.lagrange.data.db.DailyRollupEntity>> {
+            e.history(4)
+            e.session(at(today.minusDays(2), 3, 0), INSTAGRAM, 3 * HOUR_MS)
+            e.repo.markAllDirty()
+            e.repo.runPending()
+            return e.sessions().map { it.copy(id = 0) } to e.db.derivedDao().dailyRollupsBetween("0000", "9999")
+        }
+        val tight = build(env(chunkDays = 1, lookbackMs = HOUR_MS, lookaheadMs = HOUR_MS))
+        val wide = build(env(chunkDays = 7))
+        assertEquals(wide.first, tight.first)
+        assertEquals(wide.second, tight.second)
+        val long = tight.first.single { it.startMs == at(today.minusDays(2), 3, 0) + 1_000 }
+        assertEquals(3 * HOUR_MS + 2_000, long.activeDurationMs)
+    }
+
+    @Test
+    fun `a rating by a stale key lands on the episode containing its start, or reports failure`() = runBlocking {
+        val e = env()
+        e.history(1)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val target = e.sessions().first { !it.isGlanceOnly }
+        assertTrue(e.repo.setWorthIt("${target.startMs}:999", target.startMs + 1_000, 5))
+        assertEquals(5, e.sessions().single { it.id == target.id }.worthItRating)
+        assertFalse(e.repo.setWorthIt("gone", at(today, 3), 1))
+    }
+
+    @Test
+    fun `listener coverage stops at its last heartbeat`() = runBlocking {
+        val e = env()
+        e.history(1)
+        val listener = e.db.coverageDao().all().single { it.serviceKind == ServiceKind.NOTIFICATION_LISTENER.name }
+        e.db.coverageDao().update(listener.copy(lastSeenMs = at(today, 8)))
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val todays = e.sessions().single { it.logicalDate == today.toString() }
+        assertEquals("PARTIAL_COVERAGE", todays.triggerEvidence)
+        val yesterdays = e.sessions().first { it.logicalDate == today.minusDays(1).toString() }
+        assertEquals("NO_OBSERVED_TRIGGER", yesterdays.triggerEvidence)
+    }
+
+    @Test
+    fun `the same-time slice never credits a past day's use after the cutoff minute`() = runBlocking {
+        val e = env()
+        e.setup(at(today.minusDays(10), 0))
+        for (i in 10 downTo 1) e.session(at(today.minusDays(i.toLong()), 12, 35), INSTAGRAM, 20 * MINUTE_MS)
+        e.session(at(today, 10), INSTAGRAM, 5 * MINUTE_MS)
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(today, 12, 30)))
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val cmp = e.repo.todayComparison()!!
+        assertEquals(0L, cmp.slice!!.medianMs)
+        // Half an hour later the past days' 12:35 sessions are partly in the slice.
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(today, 12, 45)))
+        assertEquals((10 * MINUTE_MS - 2_000).toDouble(), e.repo.todayComparison()!!.slice!!.medianMs!!.toDouble(), 2_000.0)
+    }
+
+    @Test
+    fun `moving the rollover hour leaves no rows on days that no longer exist`() = runBlocking {
+        val e = env()
+        e.setup(at(today.minusDays(2), 0))
+        e.session(at(today.minusDays(2), 2), WHATSAPP, 10 * MINUTE_MS) // 02:00: the day before under rollover 4
+        e.session(at(today.minusDays(1), 9), INSTAGRAM, 10 * MINUTE_MS)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val orphan = today.minusDays(3).toString()
+        assertNotNull(e.db.derivedDao().dailyRollup(orphan))
+
+        settings = settings.copy(rolloverHour = 0)
+        assertTrue(e.repo.hasPending() || e.repo.reconcileSettings())
+        e.repo.runPending()
+        assertNull(e.db.derivedDao().dailyRollup(orphan))
+        assertTrue(e.db.derivedDao().hourlyFor(listOf(orphan)).isEmpty())
+        assertEquals(today.minusDays(2).toString(), e.sessions().first().logicalDate)
+    }
+
+    @Test
+    fun `settings changed while nothing was listening still queue their rebuild`() = runBlocking {
+        val e = env()
+        e.history(2)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        assertFalse(e.repo.reconcileSettings())
+
+        settings = settings.copy(dailyBudgetMs = 45 * MINUTE_MS)
+        assertTrue(e.repo.reconcileSettings())
+        val from = e.state(IngestionKeys.DERIVED_PENDING_FROM_MS)!!
+        assertTrue(from > at(today.minusDays(2), 0))
+        e.repo.runPending()
+        assertEquals(45 * MINUTE_MS, e.db.derivedDao().dailyRollup(today.toString())!!.budgetTargetMs)
+
+        e.db.packageDao().setCategory(WHATSAPP, AppCategory.DISTRACTING.name, now)
+        assertTrue(e.repo.reconcileSettings())
+        assertEquals(0L, e.state(IngestionKeys.DERIVED_PENDING_FROM_MS))
+        e.repo.runPending()
+        assertFalse(e.repo.reconcileSettings())
+
+        // A brand-new app showing up is not a recategorization.
+        e.interner.packageId("com.example.new")
+        assertFalse(e.repo.reconcileSettings())
     }
 
     private companion object {

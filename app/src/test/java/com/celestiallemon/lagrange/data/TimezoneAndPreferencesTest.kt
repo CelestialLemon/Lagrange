@@ -51,8 +51,11 @@ class TimezoneAndPreferencesTest {
         assertFalse(tracker.check())
         zone = ZoneId.of("Europe/Berlin")
         now += 1000
+        db.ingestionStateDao().remove(IngestionKeys.DERIVED_PENDING_FROM_MS)
         assertTrue(tracker.check())
         assertEquals("Europe/Berlin", db.tzHistoryDao().latest()!!.zoneId)
+        // A zone change re-derives the days around it, in the same transaction as the tz_history row.
+        assertEquals(now - 2 * 24 * 60 * 60 * 1000L, db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_FROM_MS))
         assertEquals(3, db.tzHistoryDao().all().size)
     }
 
