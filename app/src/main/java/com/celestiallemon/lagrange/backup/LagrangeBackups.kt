@@ -1,7 +1,9 @@
 package com.celestiallemon.lagrange.backup
 
 import android.content.Context
+import android.database.sqlite.SQLiteDatabase
 import android.net.Uri
+import android.provider.DocumentsContract
 import androidx.room3.useWriterConnection
 import com.celestiallemon.lagrange.data.BackupFingerprint
 import com.celestiallemon.lagrange.data.InProgressBackup
@@ -116,6 +118,39 @@ class LagrangeBackups(
             val buffered = out.buffered()
             snapshot.inputStream().use { input -> input.copyTo(buffered) }
             buffered.flush()
+        }
+    }
+
+    /**
+     * Writes the tidy CSV bundle (six RFC 4180 files, see [CsvExporter]) to [out], read from a consistent,
+     * integrity-checked snapshot that is deleted afterwards (also on failure or cancellation).
+     */
+    suspend fun exportCsvBundle(out: OutputStream, pageSize: Int = CsvExporter.DEFAULT_PAGE_SIZE): CsvExportSummary =
+        exclusive { exportCsvBundleLocked(out, pageSize) }
+
+    private suspend fun exportCsvBundleLocked(out: OutputStream, pageSize: Int): CsvExportSummary = withSnapshot { snapshot, _ ->
+        val snap = SQLiteDatabase.openDatabase(snapshot.path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS)
+        snap.use {
+            val buffered = out.buffered(64 * 1024)
+            val summary = CsvExporter(it, CsvExporter.zoneTimeline(it), pageSize).writeZip(buffered)
+            buffered.flush()
+            summary
+        }
+    }
+
+    /**
+     * "Export CSV bundle (.zip)" into a document the user just created. A failed or cancelled export removes the
+     * half-written document rather than leaving a truncated ZIP behind.
+     */
+    suspend fun exportCsvBundleTo(uri: Uri): CsvExportSummary = exclusive {
+        try {
+            context.contentResolver.openOutputStream(uri, "wt")?.use { exportCsvBundleLocked(it, CsvExporter.DEFAULT_PAGE_SIZE) }
+                ?: throw BackupException("Couldn't open that file for writing.")
+        } catch (e: Throwable) {
+            withContext(NonCancellable) {
+                runCatching { DocumentsContract.deleteDocument(context.contentResolver, uri) }
+            }
+            throw e
         }
     }
 

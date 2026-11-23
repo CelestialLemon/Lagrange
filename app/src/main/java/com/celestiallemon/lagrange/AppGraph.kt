@@ -23,6 +23,13 @@ import com.celestiallemon.lagrange.data.LabRepository
 import com.celestiallemon.lagrange.data.CheckInStore
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.ServiceKind
+import com.celestiallemon.lagrange.digest.DigestNotifier
+import com.celestiallemon.lagrange.digest.DigestPoster
+import com.celestiallemon.lagrange.digest.DigestRepository
+import com.celestiallemon.lagrange.digest.DigestScheduler
+import com.celestiallemon.lagrange.digest.DigestService
+import com.celestiallemon.lagrange.domain.digest.Digest
+import com.celestiallemon.lagrange.domain.digest.DigestKind
 import com.celestiallemon.lagrange.friction.LagrangeAccessibilityService
 import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
 import com.celestiallemon.lagrange.harvest.HarvestResult
@@ -32,8 +39,10 @@ import com.celestiallemon.lagrange.notifications.NotificationRecorder
 import com.celestiallemon.lagrange.harvest.WorkScheduler
 import com.celestiallemon.lagrange.notifications.LagrangeNotificationListenerService
 import com.celestiallemon.lagrange.system.DataReset
+import com.celestiallemon.lagrange.widget.SurfaceRefresher
 import java.io.File
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -43,7 +52,9 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -72,6 +83,18 @@ class AppGraph(private val app: Application) {
      * [StartupFailedException] when it failed, so callers never touch data from a generation that wasn't recovered.
      */
     suspend fun awaitReady() = gate.awaitReady()
+
+    private val housekeepingDone = CompletableDeferred<Unit>()
+
+    /**
+     * [awaitReady], then waits for startup housekeeping too: friction live status read from disk, the widget/tile
+     * refresher started and the digest schedule checked once. Broadcast receivers await this before they finish, so
+     * the process isn't frozen with that work half done.
+     */
+    suspend fun awaitStarted() {
+        awaitReady()
+        housekeepingDone.await()
+    }
 
     /** First touched by [start] on the IO dispatcher; other callers come after [awaitReady]. */
     val database: LagrangeDatabase by lazy { openDatabase() }
@@ -147,6 +170,53 @@ class AppGraph(private val app: Application) {
         LagrangeBackups(app, database, preferences, restore, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong())
     }
 
+    /** Keeps the home-screen widget and the Focus Boost tile in step with the data and live friction state. */
+    val surfaces by lazy { SurfaceRefresher(app, this) }
+
+    val digestNotifier by lazy { DigestNotifier(app) }
+
+    /**
+     * The friction switch, kept current for the whole process (null until DataStore's first emission). The Quick
+     * Settings tile reads it synchronously in its click callback. Touch only after [awaitReady].
+     */
+    val frictionEnabledState: StateFlow<Boolean?> by lazy {
+        preferences.prefs.map { it.frictionEnabled }.stateIn(applicationScope, SharingStarted.Eagerly, null)
+    }
+
+    private val digestRepository by lazy { DigestRepository(database, derived, lab, preferences) }
+
+    /** Reflection digests and the coverage-gap alert: composed, claimed once per day / week, then posted. */
+    val digests by lazy {
+        DigestService(
+            compose = { kind, anchor ->
+                when (kind) {
+                    DigestKind.DAILY -> digestRepository.composeDaily(anchor)
+                    DigestKind.WEEKLY -> digestRepository.composeWeekly(anchor)
+                }
+            },
+            claim = { kind, key ->
+                when (kind) {
+                    DigestKind.DAILY -> preferences.claimDailyDigest(key)
+                    DigestKind.WEEKLY -> preferences.claimWeeklyDigest(key)
+                }
+            },
+            release = { kind, key ->
+                when (kind) {
+                    DigestKind.DAILY -> preferences.releaseDailyDigest(key)
+                    DigestKind.WEEKLY -> preferences.releaseWeeklyDigest(key)
+                }
+            },
+            poster = object : DigestPoster {
+                override fun canPost() = digestNotifier.canPost()
+                override fun post(digest: Digest) = digestNotifier.post(digest)
+                override fun postCoverageAlert(silentHours: Long) = digestNotifier.postCoverageAlert(silentHours)
+            },
+            lastHarvestAtMs = { database.ingestionStateDao().get(com.celestiallemon.lagrange.data.IngestionKeys.LAST_HARVEST_AT_MS) },
+            claimCoverageAlert = preferences::claimCoverageAlert,
+            releaseCoverageAlert = preferences::releaseCoverageAlert,
+        )
+    }
+
     /** Message about the last restore attempt, shown once wherever the user is (onboarding included). */
     val restoreNotice = MutableStateFlow<String?>(null)
 
@@ -178,7 +248,49 @@ class AppGraph(private val app: Application) {
             } catch (e: Exception) {
                 Log.e(TAG, "startup housekeeping failed", e)
             }
-            startDerivedPipeline()
+            try {
+                startDerivedPipeline()
+                startSurfacesAndDigests()
+            } finally {
+                housekeepingDone.complete(Unit)
+            }
+        }
+    }
+
+    /**
+     * Widget/tile refresher, and digest scheduling that follows the digest settings (startup, restore, toggles and
+     * time changes all land here). Scheduling is idempotent: an already queued run for the same settings and zone
+     * is kept, so a process started by WorkManager to run a digest never cancels it.
+     */
+    private suspend fun startSurfacesAndDigests() {
+        try {
+            digestNotifier.ensureChannels()
+            surfaces.start()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "surface refresher failed to start", e)
+        }
+        frictionEnabledState // starts collecting, so the tile has a value before its first tap
+        // Once synchronously, so [awaitStarted] covers it; the collector below then follows every change.
+        try {
+            DigestScheduler.ensureScheduled(app) { DigestScheduler.Settings.of(preferences.current()) }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "digest scheduling failed", e)
+        }
+        applicationScope.launch(Dispatchers.IO) {
+            preferences.prefs.map { DigestScheduler.Settings.of(it) }.distinctUntilChanged().collect {
+                try {
+                    // The change is only the trigger: the latest settings are re-read under the scheduler lock.
+                    DigestScheduler.ensureScheduled(app) { DigestScheduler.Settings.of(preferences.current()) }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.e(TAG, "digest scheduling failed", e)
+                }
+            }
         }
     }
 
