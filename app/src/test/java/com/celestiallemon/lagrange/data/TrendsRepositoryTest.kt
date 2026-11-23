@@ -488,6 +488,27 @@ class TrendsRepositoryTest {
         assertNull(laggingDive.insights.friction.quickReopenRate)
     }
 
+    @Test
+    fun `deep dive uses the applied rollover consistently while a rollover change is pending`() = runBlocking {
+        val e = env()
+        val reddit = e.pkg(REDDIT)
+        val day = d(-1)
+        // Rollups and sessions were built under rollover 4: a 03:30 open on `today` belongs to logical day `d(-1)`.
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR, 4L))
+        e.rollups(rollup(day))
+        e.appDay(day, reddit, 10 * MINUTE_MS, 1)
+        e.session(day, at(today, 3, 30), listOf(Triple(reddit, 10 * MINUTE_MS, false)))
+
+        // Switch settings rollover to 0 before rebuild runs: deep dive must keep rollover 4 so totals and sessions agree.
+        val derived0 = DerivedRepository(e.db, settings = { DerivedSettings(0, 60 * MINUTE_MS) }, clock = { now }, fallbackZone = { zone })
+        val repo0 = TrendsRepository(e.db, derived0, clock = { now })
+        val dive = repo0.deepDive(reddit, TrendWindow.custom(day, day))!!
+        assertEquals(4, dive.rolloverHour)
+        assertEquals(0, dive.coveredDays)
+        assertEquals(10 * MINUTE_MS, dive.observedTotalMs)
+        assertEquals(1, dive.insights.shape.runs)
+    }
+
     // -- Refresh signal ----------------------------------------------------------------------------------------------
 
     @Test

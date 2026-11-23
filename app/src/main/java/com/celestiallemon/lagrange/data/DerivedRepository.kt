@@ -280,7 +280,7 @@ class DerivedRepository(
     private suspend fun recompute(fromMs: Long, toMs: Long, restarts: Int = 0): Int {
         val ctx = context()
         if (ctx == null) {
-            finishActive()
+            finishActive(rollover = settings().rolloverHour, fullRebuild = true)
             return 0
         }
         val earliest = ctx.earliest
@@ -603,7 +603,6 @@ class DerivedRepository(
         val s = settings()
         val zones = zoneTimeline()
         val now = clock()
-        val today = zones.dateOf(now, s.rolloverHour)
         val latest = db.rawUsageEventDao().latest()
         val harvested = state.get(IngestionKeys.LAST_HARVEST_AT_MS)
         val collectedEnd = listOfNotNull(latest, harvested).maxOrNull()
@@ -611,6 +610,9 @@ class DerivedRepository(
         val appliedRollover = state.get(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR)?.toInt()
             ?: state.get(IngestionKeys.DERIVED_ROLLOVER_HOUR)?.toInt()
         val rolloverMismatch = appliedRollover != null && appliedRollover != s.rolloverHour
+        // Keep one consistent rollover (the one that built the stored rollups and hourly slots) until the rebuild lands.
+        val effectiveRollover = if (rolloverMismatch) appliedRollover else s.rolloverHour
+        val today = zones.dateOf(now, effectiveRollover)
         val rebuildFrom = listOfNotNull(
             state.get(IngestionKeys.DERIVED_PENDING_FROM_MS),
             state.get(IngestionKeys.DERIVED_ACTIVE_FROM_MS),
@@ -628,17 +630,17 @@ class DerivedRepository(
         }
         var unsettled = when {
             rolloverMismatch -> UNSETTLED_ALL
-            baseDerivedEnd != null -> minOf(zones.dateOf(baseDerivedEnd, s.rolloverHour), today)
+            baseDerivedEnd != null -> minOf(zones.dateOf(baseDerivedEnd, effectiveRollover), today)
             else -> today
         }
         if (!rolloverMismatch && rebuildFrom != null) {
-            val rebuildDate = if (rebuildFrom <= 0L) UNSETTLED_ALL else zones.dateOf(rebuildFrom, s.rolloverHour)
+            val rebuildDate = if (rebuildFrom <= 0L) UNSETTLED_ALL else zones.dateOf(rebuildFrom, effectiveRollover)
             unsettled = minOf(unsettled, rebuildDate)
         }
         val coverageEnd = collectedEnd ?: now
         return AnalyticsContext(
             zones = zones,
-            rolloverHour = s.rolloverHour,
+            rolloverHour = effectiveRollover,
             today = today,
             firstUnsettled = unsettled,
             derivedThroughMs = derivedThrough,

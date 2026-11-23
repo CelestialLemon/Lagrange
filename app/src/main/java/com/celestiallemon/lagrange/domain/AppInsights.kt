@@ -535,7 +535,9 @@ object AppSessionAnalyzer {
         val allPauses = sorted.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
         val pauses = allPauses.filter { it.timestampMs in window }
         val exits = pauses.filter { it.outcome in FrictionVocab.BLOCKING_OUTCOMES }
-        val allOpens = (opens + allPauses.map { it.timestampMs }).sorted()
+        // Derived runs past the derived cutoff may still change (e.g. be reclassified as blocked); directly logged pauses are final.
+        val trustedOpens = opens.filter { it < window.dataEndMs }
+        val allOpens = (trustedOpens + allPauses.map { it.timestampMs }).sorted()
         var j = 0
         var quick = 0
         var pending = 0

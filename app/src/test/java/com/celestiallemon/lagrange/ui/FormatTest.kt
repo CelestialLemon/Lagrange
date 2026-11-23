@@ -9,10 +9,12 @@ import com.celestiallemon.lagrange.ui.trends.label
 import com.celestiallemon.lagrange.ui.trends.scanRetaining
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.toList
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -84,8 +86,6 @@ class FormatTest {
 
     @Test
     fun `debounceAfterFirst emits the first value immediately and debounces subsequent bursts`() = runBlocking {
-        val times = mutableListOf<Pair<Int, Long>>()
-        val start = System.nanoTime()
         val values = flow {
             emit(1)
             delay(30)
@@ -93,14 +93,12 @@ class FormatTest {
             delay(20)
             emit(3)
         }.debounceAfterFirst(120).toList()
-        val elapsedMs = (System.nanoTime() - start) / 1_000_000L
         assertEquals(listOf(1, 3), values)
-        assert(elapsedMs >= 50)
-        // Verify first emission happens immediately without waiting for the debounce window.
-        val firstOnly = flow {
-            emit(42)
-            times += 42 to (System.nanoTime() - start) / 1_000_000L
-        }.debounceAfterFirst(5_000).toList()
-        assertEquals(listOf(42), firstOnly)
+
+        // On a live open flow, the first value must arrive immediately without waiting for the 5s debounce window.
+        val live = MutableSharedFlow<Int>(replay = 1)
+        live.tryEmit(42)
+        val firstValue = withTimeout(500) { live.debounceAfterFirst(5_000).first() }
+        assertEquals(42, firstValue)
     }
 }

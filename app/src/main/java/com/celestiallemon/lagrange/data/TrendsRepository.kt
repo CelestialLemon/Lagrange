@@ -190,7 +190,7 @@ class TrendsRepository(
         val followTo = toMs + rules.quickReopenMs
         val sessions = sessionRows(pkgId, fromMs, toMs)
         val friction = dao.frictionOf(pkgId, fromMs, followTo).map { FrictionRow(it.timestampMs, it.eventKind, it.outcome) }
-        val followUps = dao.runStarts(pkgId, toMs, followTo)
+        val followUps = if (!meta.isSystemSurface) dao.runStarts(pkgId, toMs, followTo) else emptyList()
         val priorRunEndMs = if (!meta.isSystemSurface) dao.lastRunEndBefore(pkgId, fromMs) else null
         val metas = metas()
         val insights = AppSessionAnalyzer.analyze(

@@ -411,6 +411,25 @@ class AppInsightsTest {
         assertEquals(1.0 / 3, f.quickReopenRate!!, 1e-9)
     }
 
+    @Test
+    fun `stale derived runs past the derived cutoff do not confirm a quick reopen, while logged pauses still do`() {
+        val window = InsightWindow(0, 10 * HOUR_MS, dataEndMs = 2 * HOUR_MS + 5 * MINUTE_MS)
+        val events = listOf(
+            // Exit at 02:00 with only a stale derived run at 02:07 (after dataEndMs 02:05) -> pending, not quick reopen.
+            FrictionRow(2 * HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"),
+            // Exit at 03:00 followed by a directly logged LAUNCH_PAUSE at 03:04 -> still confirmed quick reopen.
+            FrictionRow(3 * HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"),
+            FrictionRow(3 * HOUR_MS + 4 * MINUTE_MS, "LAUNCH_PAUSE", "CONTINUED"),
+        )
+        val staleDerivedRuns = listOf(2 * HOUR_MS + 7 * MINUTE_MS)
+        val f = AppSessionAnalyzer.friction(events, opens = staleDerivedRuns, window = window)
+        assertEquals(2, f.immediateExits)
+        assertEquals(1, f.quickReopens)
+        assertEquals(1, f.pendingExits)
+        assertEquals(1, f.resolvedExits)
+        assertEquals(1.0, f.quickReopenRate!!, 1e-9)
+    }
+
     // -- Time-of-day profile -----------------------------------------------------------------------------------------
 
     @Test

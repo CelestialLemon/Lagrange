@@ -203,7 +203,9 @@ fun DeltaLine(delta: PeriodDelta, unit: MetricUnit, higherIsBetter: Boolean, all
         )
         else -> {
             val d = delta.deltaMean!!
-            val flat = abs(d) < 1e-9 || (delta.pctChange?.let { abs(it) < 0.02 } ?: false)
+            val pct = delta.pctChange
+            val magnitude = if (pct != null) formatPct(pct) else formatMetric(abs(d), unit)
+            val flat = abs(d) < 1e-9 || (pct != null && abs(pct) < 0.02) || (pct == null && (magnitude == "0" || magnitude == "0m"))
             val better = if (higherIsBetter) d > 0 else d < 0
             val color = when {
                 flat -> status.neutral
@@ -218,8 +220,6 @@ fun DeltaLine(delta: PeriodDelta, unit: MetricUnit, higherIsBetter: Boolean, all
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(icon, null, tint = color, modifier = Modifier.size(20.dp))
                 Spacer(Modifier.width(Space.s))
-                val pct = delta.pctChange
-                val magnitude = if (pct != null) formatPct(pct) else formatMetric(abs(d), unit)
                 Text(
                     when {
                         flat -> "About the same as the previous ${prev.range.days} days"

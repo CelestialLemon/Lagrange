@@ -640,20 +640,23 @@ class DerivedRepositoryTest {
         assertEquals(4L, e.state(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR))
         assertEquals(today, e.repo.analyticsContext().firstUnsettled)
 
-        // Changing rollover hour immediately invalidates coverage even before reconcileSettings() runs.
+        // Changing rollover hour immediately invalidates coverage and keeps the applied rollover consistent until rebuild finishes.
         settings = settings.copy(rolloverHour = 0)
         val beforeReconcile = e.repo.analyticsContext()
+        assertEquals(4, beforeReconcile.rolloverHour)
         assertTrue(beforeReconcile.firstUnsettled.isBefore(today.minusDays(10)))
         assertEquals(Long.MIN_VALUE, beforeReconcile.derivedThroughMs)
 
-        // Still unsettled after reconcileSettings() queues the rebuild.
+        // Still unsettled under the old rollover after reconcileSettings() queues the rebuild.
         assertTrue(e.repo.reconcileSettings())
         val whilePending = e.repo.analyticsContext()
+        assertEquals(4, whilePending.rolloverHour)
         assertTrue(whilePending.firstUnsettled.isBefore(today.minusDays(10)))
 
         // Settled again only after the full rebuild commits under the new rollover hour.
         e.repo.runPending()
         assertEquals(0L, e.state(IngestionKeys.DERIVED_APPLIED_ROLLOVER_HOUR))
+        assertEquals(0, e.repo.analyticsContext().rolloverHour)
         assertEquals(today, e.repo.analyticsContext().firstUnsettled)
         assertEquals(now, e.repo.analyticsContext().derivedThroughMs)
     }

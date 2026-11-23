@@ -135,7 +135,12 @@ fun AppDeepDiveScreen(
         onBack = onBack,
     ) {
         item("identity") {
-            IdentityCard(category, goal, onCategory = vm::setCategory, onGoal = vm::setGoal)
+            IdentityCard(
+                category,
+                goal,
+                onCategory = { vm.setCategory(pkgId, it) },
+                onGoal = { vm.setGoal(pkgId, it) },
+            )
         }
         item("window") {
             WindowChips(window, d?.today, d?.earliest, onWindow = { window = it; selected = null }, range = d?.range)

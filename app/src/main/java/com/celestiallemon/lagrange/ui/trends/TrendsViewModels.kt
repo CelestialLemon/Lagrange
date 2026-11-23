@@ -81,6 +81,8 @@ private fun AppGraph.trendsRefresh(includeGoals: Boolean): Flow<Any> = afterRead
             minuteTickFlow().map { derived.dateOf(it) }.distinctUntilChanged(),
             preferences.prefs.map { it.rolloverHour to it.dailyBudgetMs }.distinctUntilChanged(),
             state.observe(IngestionKeys.DERIVED_LAST_RUN_AT_MS).distinctUntilChanged(),
+            state.observe(IngestionKeys.DERIVED_PENDING_FROM_MS).distinctUntilChanged(),
+            state.observe(IngestionKeys.DERIVED_ACTIVE_FROM_MS).distinctUntilChanged(),
             state.observe(IngestionKeys.LAST_HARVEST_AT_MS).distinctUntilChanged(),
             database.analyticsDao().observeUserSignals().distinctUntilChanged(),
             database.packageDao().observeAll().map { rows ->
@@ -238,17 +240,15 @@ class AppDeepDiveViewModel(app: Application) : AndroidViewModel(app) {
         if (id == null) flowOf(null) else graph.afterReady { database.analyticsDao().observePackage(id) }
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    fun setGoal(goalMs: Long?) {
-        val id = request.value?.first ?: return
-        launchIo { graph.trends.setDailyGoal(id, goalMs) }
+    fun setGoal(pkgId: Long, goalMs: Long?) {
+        launchIo { graph.trends.setDailyGoal(pkgId, goalMs) }
     }
 
-    fun setCategory(category: AppCategory) {
-        val targetId = request.value?.first ?: return
+    fun setCategory(pkgId: Long, category: AppCategory) {
         if (category == AppCategory.SELF_APP) return
-        val cachedName = pkgRow.value?.takeIf { it.id == targetId }?.packageName
+        val cachedName = pkgRow.value?.takeIf { it.id == pkgId }?.packageName
         launchIo {
-            val name = cachedName ?: graph.database.analyticsDao().packageById(targetId)?.packageName ?: return@launchIo
+            val name = cachedName ?: graph.database.analyticsDao().packageById(pkgId)?.packageName ?: return@launchIo
             graph.catalog.setCategory(name, category)
         }
     }
