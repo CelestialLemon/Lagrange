@@ -8,7 +8,11 @@ import com.celestiallemon.lagrange.data.db.TriggerEvidence.NO_OBSERVED_TRIGGER
 import com.celestiallemon.lagrange.data.db.TriggerEvidence.OBSERVED_CLICK
 import com.celestiallemon.lagrange.data.db.TriggerEvidence.PARTIAL_COVERAGE
 import com.celestiallemon.lagrange.data.db.TriggerEvidence.RECENT_POSSIBLE_ALERT
+import com.celestiallemon.lagrange.data.db.CoverageStatus
+import com.celestiallemon.lagrange.data.db.ServiceKind
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -207,6 +211,48 @@ class AppInsightsTest {
         assertEquals(mapOf(NO_OBSERVED_TRIGGER to 1), t.midSession)
     }
 
+    @Test
+    fun `a switch without evidence is labelled by coverage at its own moment, not the episode's`() {
+        val listener = CoverageSpan(ServiceKind.NOTIFICATION_LISTENER, CoverageStatus.ACTIVE, 0, 2 * HOUR_MS)
+        val backfill = CoverageSpan(ServiceKind.USAGE_HARVEST, CoverageStatus.BACKFILL, 5 * HOUR_MS, 6 * HOUR_MS)
+        val sessions = listOf(
+            // The episode started unobserved, but the listener was recording when the switch happened.
+            session(HOUR_MS, other to MINUTE_MS, app to MINUTE_MS, trigger = PARTIAL_COVERAGE),
+            // The episode started observed, but the switch fell outside any coverage.
+            session(3 * HOUR_MS, other to MINUTE_MS, app to MINUTE_MS, trigger = OBSERVED_CLICK),
+            session(5 * HOUR_MS, other to MINUTE_MS, app to MINUTE_MS, trigger = OBSERVED_CLICK),
+        )
+        val t = AppSessionAnalyzer.analyze(app, sessions, emptyList(), isTransient, switchCoverage = SwitchCoverage.of(listOf(listener, backfill))).triggers
+        assertEquals(mapOf(NO_OBSERVED_TRIGGER to 1, PARTIAL_COVERAGE to 1, BACKFILL to 1), t.midSession)
+    }
+
+    @Test
+    fun `a blocked attempt then a real run is one arrival carrying the attempt's evidence`() {
+        val s = session(
+            0, other to MINUTE_MS, app to 3_000L, app to MINUTE_MS,
+            blockedIdx = setOf(1), segEvidence = mapOf(1 to OBSERVED_CLICK), trigger = NO_OBSERVED_TRIGGER,
+        )
+        val insights = analyze(listOf(s))
+        assertEquals(mapOf(OBSERVED_CLICK to 1), insights.triggers.midSession)
+        assertEquals(1, insights.shape.runs)
+    }
+
+    @Test
+    fun `runs belong to the window they open in, whatever day their episode started`() {
+        val sessions = listOf(
+            session(0, app to MINUTE_MS),
+            // Started before the window; the app opened inside it.
+            session(HOUR_MS - MINUTE_MS, other to 2 * MINUTE_MS, app to MINUTE_MS),
+            // Started inside; the app only after the window.
+            session(2 * HOUR_MS - MINUTE_MS, other to 2 * MINUTE_MS, app to MINUTE_MS),
+        )
+        val window = InsightWindow(HOUR_MS, 2 * HOUR_MS)
+        val insights = AppSessionAnalyzer.analyze(app, sessions, emptyList(), isTransient, window = window)
+        assertEquals(1, insights.shape.runs)
+        assertEquals(1, insights.value.episodes)
+        assertEquals(1, insights.triggers.total)
+    }
+
     // -- Value -------------------------------------------------------------------------------------------------------
 
     @Test
@@ -265,6 +311,38 @@ class AppInsightsTest {
         assertEquals(0.5, f.extensionRate!!, 1e-9)
     }
 
+    @Test
+    fun `a reopen at exactly ten minutes is not quick, and a late exit's follow-up past the window counts`() {
+        val window = InsightWindow(0, 10 * HOUR_MS, dataEndMs = 10 * HOUR_MS + 20 * MINUTE_MS)
+        val late = 10 * HOUR_MS - 2 * MINUTE_MS
+        val events = listOf(
+            FrictionRow(HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"),
+            FrictionRow(late, "LAUNCH_PAUSE", "CLOSED_SYSTEM_NAV"),
+            FrictionRow(11 * HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"), // after the window: not counted
+        )
+        val opens = listOf(HOUR_MS + 10 * MINUTE_MS, late + 5 * MINUTE_MS)
+        val f = AppSessionAnalyzer.friction(events, opens, window = window)
+        assertEquals(2, f.launchPauses)
+        assertEquals(2, f.immediateExits)
+        assertEquals(1, f.quickReopens)
+        assertEquals(0, f.pendingExits)
+        assertEquals(0.5, f.quickReopenRate!!, 1e-9)
+    }
+
+    @Test
+    fun `an exit whose ten minutes are not collected yet is pending, not a miss`() {
+        val window = InsightWindow(0, 10 * HOUR_MS, dataEndMs = 10 * HOUR_MS)
+        val events = listOf(
+            FrictionRow(HOUR_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"),
+            FrictionRow(10 * HOUR_MS - 5 * MINUTE_MS, "LAUNCH_PAUSE", "CLOSED_GO_HOME"),
+        )
+        val f = AppSessionAnalyzer.friction(events, emptyList(), window = window)
+        assertEquals(2, f.immediateExits)
+        assertEquals(1, f.pendingExits)
+        assertEquals(1, f.resolvedExits)
+        assertEquals(0.0, f.quickReopenRate!!, 1e-9)
+    }
+
     // -- Time-of-day profile -----------------------------------------------------------------------------------------
 
     @Test
@@ -310,6 +388,16 @@ class AppInsightsTest {
         assertEquals(21, HourSlots.repeatedSlot(window, 4))
         val p = TimeOfDayProfile.build(4, emptyList(), listOf(RepeatedHourCell(window.date, MINUTE_MS, 1)), { HourSlots.repeatedSlot(window, 4) }, 1)
         assertEquals(1, p.bins.first { it.avgMs > 0 }.wallHour)
+    }
+
+    @Test
+    fun `on a travel day the repeated slot follows the zone in force at the fall-back`() {
+        // Phoenix (no DST) at the day's start, then New York from 03:00 UTC, before its 06:00 UTC fall-back.
+        val switch = Instant.parse("2026-11-01T03:00:00Z").toEpochMilli()
+        val zones = ZoneTimeline(listOf(0L to ZoneId.of("America/Phoenix"), switch to ZoneId.of("America/New_York")), ZoneId.of("UTC"))
+        val window = zones.window(LocalDate.parse("2026-10-31"), 4)
+        assertNull(HourSlots.repeatedSlot(window, 4))
+        assertEquals(21, HourSlots.repeatedSlot(window, 4, zones)) // 01:00 repeats, 21 slots after 04:00
     }
 
     @Test
@@ -359,6 +447,21 @@ class AppInsightsTest {
         assertNull(thin.trendPct)
         val none = AppsBreakdown.rows(listOf(AppWindowTotals(1, 10, 1, 0, 0)), emptyList(), 0, 0, metas, 3).single()
         assertNull(none.dailyAvgMs)
+    }
+
+    @Test
+    fun `apps with a goal stay listed at zero when unused, system surfaces never`() {
+        val meta = mapOf(
+            1L to AppMeta(1, "a", "A", AppCategory.DISTRACTING, null),
+            2L to AppMeta(2, "b", "B", AppCategory.DISTRACTING, 30 * MINUTE_MS),
+            3L to AppMeta(3, "c", "C", AppCategory.NEUTRAL, 30 * MINUTE_MS, isSystemSurface = true),
+            4L to AppMeta(4, "d", "D", AppCategory.NEUTRAL, null),
+        )
+        val rows = AppsBreakdown.rows(listOf(AppWindowTotals(1, MINUTE_MS, 1, MINUTE_MS, 1)), emptyList(), 5, 5, meta, 3)
+        assertEquals(listOf(1L, 2L), rows.map { it.meta.pkgId })
+        val goal = rows.last()
+        assertEquals(0L, goal.totalMs)
+        assertEquals(0.0, goal.dailyAvgMs!!, 0.0)
     }
 
     @Test

@@ -11,6 +11,7 @@ import com.celestiallemon.lagrange.data.db.DayCoverage
 import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.data.db.FrictionEventEntity
 import com.celestiallemon.lagrange.data.db.HourlyAppUsageEntity
+import com.celestiallemon.lagrange.data.db.IngestionStateEntity
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.SessionEntity
 import com.celestiallemon.lagrange.data.db.SessionSegmentEntity
@@ -60,7 +61,7 @@ class TrendsRepositoryTest {
     private fun env(): Env {
         val db = LagrangeDatabase.inMemory(context).also { dbs += it }
         val derived = DerivedRepository(db, settings = { settings }, clock = { now }, fallbackZone = { zone })
-        return Env(db, TrendsRepository(db, derived, settings = { settings }, clock = { now }), Interner(db, FakeResolver()))
+        return Env(db, TrendsRepository(db, derived, clock = { now }), Interner(db, FakeResolver()))
     }
 
     private fun d(offset: Long) = today.plusDays(offset)
@@ -135,6 +136,12 @@ class TrendsRepositoryTest {
         db.packageDao().setCategory(name, category.name, now)
         return id
     }
+
+    private fun friction(ts: Long, pkg: Long, outcome: String) = FrictionEventEntity(
+        timestampUtcMs = ts, logicalDate = "", pkgId = pkg, eventKind = "LAUNCH_PAUSE", scheduleId = null, escalationTier = 0,
+        pauseDurationSec = 5, postCountdownReactionMs = null, intentionTag = null, selectedTimerMin = null, redirectPkgId = null,
+        outcome = outcome,
+    )
 
     // -- Trends dataset ----------------------------------------------------------------------------------------------
 
@@ -366,26 +373,79 @@ class TrendsRepositoryTest {
         assertNull(e.db.analyticsDao().packageById(reddit)!!.dailyGoalMs)
     }
 
+    // -- Review regressions --------------------------------------------------------------------------------------------
+
+    @Test
+    fun `a day the last harvest hasn't finished stays in progress even after rollover`() = runBlocking {
+        val e = env()
+        // The last harvest ran yesterday evening: yesterday's rollup is complete as far as it goes, but not settled.
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(d(-1), 22)))
+        e.rollups(rollup(d(-2), distracting = 10 * MINUTE_MS), rollup(d(-1), distracting = 5 * MINUTE_MS))
+        val data = e.repo.trendData(TrendWindow(WindowKind.D7))
+        assertEquals(d(-1), data.firstUnsettled)
+        val report = TrendCalculator.report(TrendMetric.DISTRACTING, data.window, data.range, data.days)
+        val byDate = report.points.associateBy { it.date }
+        assertEquals(DayQuality.COVERED, byDate.getValue(d(-2)).sample.quality)
+        assertEquals(DayQuality.IN_PROGRESS, byDate.getValue(d(-1)).sample.quality)
+        assertEquals(1, report.coveredDays)
+    }
+
+    @Test
+    fun `deep dive opens count in the window they happened, not their episode's day`() = runBlocking {
+        val e = env()
+        val reddit = e.pkg(REDDIT)
+        val chrome = e.pkg(CHROME, AppCategory.NEUTRAL)
+        val first = d(-29) // first day of a 30-day window
+        // An episode of the day before the window (03:30 is before the 04:00 rollover) reaching Reddit inside it.
+        e.session(first.minusDays(1), at(first, 3, 30), listOf(Triple(chrome, 40 * MINUTE_MS, false), Triple(reddit, MINUTE_MS, false)))
+        // One entirely before the window.
+        e.session(first.minusDays(1), at(first, 2, 0), listOf(Triple(reddit, MINUTE_MS, false)))
+        val dive = e.repo.deepDive(reddit, TrendWindow(WindowKind.D30))!!
+        assertEquals(1, dive.insights.shape.runs)
+        assertEquals(1, dive.insights.triggers.total)
+    }
+
+    @Test
+    fun `an unknown coverage label never counts as covered`() = runBlocking {
+        val e = env()
+        val reddit = e.pkg(REDDIT)
+        e.rollups(rollup(d(-1)), rollup(d(-2)).copy(coverageStatus = "SOMETHING_NEWER"))
+        e.appDay(d(-1), reddit, 20 * MINUTE_MS, 2)
+        e.appDay(d(-2), reddit, 50 * MINUTE_MS, 5)
+        val data = e.repo.trendData(TrendWindow(WindowKind.D7))
+        val row = e.repo.apps(data).single { it.meta.pkgId == reddit }
+        assertEquals(70 * MINUTE_MS, row.totalMs)
+        assertEquals(20.0 * MINUTE_MS, row.dailyAvgMs!!, 1e-6) // only d(-1) is covered
+    }
+
+    @Test
+    fun `an app with a goal but no use in the window is still listed`() = runBlocking {
+        val e = env()
+        val reddit = e.pkg(REDDIT)
+        e.rollups(rollup(d(-1)))
+        e.repo.setDailyGoal(reddit, 30 * MINUTE_MS)
+        val rows = e.repo.apps(e.repo.trendData(TrendWindow(WindowKind.D7)))
+        assertEquals(listOf(reddit), rows.map { it.meta.pkgId })
+        assertEquals(0L, rows.single().totalMs)
+    }
+
     // -- Refresh signal ----------------------------------------------------------------------------------------------
 
     @Test
-    fun `the derived signature changes when rollups or ratings change`() = runBlocking {
+    fun `user signals change when an episode is rated or friction is logged`() = runBlocking {
         val e = env()
         val reddit = e.pkg(REDDIT)
         val dao = e.db.analyticsDao()
-        val empty = dao.observeDerivedSignature().first()
-        e.rollups(rollup(d(-1), distracting = MINUTE_MS))
-        val one = dao.observeDerivedSignature().first()
-        assertFalse(empty == one)
-        e.rollups(rollup(d(-1), DayCoverage.PARTIAL_HARVEST, DayStatus.UNCERTAIN_COVERAGE, distracting = MINUTE_MS))
-        val status = dao.observeDerivedSignature().first()
-        assertFalse(one == status)
         e.session(d(-1), at(d(-1), 9), listOf(Triple(reddit, MINUTE_MS, false)))
-        val unrated = dao.observeDerivedSignature().first()
+        val unrated = dao.observeUserSignals().first()
         assertEquals(1, e.db.derivedDao().setRatingByKey("e${episode - 1}", 4))
-        val rated = dao.observeDerivedSignature().first()
+        val rated = dao.observeUserSignals().first()
         assertFalse(unrated == rated)
-        assertNotNull(dao.earliestRollupDate())
+        e.db.derivedDao().setRatingByKey("e${episode - 1}", 2)
+        val rerated = dao.observeUserSignals().first()
+        assertFalse(rated == rerated)
+        e.db.derivedDao().insertFrictionEvent(friction(at(d(-1), 10), reddit, "CLOSED_GO_HOME"))
+        assertFalse(rerated == dao.observeUserSignals().first())
     }
 
     private companion object {

@@ -1,5 +1,6 @@
 package com.celestiallemon.lagrange.ui.trends
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -16,7 +17,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.DateRange
 import androidx.compose.material.icons.outlined.TrendingDown
@@ -42,7 +42,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.celestiallemon.lagrange.domain.DateRange
@@ -75,9 +80,13 @@ import kotlin.math.roundToInt
 /** A metric value for display: durations as "1h 5m" (signed when negative), counts with one decimal below ten. */
 fun formatMetric(v: Double?, unit: MetricUnit): String {
     if (v == null) return "–"
+    // A sign only appears when the magnitude survives rounding, so there is never a "−0m" or "−0".
     return when (unit) {
-        MetricUnit.DURATION -> (if (v < 0) "−" else "") + formatDurationShort(abs(v).toLong())
-        MetricUnit.COUNT -> if (abs(v) >= 10 || v == v.roundToInt().toDouble()) "${v.roundToInt()}" else String.format(Locale.getDefault(), "%.1f", v)
+        MetricUnit.DURATION -> (if (v <= -30_000.0) "−" else "") + formatDurationShort(abs(v).toLong())
+        MetricUnit.COUNT -> {
+            val c = if (abs(v) < 0.05) 0.0 else v
+            if (abs(c) >= 10 || c == c.roundToInt().toDouble()) "${c.roundToInt()}" else String.format(Locale.getDefault(), "%.1f", c)
+        }
     }
 }
 
@@ -137,7 +146,8 @@ fun WindowChips(window: TrendWindow, today: LocalDate?, earliest: LocalDate?, on
         val state = rememberDateRangePickerState(
             initialSelectedStartDateMillis = (window.customStart ?: range?.start)?.utcMillis(),
             initialSelectedEndDateMillis = (window.customEnd ?: range?.end)?.utcMillis(),
-            yearRange = (earliest ?: max.minusYears(1)).year..max.year,
+            // Wide enough for the history, an earlier custom start, and at least last year.
+            yearRange = listOfNotNull(earliest?.year, (window.customStart ?: range?.start)?.year, max.minusYears(1).year).min()..max.year,
             selectableDates = object : SelectableDates {
                 override fun isSelectableDate(utcTimeMillis: Long): Boolean = !utcTimeMillis.utcDate().isAfter(max)
                 override fun isSelectableYear(year: Int): Boolean = year <= max.year
@@ -227,13 +237,14 @@ fun CoveragePills(covered: Int, partial: Int, noData: Int, inProgress: Int) {
         StatusPill("$covered covered", status.good)
         if (partial > 0) StatusPill("$partial partial", status.warn)
         if (noData > 0) StatusPill("$noData no data", status.neutral)
-        if (inProgress > 0) StatusPill("Today in progress", MaterialTheme.colorScheme.primary)
+        if (inProgress == 1) StatusPill("1 day in progress", MaterialTheme.colorScheme.primary)
+        if (inProgress > 1) StatusPill("$inProgress days in progress", MaterialTheme.colorScheme.primary)
     }
 }
 
 /** Legend for the trend chart: the bars, the averages that are switched on, and the reference line. */
 @Composable
-fun ChartLegend(ma7: Boolean, ma28: Boolean, reference: String?, colors: TrendColors, onToggle7: () -> Unit, onToggle28: () -> Unit) {
+fun ChartLegend(ma7: Boolean, ma28: Boolean, reference: String?, colors: TrendColors, onToggle7: () -> Unit, onToggle28: () -> Unit, dayMarkers: Boolean = false) {
     FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
         FilterChip(
             selected = ma7,
@@ -254,6 +265,15 @@ fun ChartLegend(ma7: Boolean, ma28: Boolean, reference: String?, colors: TrendCo
                 LegendSwatch(colors.reference)
                 Spacer(Modifier.width(6.dp))
                 Text(reference, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        }
+        if (dayMarkers) {
+            listOf("Spike day" to colors.spike, "Good day" to colors.good).forEach { (label, c) ->
+                Row(Modifier.padding(vertical = Space.s), verticalAlignment = Alignment.CenterVertically) {
+                    Box(Modifier.size(8.dp).clip(CircleShape).background(c))
+                    Spacer(Modifier.width(6.dp))
+                    Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
             }
         }
     }
@@ -327,18 +347,33 @@ fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
         SplitTile("Weekdays", split.weekday, unit, Modifier.weight(1f))
         SplitTile("Weekends", split.weekend, unit, Modifier.weight(1f))
     }
-    val max = split.byDayOfWeek.values.mapNotNull { it.mean }.maxOrNull()?.takeIf { it > 0 } ?: 1.0
+    val means = split.byDayOfWeek.values.mapNotNull { it.mean }
+    val maxAbs = means.maxOfOrNull { abs(it) }?.takeIf { it > 0 } ?: 1.0
+    // Net metrics (valued minus regretted) can be negative: then bars grow both ways from a centre line.
+    val diverging = means.any { it < 0 }
+    val primary = MaterialTheme.colorScheme.primary
+    val tertiary = MaterialTheme.colorScheme.tertiary
+    val axis = MaterialTheme.colorScheme.outlineVariant
     Row(
         Modifier
             .fillMaxWidth()
-            .height(120.dp),
+            .height(132.dp),
         horizontalArrangement = Arrangement.spacedBy(Space.s),
-        verticalAlignment = Alignment.Bottom,
     ) {
         DayOfWeek.entries.forEach { dow ->
             val a = split.byDayOfWeek[dow] ?: DayAverage(null, 0)
             val weekend = dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY
-            Column(Modifier.weight(1f).fillMaxHeight(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Bottom) {
+            val name = dow.getDisplayName(TextStyle.FULL, Locale.getDefault())
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clearAndSetSemantics {
+                        contentDescription = if (a.mean == null) "$name: no covered days"
+                        else "$name: ${formatMetric(a.mean, unit)} on average over ${a.days} covered days"
+                    },
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
                 Text(
                     formatMetric(a.mean, unit),
                     style = MaterialTheme.typography.labelSmall,
@@ -347,14 +382,21 @@ fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
                     overflow = TextOverflow.Clip,
                 )
                 Spacer(Modifier.height(2.dp))
-                val frac = ((a.mean ?: 0.0) / max).toFloat().coerceIn(0f, 1f)
-                Box(
+                val frac = ((a.mean ?: 0.0) / maxAbs).toFloat().coerceIn(-1f, 1f)
+                val color = if (weekend) tertiary else primary.copy(alpha = if (a.days > 0) 0.75f else 0.2f)
+                Canvas(
                     Modifier
                         .fillMaxWidth(0.7f)
-                        .fillMaxHeight(0.62f * frac + 0.02f)
-                        .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
-                        .background(if (weekend) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary.copy(alpha = if (a.days > 0) 0.75f else 0.2f)),
-                )
+                        .weight(1f),
+                ) {
+                    val base = if (diverging) size.height / 2f else size.height
+                    val room = if (diverging) size.height / 2f else size.height
+                    val h = (abs(frac) * room).coerceAtLeast(2.dp.toPx())
+                    val top = if (frac >= 0f) base - h else base
+                    val r = 6.dp.toPx().coerceAtMost(h / 2f)
+                    drawRoundRect(color, topLeft = Offset(0f, top), size = Size(size.width, h), cornerRadius = CornerRadius(r, r))
+                    if (diverging) drawLine(axis, Offset(-size.width * 0.3f, base), Offset(size.width * 1.3f, base), strokeWidth = 1.dp.toPx())
+                }
                 Spacer(Modifier.height(4.dp))
                 Text(dow.getDisplayName(TextStyle.NARROW, Locale.getDefault()), style = MaterialTheme.typography.labelMedium)
                 Text("n=${a.days}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

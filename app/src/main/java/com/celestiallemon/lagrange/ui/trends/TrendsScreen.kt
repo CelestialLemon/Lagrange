@@ -47,11 +47,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.celestiallemon.lagrange.data.db.AppCategory
+import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.domain.AppRow
 import com.celestiallemon.lagrange.domain.AppSort
 import com.celestiallemon.lagrange.domain.TrendMetric
@@ -88,22 +91,20 @@ private const val APPS_PAGE = 25
 
 @Composable
 fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsViewModel = viewModel()) {
-    val loaded by vm.loaded.collectAsStateWithLifecycle()
+    val ui by vm.ui.collectAsStateWithLifecycle()
     val report by vm.report.collectAsStateWithLifecycle()
     val apps by vm.apps.collectAsStateWithLifecycle()
-    val window by vm.window.collectAsStateWithLifecycle()
     val metric by vm.metric.collectAsStateWithLifecycle()
     val query by vm.query.collectAsStateWithLifecycle()
     val category by vm.category.collectAsStateWithLifecycle()
     val sort by vm.sort.collectAsStateWithLifecycle()
-    val loading by vm.loading.collectAsStateWithLifecycle()
-    val error by vm.error.collectAsStateWithLifecycle()
 
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     var ma7 by rememberSaveable { mutableStateOf(true) }
     var ma28 by rememberSaveable { mutableStateOf(true) }
     var appsShown by rememberSaveable { mutableStateOf(APPS_PAGE) }
 
+    val loaded = ui.overview
     val r = report
     LagrangeScreen(
         eyebrow = "Trends",
@@ -112,7 +113,8 @@ fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsVi
         contentPadding = padding,
     ) {
         item("window") {
-            WindowChips(window, loaded?.data?.today, loaded?.data?.earliest, onWindow = { vm.setWindow(it); selected = null }, range = loaded?.data?.range)
+            // The chips show the window asked for; the range line under them is the one the figures below are for.
+            WindowChips(ui.requested, loaded?.data?.today, loaded?.data?.earliest, onWindow = { vm.setWindow(it); selected = null }, range = loaded?.data?.range)
         }
         item("metric") {
             val chip = MetricChip.of(metric)
@@ -122,29 +124,43 @@ fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsVi
                 }
             }
         }
-        if (loading && r == null) {
+        if (ui.loading || ui.stale) {
             item("loading") {
-                SectionCard(title = "Gathering your history", eyebrow = "Trends", icon = Icons.Outlined.Sync) {
-                    LinearProgressIndicator(Modifier.fillMaxWidth())
+                if (r == null) {
+                    SectionCard(title = "Gathering your history", eyebrow = "Trends", icon = Icons.Outlined.Sync) {
+                        LinearProgressIndicator(Modifier.fillMaxWidth())
+                    }
+                } else if (ui.loading) {
+                    LinearProgressIndicator(
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = Space.s)
+                            .semantics { contentDescription = "Updating trends" },
+                    )
                 }
             }
         }
-        if (error != null && r == null) {
+        ui.error?.let { error ->
             item("error") {
-                SectionCard(title = "Trends couldn't load", eyebrow = "Something went wrong") {
-                    Text(error.orEmpty(), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                SectionCard(title = "Trends couldn't update", eyebrow = "Something went wrong") {
+                    Text(
+                        if (r != null) "Still showing ${rangeLabel(r.range)}. $error" else error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = vm::retry) { Text("Try again") }
                 }
             }
         }
         if (r != null) {
             val selectedDate = selected?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
             item("chart") {
-                ChartCard(r, metric, ma7, ma28, { ma7 = !ma7 }, { ma28 = !ma28 }, selectedDate, { selected = it?.toString() }, onMetric = vm::setMetric)
+                ChartCard(r, r.metric, ma7, ma28, { ma7 = !ma7 }, { ma28 = !ma28 }, selectedDate, { selected = it?.toString() }, onMetric = vm::setMetric)
             }
-            item("summary") { SummaryCard(r, window.kind == WindowKind.ALL) }
+            item("summary") { SummaryCard(r, loaded?.data?.window?.kind == WindowKind.ALL) }
             item("split") {
-                SectionCard(title = "Weekdays vs weekends", eyebrow = metric.label, icon = Icons.Outlined.CalendarMonth) {
-                    WeekSplitContent(r.split, metric.unit)
+                SectionCard(title = "Weekdays vs weekends", eyebrow = r.metric.label, icon = Icons.Outlined.CalendarMonth) {
+                    WeekSplitContent(r.split, r.metric.unit)
                 }
             }
         }
@@ -247,7 +263,7 @@ private fun ChartCard(
             description = "${metric.label} over ${r.range.days} days, averaging ${formatMetric(r.coveredMean, metric.unit)} per covered day",
             colors = colors,
         )
-        ChartLegend(ma7, ma28, refLabel?.let { "Daily budget" }, colors, toggle7, toggle28)
+        ChartLegend(ma7, ma28, refLabel?.let { "Daily budget" }, colors, toggle7, toggle28, dayMarkers = r.points.any { it.sample.dayStatus == DayStatus.SPIKE || it.sample.dayStatus == DayStatus.GOOD_DAY })
         val point = selected?.let { d -> r.points.firstOrNull { it.date == d } }
         if (point != null) {
             DayCallout(
@@ -282,7 +298,8 @@ private fun SummaryCard(r: TrendReport, allTime: Boolean) {
         CoveragePills(r.coveredDays, r.partialDays, r.noDataDays, r.inProgressDays)
         val unit = r.metric.unit
         Text(
-            "Observed in total: ${formatMetric(r.observedTotal, unit)}" +
+            (if (r.metric == TrendMetric.VALUED_VS_REGRETTED) "Net valued in total: " else "Observed in total: ") +
+                formatMetric(r.observedTotal, unit) +
                 (if (r.partialDays + r.inProgressDays > 0) " (partial days included; averages use covered days only)." else "."),
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -337,7 +354,7 @@ private fun AppsHeader(
         Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Space.s)) {
             FilterChip(selected = category == null, onClick = { onCategory(null) }, label = { Text("All") })
             listOf(AppCategory.DISTRACTING, AppCategory.NEUTRAL, AppCategory.UTILITY, AppCategory.EXCLUDED, AppCategory.SELF_APP)
-                .filter { it in categories }
+                .filter { it in categories || it == category }
                 .forEach { c -> FilterChip(selected = category == c, onClick = { onCategory(if (category == c) null else c) }, label = { Text(c.label) }) }
         }
         SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {

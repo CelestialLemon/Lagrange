@@ -1,7 +1,9 @@
 package com.celestiallemon.lagrange.domain
 
 import com.celestiallemon.lagrange.data.db.AppCategory
+import com.celestiallemon.lagrange.data.db.CoverageStatus
 import com.celestiallemon.lagrange.data.db.FrictionVocab
+import com.celestiallemon.lagrange.data.db.ServiceKind
 import com.celestiallemon.lagrange.data.db.TriggerEvidence
 import java.time.LocalDate
 
@@ -50,7 +52,7 @@ enum class AppSort(val label: String) { TIME("Time"), OPENS("Opens"), TREND("Tre
 
 object AppsBreakdown {
     /**
-     * Rows for every app with usage (or a goal) in the window. [coveredDays]/[previousCoveredDays] are the numbers of
+     * Rows for every app with usage in the window, plus every app with a goal (at zero when unused). [coveredDays]/[previousCoveredDays] are the numbers of
      * covered days in each window: an app's average divides by all of them, because a covered day without the app is
      * a real zero for it.
      */
@@ -63,7 +65,7 @@ object AppsBreakdown {
         minCoveredDays: Int,
     ): List<AppRow> {
         val prev = previous.associateBy { it.pkgId }
-        return current.mapNotNull { t ->
+        val usedRows = current.mapNotNull { t ->
             val m = meta[t.pkgId] ?: return@mapNotNull null
             if (m.isSystemSurface || (t.totalMs <= 0 && t.opens <= 0)) return@mapNotNull null
             val avg = if (coveredDays > 0) t.coveredMs.toDouble() / coveredDays else null
@@ -75,6 +77,14 @@ object AppsBreakdown {
             }
             AppRow(m, t.totalMs, t.opens, avg, if (coveredDays > 0) t.coveredOpens.toDouble() / coveredDays else null, trend, prevAvg)
         }
+        // An app with a goal stays reachable (and honestly at zero) in a window where it wasn't used at all.
+        val used = usedRows.mapTo(HashSet()) { it.meta.pkgId }
+        val goalOnly = meta.values.filter { it.dailyGoalMs != null && !it.isSystemSurface && it.pkgId !in used }.map { m ->
+            val prevAvg = if (previousCoveredDays > 0) (prev[m.pkgId]?.coveredMs ?: 0L).toDouble() / previousCoveredDays else null
+            val zero = if (coveredDays > 0) 0.0 else null
+            AppRow(m, 0, 0, zero, zero, null, prevAvg)
+        }
+        return usedRows + goalOnly
     }
 
     /** Search (name or package), category filter and sort, applied in that order. */
@@ -258,10 +268,13 @@ data class FrictionSummary(
     val quickReopens: Int,
     val timerCheckIns: Int,
     val extensions: Int,
+    /** Exits too recent to know yet whether a quick reopen follows; kept out of the reopen rate. */
+    val pendingExits: Int = 0,
 ) {
     val hasData: Boolean get() = launchPauses > 0 || timerCheckIns > 0 || extensions > 0
     val exitRate: Double? get() = if (launchPauses > 0) immediateExits.toDouble() / launchPauses else null
-    val quickReopenRate: Double? get() = if (immediateExits > 0) quickReopens.toDouble() / immediateExits else null
+    val resolvedExits: Int get() = immediateExits - pendingExits
+    val quickReopenRate: Double? get() = if (resolvedExits > 0) quickReopens.toDouble() / resolvedExits else null
     val extensionRate: Double? get() = if (timerCheckIns > 0) extensions.toDouble() / timerCheckIns else null
 }
 
@@ -272,6 +285,45 @@ data class AppInsightRules(
     val quickReopenMs: Long = 10 * MINUTE_MS,
     val topFlows: Int = 5,
 )
+
+/**
+ * The instants an analysis speaks for: target-app opens starting in `[fromMs, toMs)`. Sessions may reach outside it
+ * (an episode that began before the rollover); their other segments are still read as neighbours. [dataEndMs] is how
+ * far collection has run, so recent outcomes that could still change are not counted as settled.
+ */
+data class InsightWindow(val fromMs: Long = Long.MIN_VALUE, val toMs: Long = Long.MAX_VALUE, val dataEndMs: Long = Long.MAX_VALUE) {
+    operator fun contains(ms: Long): Boolean = ms >= fromMs && ms < toMs
+
+    companion object {
+        val ALL = InsightWindow()
+    }
+}
+
+/** What a switch without recorded evidence means at its moment: nothing happened, or nothing could have been seen. */
+fun interface SwitchCoverage {
+    fun unobserved(atMs: Long, endMs: Long): TriggerEvidence
+
+    companion object {
+        /**
+         * The reconstructor's rule (spec §4.1) applied to one switch: if the listener recorded the whole window a tap
+         * or alert would have had to fall in, the absence of evidence means [TriggerEvidence.NO_OBSERVED_TRIGGER];
+         * otherwise the switch is [TriggerEvidence.BACKFILL] or [TriggerEvidence.PARTIAL_COVERAGE].
+         */
+        fun of(coverage: List<CoverageSpan>, rules: ReconstructionRules = ReconstructionRules()): SwitchCoverage {
+            val listener = coverage.filter { it.kind == ServiceKind.NOTIFICATION_LISTENER && it.status == CoverageStatus.ACTIVE }.map { it.span }
+            val backfill = coverage.filter { it.status == CoverageStatus.BACKFILL }.map { it.span }
+            return SwitchCoverage { at, end ->
+                val from = at - maxOf(rules.alertBeforeMs, rules.clickBeforeMs)
+                val to = maxOf(at, minOf(at + rules.clickAfterMs, end))
+                when {
+                    to > from && Spans.coveredMs(listener, from, to) >= to - from -> TriggerEvidence.NO_OBSERVED_TRIGGER
+                    Spans.contains(backfill, at) -> TriggerEvidence.BACKFILL
+                    else -> TriggerEvidence.PARTIAL_COVERAGE
+                }
+            }
+        }
+    }
+}
 
 data class AppSessionInsights(
     val shape: SessionShape,
@@ -286,22 +338,29 @@ object AppSessionAnalyzer {
     private val UNOBSERVED = setOf(TriggerEvidence.PARTIAL_COVERAGE, TriggerEvidence.BACKFILL)
 
     /** One real appearance of the target app, with its episode context. */
-    private data class Run(val session: SessionRow, val index: Int, val seg: SegmentRow, val prevReal: SegmentRow?, val nextReal: SegmentRow?)
+    private data class Run(val session: SessionRow, val seg: SegmentRow, val prevReal: SegmentRow?, val nextReal: SegmentRow?)
 
+    /**
+     * @param followUpOpens starts of real runs of the app shortly after the window (quick reopens of late exits).
+     * @param switchCoverage how a switch without evidence is labelled; by default it inherits the episode's label.
+     */
     fun analyze(
         pkgId: Long,
         sessions: List<SessionRow>,
         friction: List<FrictionRow>,
         isTransient: (Long) -> Boolean,
         rules: AppInsightRules = AppInsightRules(),
+        window: InsightWindow = InsightWindow.ALL,
+        followUpOpens: List<Long> = emptyList(),
+        switchCoverage: SwitchCoverage? = null,
     ): AppSessionInsights {
-        val runs = runsOf(pkgId, sessions, isTransient)
+        val runs = runsOf(pkgId, sessions, isTransient).filter { it.seg.startMs in window }
         return AppSessionInsights(
             shape = shape(runs, rules),
             flows = flows(pkgId, runs, rules),
-            triggers = triggers(pkgId, sessions, isTransient),
-            value = value(pkgId, sessions, isTransient),
-            friction = friction(friction, runs.map { it.seg.startMs }, rules),
+            triggers = triggers(pkgId, sessions, isTransient, window, switchCoverage),
+            value = value(pkgId, sessions, isTransient, window),
+            friction = friction(friction, runs.map { it.seg.startMs } + followUpOpens, rules, window),
         )
     }
 
@@ -311,11 +370,10 @@ object AppSessionAnalyzer {
     private fun runsOf(pkgId: Long, sessions: List<SessionRow>, isTransient: (Long) -> Boolean): List<Run> {
         val out = ArrayList<Run>()
         for (session in sessions) {
-            val segs = session.segments.sortedBy { it.seqIndex }
-            val real = segs.filter { isReal(it, isTransient) }
+            val real = session.segments.sortedBy { it.seqIndex }.filter { isReal(it, isTransient) }
             for ((i, seg) in real.withIndex()) {
                 if (seg.pkgId != pkgId) continue
-                out += Run(session, i, seg, real.getOrNull(i - 1), real.getOrNull(i + 1))
+                out += Run(session, seg, real.getOrNull(i - 1), real.getOrNull(i + 1))
             }
         }
         return out.sortedWith(compareBy({ it.seg.startMs }, { it.seg.seqIndex }))
@@ -372,33 +430,47 @@ object AppSessionAnalyzer {
 
     /**
      * How the app was arrived at, with the same structure the reconstructor attributes: the episode's entry carries
-     * the episode trigger; a switch into the app (its immediate predecessor is a different package) carries the
-     * switch evidence. A switch with no evidence is "no observed trigger" when the listener was recording and keeps
-     * the episode's coverage label when it wasn't. Blocked attempts are not arrivals.
+     * the episode trigger; a switch into the app (its predecessor is a different package) carries the switch evidence.
+     * A launch pause the user continued through is part of the same arrival: the real run after it takes the pause's
+     * evidence when it has none of its own. A switch with no evidence is labelled by [switchCoverage] at its moment
+     * (by default it inherits the episode's coverage label). Blocked attempts alone are not arrivals.
      */
-    fun triggers(pkgId: Long, sessions: List<SessionRow>, isTransient: (Long) -> Boolean): TriggerBreakdown {
+    fun triggers(
+        pkgId: Long,
+        sessions: List<SessionRow>,
+        isTransient: (Long) -> Boolean,
+        window: InsightWindow = InsightWindow.ALL,
+        switchCoverage: SwitchCoverage? = null,
+    ): TriggerBreakdown {
         val starts = HashMap<TriggerEvidence, Int>()
         val mid = HashMap<TriggerEvidence, Int>()
         for (s in sessions) {
             val segs = s.segments.sortedBy { it.seqIndex }
             val entry = segs.firstOrNull { !it.isBlockedAttempt && !isTransient(it.pkgId) }
             for ((i, seg) in segs.withIndex()) {
-                if (seg.pkgId != pkgId || !isReal(seg, isTransient)) continue
+                if (seg.pkgId != pkgId || !isReal(seg, isTransient) || seg.startMs !in window) continue
                 if (seg === entry) {
                     starts.merge(s.triggerEvidence, 1, Int::plus)
-                } else if (i > 0 && segs[i - 1].pkgId != pkgId) {
-                    val ev = seg.triggerEvidence
-                        ?: if (s.triggerEvidence in UNOBSERVED) s.triggerEvidence else TriggerEvidence.NO_OBSERVED_TRIGGER
-                    mid.merge(ev, 1, Int::plus)
+                    continue
                 }
+                // Step back over blocked attempts of this app right before it: they are the start of this arrival.
+                var k = i - 1
+                while (k >= 0 && segs[k].pkgId == pkgId && segs[k].isBlockedAttempt) k--
+                if (k < 0 || segs[k].pkgId == pkgId) continue // a continuation of the same app, not an arrival
+                val arrival = segs[k + 1]
+                val ev = seg.triggerEvidence
+                    ?: (k + 1 until i).firstNotNullOfOrNull { segs[it].triggerEvidence }
+                    ?: switchCoverage?.unobserved(arrival.startMs, seg.endMs)
+                    ?: if (s.triggerEvidence in UNOBSERVED) s.triggerEvidence else TriggerEvidence.NO_OBSERVED_TRIGGER
+                mid.merge(ev, 1, Int::plus)
             }
         }
         return TriggerBreakdown(starts, mid)
     }
 
-    /** Self-report on the episodes the app took real part in. */
-    fun value(pkgId: Long, sessions: List<SessionRow>, isTransient: (Long) -> Boolean): ValueSummary {
-        val involved = sessions.filter { s -> s.segments.any { it.pkgId == pkgId && isReal(it, isTransient) } }
+    /** Self-report on the episodes the app took real part in (with a real open inside [window]). */
+    fun value(pkgId: Long, sessions: List<SessionRow>, isTransient: (Long) -> Boolean, window: InsightWindow = InsightWindow.ALL): ValueSummary {
+        val involved = sessions.filter { s -> s.segments.any { it.pkgId == pkgId && isReal(it, isTransient) && it.startMs in window } }
         val ratings = involved.mapNotNull { s -> s.worthItRating?.takeIf { it in 1..5 } }
         return ValueSummary(
             episodes = involved.size,
@@ -409,24 +481,40 @@ object AppSessionAnalyzer {
     }
 
     /**
-     * Launch-pause outcomes for the app. An immediate exit is a pause the user left (home, system navigation or a
-     * healthy redirect); a quick reopen is another open of the app (a real run or another pause) within 10 minutes
-     * of that exit.
+     * Launch-pause outcomes for the app, for events inside [window]. An immediate exit is a pause the user left
+     * (home, system navigation or a healthy redirect); a quick reopen is another open of the app (a real run or
+     * another pause) less than 10 minutes after that exit. [events] and [opens] may reach past the window so a late
+     * exit's follow-up is seen; an exit whose 10 minutes haven't been collected yet (and has no reopen) is pending.
      */
-    fun friction(events: List<FrictionRow>, runStarts: List<Long>, rules: AppInsightRules = AppInsightRules()): FrictionSummary {
+    fun friction(
+        events: List<FrictionRow>,
+        opens: List<Long>,
+        rules: AppInsightRules = AppInsightRules(),
+        window: InsightWindow = InsightWindow.ALL,
+    ): FrictionSummary {
         val sorted = events.sortedBy { it.timestampMs }
-        val pauses = sorted.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
+        val allPauses = sorted.filter { it.eventKind == FrictionVocab.LAUNCH_PAUSE }
+        val pauses = allPauses.filter { it.timestampMs in window }
         val exits = pauses.filter { it.outcome in FrictionVocab.BLOCKING_OUTCOMES }
-        val opens = (runStarts + pauses.map { it.timestampMs }).sorted()
-        val quick = exits.count { e ->
-            opens.any { it > e.timestampMs && it - e.timestampMs <= rules.quickReopenMs }
+        val allOpens = (opens + allPauses.map { it.timestampMs }).sorted()
+        var j = 0
+        var quick = 0
+        var pending = 0
+        for (e in exits) {
+            while (j < allOpens.size && allOpens[j] <= e.timestampMs) j++
+            when {
+                j < allOpens.size && allOpens[j] - e.timestampMs < rules.quickReopenMs -> quick++
+                e.timestampMs + rules.quickReopenMs > window.dataEndMs -> pending++
+            }
         }
+        val inWindow = sorted.filter { it.timestampMs in window }
         return FrictionSummary(
             launchPauses = pauses.size,
             immediateExits = exits.size,
             quickReopens = quick,
-            timerCheckIns = sorted.count { it.eventKind == TIMER_EXPIRED },
-            extensions = sorted.count { it.outcome == EXTENDED_5M },
+            timerCheckIns = inWindow.count { it.eventKind == TIMER_EXPIRED },
+            extensions = inWindow.count { it.outcome == EXTENDED_5M },
+            pendingExits = pending,
         )
     }
 

@@ -13,10 +13,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.saveable.rememberSaveableStateHolder
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -40,6 +43,16 @@ fun TrendsTab(padding: PaddingValues, deepDive: Long?, onDeepDive: (Long?) -> Un
     var progress by remember { mutableFloatStateOf(0f) }
     var edge by remember { mutableIntStateOf(BackEventCompat.EDGE_LEFT) }
 
+    // A closed deep dive forgets its own state (window, selection), so the next visit starts from Trends' window.
+    var shown by rememberSaveable { mutableStateOf<Long?>(null) }
+    LaunchedEffect(deepDive) {
+        val previous = shown
+        if (previous != null && previous != deepDive) saveable.removeState("app-$previous")
+        shown = deepDive
+        // A finished gesture leaves the outgoing page shrunk while it animates away; a new page starts full size.
+        if (deepDive != null) progress = 0f
+    }
+
     PredictiveBackHandler(enabled = deepDive != null) { events ->
         try {
             events.collect {
@@ -48,9 +61,9 @@ fun TrendsTab(padding: PaddingValues, deepDive: Long?, onDeepDive: (Long?) -> Un
             }
             onDeepDive(null)
         } catch (e: CancellationException) {
-            throw e
-        } finally {
+            // Cancelled gesture: spring back.
             progress = 0f
+            throw e
         }
     }
 

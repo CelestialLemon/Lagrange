@@ -62,6 +62,16 @@ import kotlinx.coroutines.withContext
 /** The settings that shape derived tables. */
 data class DerivedSettings(val rolloverHour: Int, val dailyBudgetMs: Long)
 
+/** See [DerivedRepository.analyticsContext]. Days from [firstUnsettled] on are drawn but never counted. */
+data class AnalyticsContext(
+    val zones: com.celestiallemon.lagrange.domain.ZoneTimeline,
+    val rolloverHour: Int,
+    val today: LocalDate,
+    val firstUnsettled: LocalDate,
+    val dataEndMs: Long,
+    val coverage: List<com.celestiallemon.lagrange.domain.CoverageSpan>,
+)
+
 /** Today's same-time-of-day comparison, for the Today screen. */
 data class TodayComparison(
     val date: LocalDate,
@@ -573,6 +583,38 @@ class DerivedRepository(
     suspend fun windowOf(date: LocalDate): com.celestiallemon.lagrange.domain.DayWindow = zoneTimeline().window(date, settings().rolloverHour)
 
     /**
+     * What Trends needs to read the derived tables honestly: the zone timeline, how far collection has run, the
+     * coverage spans, and the first logical day that isn't settled yet. A day is settled only when collection ran past
+     * its end *and* no rebuild touching it is still queued or running; until then its rollup may be clipped at an
+     * older harvest, and its unseen hours must not read as zero.
+     */
+    suspend fun analyticsContext(): AnalyticsContext {
+        val s = settings()
+        val zones = zoneTimeline()
+        val now = clock()
+        val today = zones.dateOf(now, s.rolloverHour)
+        val latest = db.rawUsageEventDao().latest()
+        val harvested = state.get(IngestionKeys.LAST_HARVEST_AT_MS)
+        val dataEnd = listOfNotNull(latest, harvested).maxOrNull()
+        var unsettled = dataEnd?.let { minOf(zones.dateOf(it, s.rolloverHour), today) } ?: today
+        // A queued or running rebuild that reaches into the last couple of days (the harvest that just ran) keeps
+        // those days unsettled until it lands. Older ranges (a full recategorization) only reshuffle settled days.
+        val recentFrom = zones.window(today.minusDays(RECENT_REBUILD_DAYS), s.rolloverHour).startMs
+        val rebuildFrom = listOfNotNull(state.get(IngestionKeys.DERIVED_PENDING_FROM_MS), state.get(IngestionKeys.DERIVED_ACTIVE_FROM_MS))
+            .filter { it >= recentFrom }.minOrNull()
+        if (rebuildFrom != null) unsettled = minOf(unsettled, zones.dateOf(rebuildFrom, s.rolloverHour))
+        val end = dataEnd ?: now
+        return AnalyticsContext(
+            zones = zones,
+            rolloverHour = s.rolloverHour,
+            today = today,
+            firstUnsettled = unsettled,
+            dataEndMs = end,
+            coverage = db.coverageDao().all().map { it.toSpan(end) },
+        )
+    }
+
+    /**
      * One logical day as a replayable fixture: the ledger slice the rebuild itself would read for that day (same
      * adaptive margins) plus its reconstruction.
      */
@@ -723,6 +765,8 @@ class DerivedRepository(
 
     companion object {
         private const val TAG = "LagrangeDerived"
+        /** A queued rebuild starting within this many days before today holds those days unsettled. */
+        private const val RECENT_REBUILD_DAYS = 2L
         const val DEFAULT_CHUNK_DAYS = 3
         /** How far before/after a chunk the ledger is read so episodes crossing its edges reconstruct correctly. */
         const val LOOKBACK_MS = 12 * HOUR_MS

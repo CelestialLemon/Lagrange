@@ -100,7 +100,7 @@ class AppGraph(private val app: Application) {
     val derived by lazy { DerivedRepository(database, settings = derivedSettings) }
 
     /** Trends, the apps breakdown and the per-app deep dive, read from the derived tables. */
-    val trends by lazy { TrendsRepository(database, derived, settings = derivedSettings) }
+    val trends by lazy { TrendsRepository(database, derived) }
 
     private val recomputeKicks = Channel<Unit>(Channel.CONFLATED)
 

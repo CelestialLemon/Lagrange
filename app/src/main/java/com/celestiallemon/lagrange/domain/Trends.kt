@@ -379,10 +379,13 @@ object TrendCalculator {
         )
     }
 
-    /** The dates a report over [range] needs loaded: 27 days of average lead-in and the previous equal-length window. */
-    fun loadRange(range: DateRange, rules: TrendRules = TrendRules()): DateRange {
+    /**
+     * The dates a report over [range] needs loaded: 27 days of average lead-in and, when the window is compared with
+     * the one before it, that previous equal-length window.
+     */
+    fun loadRange(range: DateRange, withPrevious: Boolean = true, rules: TrendRules = TrendRules()): DateRange {
         val leadIn = range.start.minusDays(rules.longWindow - 1L)
-        return DateRange(minOf(leadIn, range.previous().start), range.end)
+        return DateRange(if (withPrevious) minOf(leadIn, range.previous().start) else leadIn, range.end)
     }
 
     fun median(values: List<Double>): Double? {

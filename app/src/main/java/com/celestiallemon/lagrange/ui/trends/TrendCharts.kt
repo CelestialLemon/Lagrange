@@ -31,6 +31,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.domain.DayQuality
 import com.celestiallemon.lagrange.domain.HourBin
 import com.celestiallemon.lagrange.domain.MetricUnit
@@ -57,6 +58,8 @@ data class TrendColors(
     val grid: Color,
     val label: Color,
     val highlight: Color,
+    val spike: Color,
+    val good: Color,
 )
 
 @Composable
@@ -74,15 +77,18 @@ fun rememberTrendColors(bar: Color = MaterialTheme.colorScheme.primary): TrendCo
         grid = scheme.outlineVariant.copy(alpha = 0.6f),
         label = scheme.onSurfaceVariant,
         highlight = scheme.onSurface.copy(alpha = 0.07f),
+        spike = status.bad,
+        good = status.good,
     )
 }
 
 /**
  * Daily bars with optional 7- and 28-day moving averages and a dashed reference line (budget or goal).
  *
- * Coverage is drawn, never hidden: covered days are solid; backfilled days are lighter; partial days are outlined
- * and hatched in a muted colour; today (in progress) is translucent; days with no data at all get a faint hatched
- * column, so they can't be mistaken for a zero-use day (which simply has no bar). Tapping a day selects it.
+ * Coverage is drawn, never hidden: covered days are solid; backfilled days are lighter; partial days sit on a hatched
+ * column (visible even when nearly empty) with an outlined, hatched bar; days still in progress are translucent; days
+ * with no data at all get a faint hatched column, so they can't be mistaken for a zero-use day (which simply has no
+ * bar). Spike and good days carry a dot above the bar. Tapping a day selects it.
  */
 @Composable
 fun TrendChart(
@@ -139,31 +145,53 @@ fun TrendChart(
         }
 
         val slot = plot.width / points.size
-        val barW = max(1f, slot * if (points.size > 120) 0.9f else 0.68f)
+        val barW = (slot * if (points.size > 120) 0.9f else 0.68f).coerceIn(1f, MAX_BAR_WIDTH.toPx())
         val radius = CornerRadius(minOf(barW / 2, 6.dp.toPx()))
+        selected?.let { d ->
+            val i = points.indexOfFirst { it.date == d }
+            if (i >= 0) drawRect(colors.highlight, Offset(plot.left + slot * i, plot.top), Size(slot, plot.height))
+        }
+
+        // Days with no data: one faint hatched block per contiguous run (a year of gaps is a few rects, not 365).
+        var gapStart = -1
+        fun flushGap(end: Int) {
+            if (gapStart < 0) return
+            val l = plot.left + slot * gapStart + (slot - barW) / 2
+            val r = plot.left + slot * (end - 1) + (slot + barW) / 2
+            hatch(Rect(l, plot.top, r, plot.bottom), colors.muted.copy(alpha = 0.18f), spacing = 6.dp.toPx())
+            gapStart = -1
+        }
         points.forEachIndexed { i, p ->
+            val gap = p.sample.quality == DayQuality.NO_DATA || p.sample.value == null
+            if (gap && gapStart < 0) gapStart = i
+            if (!gap) flushGap(i)
+        }
+        flushGap(points.size)
+
+        val markerR = minOf(barW / 2, 3.dp.toPx()).coerceAtLeast(1.5.dp.toPx())
+        points.forEachIndexed { i, p ->
+            val s = p.sample
+            val value = s.value ?: return@forEachIndexed
+            if (s.quality == DayQuality.NO_DATA) return@forEachIndexed
             val cx = plot.left + slot * i + slot / 2
             val left = cx - barW / 2
-            if (p.date == selected) {
-                drawRect(colors.highlight, Offset(plot.left + slot * i, plot.top), Size(slot, plot.height))
+            val partial = s.quality == DayQuality.PARTIAL
+            if (partial) {
+                // A partial day stays visible even when what was observed rounds to nothing.
+                hatch(Rect(left, plot.top, left + barW, plot.bottom), colors.muted.copy(alpha = 0.22f), spacing = 4.dp.toPx())
             }
-            val s = p.sample
-            if (s.quality == DayQuality.NO_DATA || s.value == null) {
-                hatch(Rect(left, plot.top, left + barW, plot.bottom), colors.muted.copy(alpha = 0.18f), spacing = 6.dp.toPx())
-                return@forEachIndexed
+            val fill = when (s.quality) {
+                DayQuality.COVERED -> colors.bar
+                DayQuality.BACKFILL -> colors.bar.copy(alpha = 0.55f)
+                DayQuality.PARTIAL -> colors.muted.copy(alpha = 0.35f)
+                DayQuality.IN_PROGRESS -> colors.bar.copy(alpha = 0.38f)
+                DayQuality.NO_DATA -> colors.muted
             }
-            val (fill, hatched) = when (s.quality) {
-                DayQuality.COVERED -> colors.bar to false
-                DayQuality.BACKFILL -> colors.bar.copy(alpha = 0.55f) to false
-                DayQuality.PARTIAL -> colors.muted.copy(alpha = 0.35f) to true
-                DayQuality.IN_PROGRESS -> colors.bar.copy(alpha = 0.38f) to false
-                DayQuality.NO_DATA -> colors.muted to true
-            }
-            val top = y(s.value)
+            val top = y(value)
             if (abs(zeroY - top) >= 0.5f) {
                 val r = Rect(left, minOf(top, zeroY), left + barW, maxOf(top, zeroY))
                 drawRoundRect(fill, r.topLeft, r.size, radius)
-                if (hatched) {
+                if (partial) {
                     hatch(r, colors.muted.copy(alpha = 0.7f), spacing = 4.dp.toPx())
                     drawRoundRect(colors.muted, r.topLeft, r.size, radius, style = Stroke(1.dp.toPx()))
                 }
@@ -173,29 +201,52 @@ fun TrendChart(
                 if (diverging) {
                     val by = y(-second)
                     val color = if (s.quality.countsAsCovered) colors.negative else colors.negative.copy(alpha = 0.4f)
-                    drawRoundRect(color, Offset(left, zeroY), Size(barW, by - zeroY), radius)
+                    val r = Rect(left, zeroY, left + barW, by)
+                    drawRoundRect(color, r.topLeft, r.size, radius)
+                    if (partial) {
+                        hatch(r, colors.muted.copy(alpha = 0.7f), spacing = 4.dp.toPx())
+                        drawRoundRect(colors.muted, r.topLeft, r.size, radius, style = Stroke(1.dp.toPx()))
+                    }
                 } else {
                     val w = barW * 0.45f
                     val sy = y(second)
                     drawRoundRect(colors.secondary.copy(alpha = if (s.quality.countsAsCovered) 0.9f else 0.45f), Offset(cx - w / 2, sy), Size(w, zeroY - sy), CornerRadius(w / 2))
                 }
             }
+            // Spike and good days (whole-phone baselines) get a dot above the bar.
+            val mark = when (s.dayStatus) {
+                DayStatus.SPIKE -> colors.spike
+                DayStatus.GOOD_DAY -> colors.good
+                else -> null
+            }
+            if (mark != null) {
+                val barTop = minOf(top, zeroY)
+                drawCircle(mark, markerR, Offset(cx, (barTop - markerR - 2.dp.toPx()).coerceAtLeast(plot.top + markerR)))
+            }
         }
         if (diverging) drawLine(colors.label.copy(alpha = 0.5f), Offset(plot.left, zeroY), Offset(plot.right, zeroY), strokeWidth = 1.dp.toPx())
 
-        // Reference line (budget / goal): dashed, labelled at its right end.
+        // Reference line (budget / goal): dashed, one stroke per run of equal values so the dash pattern is unbroken.
         val refs = points.mapNotNull { it.reference }
         if (refs.isNotEmpty()) {
             val dash = PathEffect.dashPathEffect(floatArrayOf(8.dp.toPx(), 6.dp.toPx()))
-            var prev: Offset? = null
-            points.forEachIndexed { i, p ->
-                val r = p.reference ?: return@forEachIndexed run { prev = null }
-                val x0 = plot.left + slot * i
-                val ry = y(r)
-                val start = prev?.takeIf { abs(it.y - ry) < 0.5f } ?: Offset(x0, ry)
-                drawLine(colors.reference, start, Offset(x0 + slot, ry), strokeWidth = 1.5.dp.toPx(), pathEffect = dash)
-                prev = Offset(x0 + slot, ry)
+            var runStart = -1
+            var runValue = 0.0
+            fun flushRef(end: Int) {
+                if (runStart < 0) return
+                val ry = y(runValue)
+                drawLine(colors.reference, Offset(plot.left + slot * runStart, ry), Offset(plot.left + slot * end, ry), strokeWidth = 1.5.dp.toPx(), pathEffect = dash)
+                runStart = -1
             }
+            points.forEachIndexed { i, p ->
+                val r = p.reference
+                if (r == null || (runStart >= 0 && abs(y(r) - y(runValue)) >= 0.5f)) flushRef(i)
+                if (r != null && runStart < 0) {
+                    runStart = i
+                    runValue = r
+                }
+            }
+            flushRef(points.size)
             if (referenceLabel != null) {
                 val ry = y(refs.last())
                 val layout = measurer.measure(referenceLabel, refStyle)
@@ -259,13 +310,15 @@ fun HourProfileChart(bins: List<HourBin>, peakSlot: Int?, description: String, m
             }
             if (i % 6 == 0) {
                 val layout = measurer.measure(String.format(Locale.US, "%02d", b.wallHour), labelStyle)
-                drawText(layout, topLeft = Offset(plot.left + slot * i + (slot - layout.size.width) / 2, plot.bottom + 4.dp.toPx()))
+                val x = (plot.left + slot * i + (slot - layout.size.width) / 2).coerceIn(plot.left, plot.right - layout.size.width)
+                drawText(layout, topLeft = Offset(x, plot.bottom + 4.dp.toPx()))
             }
         }
     }
 }
 
 private val AXIS_WIDTH = 40.dp
+private val MAX_BAR_WIDTH = 40.dp
 
 /** The y range and grid ticks of a trend chart. */
 internal data class ChartScale(val min: Double, val max: Double, val ticks: List<Double>) {

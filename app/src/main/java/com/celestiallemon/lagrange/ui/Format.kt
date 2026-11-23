@@ -68,6 +68,7 @@ fun formatDurationShort(ms: Long): String {
         h > 0 && m > 0 -> "${h}h ${m}m"
         h > 0 -> "${h}h"
         m > 0 -> "${m}m"
+        ms <= 0 -> "0m" // a confirmed zero is exactly zero, never "under a minute"
         else -> "<1m"
     }
 }

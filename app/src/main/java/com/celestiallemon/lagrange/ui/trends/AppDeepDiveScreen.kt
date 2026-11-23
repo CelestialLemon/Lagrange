@@ -38,17 +38,21 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,6 +67,7 @@ import com.celestiallemon.lagrange.domain.LengthBucket
 import com.celestiallemon.lagrange.domain.MINUTE_MS
 import com.celestiallemon.lagrange.domain.MetricUnit
 import com.celestiallemon.lagrange.domain.TrendWindow
+import com.celestiallemon.lagrange.domain.WindowKind
 import com.celestiallemon.lagrange.ui.components.LagrangeScreen
 import com.celestiallemon.lagrange.ui.components.SectionCard
 import com.celestiallemon.lagrange.ui.components.StatRow
@@ -81,6 +86,17 @@ import java.time.LocalDate
 import java.util.Locale
 import kotlin.math.roundToInt
 
+/** Saves a [TrendWindow] as "KIND|start|end" (dates ISO, blank when unset). */
+internal val TrendWindowSaver: Saver<TrendWindow, String> = Saver(
+    save = { w -> listOf(w.kind.name, w.customStart?.toString().orEmpty(), w.customEnd?.toString().orEmpty()).joinToString("|") },
+    restore = { s ->
+        val parts = s.split("|")
+        val kind = WindowKind.entries.firstOrNull { it.name == parts.getOrNull(0) } ?: return@Saver TrendWindow.DEFAULT
+        fun date(i: Int) = parts.getOrNull(i)?.takeIf { it.isNotEmpty() }?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
+        TrendWindow(kind, date(1), date(2))
+    },
+)
+
 private val goalPresetsMin = listOf(15, 30, 45, 60, 90, 120)
 private val choosableCategories = listOf(AppCategory.DISTRACTING, AppCategory.NEUTRAL, AppCategory.UTILITY, AppCategory.EXCLUDED)
 
@@ -92,16 +108,20 @@ fun AppDeepDiveScreen(
     onBack: () -> Unit,
     vm: AppDeepDiveViewModel = viewModel(),
 ) {
-    LaunchedEffect(pkgId) { vm.bind(pkgId, initialWindow) }
-    val loaded by vm.state.collectAsStateWithLifecycle()
+    // The screen owns its window: each visit starts from Trends' window, and it survives rotation and process death.
+    var window by rememberSaveable(stateSaver = TrendWindowSaver) { mutableStateOf(initialWindow) }
+    LaunchedEffect(pkgId, window) { vm.show(pkgId, window) }
+    val ui by vm.ui.collectAsStateWithLifecycle()
     val pkg by vm.pkgRow.collectAsStateWithLifecycle()
-    val window by vm.window.collectAsStateWithLifecycle()
-    val loading by vm.loading.collectAsStateWithLifecycle()
-    // While switching apps the view model may still hold the previous one's figures: never show them under this name.
-    val d = loaded?.takeIf { it.meta.pkgId == pkgId }
+    // Until the view model has taken this app's request, whatever it holds belongs to another visit.
+    val current = ui.pkgId == pkgId
+    val loading = !current || ui.loading
+    val d = ui.dive?.takeIf { current && it.meta.pkgId == pkgId }
     val row = pkg?.takeIf { it.id == pkgId }
     val name = row?.displayName?.ifBlank { row.packageName } ?: d?.meta?.displayName ?: "App"
     val category = row?.category?.let { c -> AppCategory.entries.firstOrNull { it.name == c } } ?: d?.meta?.category
+    // The goal line follows the saved goal at once, without waiting for a reload.
+    val goal = if (row != null) row.dailyGoalMs else d?.meta?.dailyGoalMs
 
     var selected by rememberSaveable(pkgId) { mutableStateOf<String?>(null) }
     var ma7 by rememberSaveable { mutableStateOf(true) }
@@ -115,21 +135,46 @@ fun AppDeepDiveScreen(
         onBack = onBack,
     ) {
         item("identity") {
-            IdentityCard(category, row?.dailyGoalMs, onCategory = vm::setCategory, onGoal = vm::setGoal)
+            IdentityCard(category, goal, onCategory = vm::setCategory, onGoal = vm::setGoal)
         }
         item("window") {
-            WindowChips(window, d?.today, null, onWindow = { vm.setWindow(it); selected = null }, range = d?.range)
+            WindowChips(window, d?.today, d?.earliest, onWindow = { window = it; selected = null }, range = d?.range)
+        }
+        if (loading && d != null) {
+            item("updating") {
+                LinearProgressIndicator(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = Space.s)
+                        .semantics { contentDescription = "Updating" },
+                )
+            }
+        }
+        val error = ui.error?.takeIf { current }
+        if (error != null) {
+            item("error") {
+                SectionCard(title = "This app's history couldn't update", eyebrow = "Something went wrong") {
+                    Text(
+                        if (d != null) "Still showing ${rangeLabel(d.range)}. $error" else error,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    TextButton(onClick = vm::retry) { Text("Try again") }
+                }
+            }
         }
         if (d == null) {
-            item("loading") {
-                SectionCard(title = if (loading) "Reading this app's history" else "No history for this app yet", eyebrow = "Deep dive") {
-                    if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (error == null) {
+                item("loading") {
+                    SectionCard(title = if (loading) "Reading this app's history" else "No history for this app yet", eyebrow = "Deep dive") {
+                        if (loading) LinearProgressIndicator(Modifier.fillMaxWidth())
+                    }
                 }
             }
             return@LagrangeScreen
         }
         val selectedDate = selected?.let { runCatching { LocalDate.parse(it) }.getOrNull() }
-        item("trend") { UsageCard(d, ma7, ma28, { ma7 = !ma7 }, { ma28 = !ma28 }, selectedDate) { selected = it?.toString() } }
+        item("trend") { UsageCard(d, goal, ma7, ma28, { ma7 = !ma7 }, { ma28 = !ma28 }, selectedDate) { selected = it?.toString() } }
         item("profile") { ProfileCard(d) }
         item("shape") { ShapeCard(d) }
         item("flows") { FlowsCard(d) }
@@ -207,10 +252,10 @@ private fun IdentityCard(category: AppCategory?, goalMs: Long?, onCategory: (App
 // -- Usage trend ---------------------------------------------------------------------------------------------------
 
 @Composable
-private fun UsageCard(d: AppDeepDive, ma7: Boolean, ma28: Boolean, toggle7: () -> Unit, toggle28: () -> Unit, selected: LocalDate?, onSelect: (LocalDate?) -> Unit) {
+private fun UsageCard(d: AppDeepDive, goal: Long?, ma7: Boolean, ma28: Boolean, toggle7: () -> Unit, toggle28: () -> Unit, selected: LocalDate?, onSelect: (LocalDate?) -> Unit) {
     val colors = rememberTrendColors(bar = categoryColor(d.meta.category))
     val mean = d.delta.current.mean
-    val goal = d.meta.dailyGoalMs
+    val points = remember(d.points, goal) { d.points.map { it.copy(reference = goal?.toDouble()) } }
     SectionCard(
         title = mean?.let { "${formatDurationShort(it.toLong())} / covered day" } ?: "No covered days yet",
         eyebrow = "Usage · ${d.range.days} days",
@@ -222,7 +267,7 @@ private fun UsageCard(d: AppDeepDive, ma7: Boolean, ma28: Boolean, toggle7: () -
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         TrendChart(
-            points = d.points,
+            points = points,
             unit = MetricUnit.DURATION,
             diverging = false,
             showMa7 = ma7,
@@ -234,10 +279,10 @@ private fun UsageCard(d: AppDeepDive, ma7: Boolean, ma28: Boolean, toggle7: () -
             colors = colors,
         )
         ChartLegend(ma7, ma28, goal?.let { "Daily goal" }, colors, toggle7, toggle28)
-        val point = selected?.let { s -> d.points.firstOrNull { it.date == s } }
+        val point = selected?.let { s -> points.firstOrNull { it.date == s } }
         if (point != null) DayCallout(point, MetricUnit.DURATION, "Used", null)
         DeltaLine(d.delta, MetricUnit.DURATION, higherIsBetter = false, allTime = !d.window.hasPrevious)
-        CoveragePills(d.coveredDays, d.partialDays, d.noDataDays, if (d.today in d.range) 1 else 0)
+        CoveragePills(d.coveredDays, d.partialDays, d.noDataDays, d.inProgressDays)
     }
 }
 

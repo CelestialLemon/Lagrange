@@ -40,10 +40,19 @@ data class SessionLite(
 
 data class FrictionLite(val timestampMs: Long, val eventKind: String, val outcome: String)
 
+/** "Covered" for a joined `daily_rollups d` row: see [AnalyticsDao]. */
+private const val COVERED = "d.coverage_status IN ('COMPLETE', 'NO_NOTIF_COVERAGE', 'BACKFILL') " +
+    "AND d.day_status IN ('NORMAL', 'SPIKE', 'GOOD_DAY', 'INSUFFICIENT_BASELINE')"
+
+/** Episodes with a segment of `:pkgId` starting in `[:fromMs, :toMs)` (bounded through the `pkg_id` index). */
+private const val SESSIONS_WITH_APP =
+    "SELECT session_id FROM session_segments WHERE pkg_id = :pkgId AND start_ms >= :fromMs AND start_ms < :toMs"
+
 /**
  * Read-only aggregate queries for Trends and the per-app deep dive. Date bounds are inclusive `YYYY-MM-DD` strings
- * (which sort chronologically). "Covered" means the day's rollup is neither `UNCERTAIN_COVERAGE` nor `PARTIAL_HARVEST` and the day isn't
- * [inProgress] (today), matching `DayQuality.countsAsCovered`.
+ * (which sort chronologically); instant bounds are half-open UTC ms. A day is *covered* when its rollup carries a
+ * known, continuous coverage (`COMPLETE`, `NO_NOTIF_COVERAGE`, `BACKFILL`) with a known, baseline-eligible status,
+ * and it is settled (before `firstUnsettled`): exactly `DayQuality.countsAsCovered`, unknown values excluded.
  */
 @Dao
 interface AnalyticsDao {
@@ -69,12 +78,12 @@ interface AnalyticsDao {
 
     @Query(
         "SELECT a.pkg_id AS pkgId, SUM(a.total_ms) AS totalMs, SUM(a.open_count) AS opens, " +
-            "SUM(CASE WHEN d.day_status IS NOT NULL AND d.day_status != 'UNCERTAIN_COVERAGE' AND d.coverage_status != 'PARTIAL_HARVEST' AND a.logical_date != :inProgress THEN a.total_ms ELSE 0 END) AS coveredMs, " +
-            "SUM(CASE WHEN d.day_status IS NOT NULL AND d.day_status != 'UNCERTAIN_COVERAGE' AND d.coverage_status != 'PARTIAL_HARVEST' AND a.logical_date != :inProgress THEN a.open_count ELSE 0 END) AS coveredOpens " +
+            "SUM(CASE WHEN $COVERED AND a.logical_date < :firstUnsettled THEN a.total_ms ELSE 0 END) AS coveredMs, " +
+            "SUM(CASE WHEN $COVERED AND a.logical_date < :firstUnsettled THEN a.open_count ELSE 0 END) AS coveredOpens " +
             "FROM daily_app_rollups a LEFT JOIN daily_rollups d ON d.logical_date = a.logical_date " +
             "WHERE a.logical_date >= :fromDate AND a.logical_date <= :toDate GROUP BY a.pkg_id",
     )
-    suspend fun appTotals(fromDate: String, toDate: String, inProgress: String): List<AppRangeTotalsRow>
+    suspend fun appTotals(fromDate: String, toDate: String, firstUnsettled: String): List<AppRangeTotalsRow>
 
     @Query(
         "SELECT logical_date AS logicalDate, total_ms AS totalMs, open_count AS openCount FROM daily_app_rollups " +
@@ -86,42 +95,51 @@ interface AnalyticsDao {
     @Query(
         "SELECT h.hour_slot AS hourSlot, SUM(h.duration_ms) AS durationMs, SUM(h.open_count) AS opens " +
             "FROM hourly_app_usage h JOIN daily_rollups d ON d.logical_date = h.logical_date " +
-            "WHERE h.pkg_id = :pkgId AND h.logical_date >= :fromDate AND h.logical_date <= :toDate AND h.logical_date != :inProgress " +
-            "AND d.day_status != 'UNCERTAIN_COVERAGE' AND d.coverage_status != 'PARTIAL_HARVEST' AND h.hour_slot < 24 GROUP BY h.hour_slot ORDER BY h.hour_slot",
+            "WHERE h.pkg_id = :pkgId AND h.logical_date >= :fromDate AND h.logical_date <= :toDate AND h.logical_date < :firstUnsettled " +
+            "AND $COVERED AND h.hour_slot < 24 GROUP BY h.hour_slot ORDER BY h.hour_slot",
     )
-    suspend fun appHourSlots(pkgId: Long, fromDate: String, toDate: String, inProgress: String): List<HourSlotRow>
+    suspend fun appHourSlots(pkgId: Long, fromDate: String, toDate: String, firstUnsettled: String): List<HourSlotRow>
 
     /** The repeated fall-back hour (slot 24) of one app, per covered day, so each can be placed at its wall-clock hour. */
     @Query(
         "SELECT h.logical_date AS logicalDate, h.duration_ms AS durationMs, h.open_count AS opens " +
             "FROM hourly_app_usage h JOIN daily_rollups d ON d.logical_date = h.logical_date " +
-            "WHERE h.pkg_id = :pkgId AND h.logical_date >= :fromDate AND h.logical_date <= :toDate AND h.logical_date != :inProgress " +
-            "AND d.day_status != 'UNCERTAIN_COVERAGE' AND d.coverage_status != 'PARTIAL_HARVEST' AND h.hour_slot = 24",
+            "WHERE h.pkg_id = :pkgId AND h.logical_date >= :fromDate AND h.logical_date <= :toDate AND h.logical_date < :firstUnsettled " +
+            "AND $COVERED AND h.hour_slot = 24",
     )
-    suspend fun appRepeatedHours(pkgId: Long, fromDate: String, toDate: String, inProgress: String): List<RepeatedHourRow>
+    suspend fun appRepeatedHours(pkgId: Long, fromDate: String, toDate: String, firstUnsettled: String): List<RepeatedHourRow>
 
-    /** Unlocked episodes in the range in which the app has at least one segment. */
+    /**
+     * Unlocked episodes with a segment of the app *starting* in `[fromMs, toMs)`. Selecting by the open (not by the
+     * episode's start date) keeps an open just after the rollover on the day it happened.
+     */
     @Query(
         "SELECT id, logical_date AS logicalDate, start_ms AS startMs, end_ms AS endMs, active_duration_ms AS activeDurationMs, " +
             "trigger_evidence AS triggerEvidence, entry_pkg_id AS entryPkgId, worth_it_rating AS worthItRating FROM sessions " +
-            "WHERE is_glance_only = 0 AND logical_date >= :fromDate AND logical_date <= :toDate " +
-            "AND id IN (SELECT session_id FROM session_segments WHERE pkg_id = :pkgId) ORDER BY start_ms",
+            "WHERE is_glance_only = 0 AND id IN ($SESSIONS_WITH_APP) ORDER BY start_ms",
     )
-    suspend fun sessionsWithApp(pkgId: Long, fromDate: String, toDate: String): List<SessionLite>
+    suspend fun sessionsWithApp(pkgId: Long, fromMs: Long, toMs: Long): List<SessionLite>
 
     /** Every segment (any app) of those episodes, in order: sequences need the neighbours too. */
     @Query(
         "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
-            "WHERE s.is_glance_only = 0 AND s.logical_date >= :fromDate AND s.logical_date <= :toDate " +
-            "AND g.session_id IN (SELECT session_id FROM session_segments WHERE pkg_id = :pkgId) ORDER BY g.session_id, g.seq_index",
+            "WHERE s.is_glance_only = 0 AND g.session_id IN ($SESSIONS_WITH_APP) ORDER BY g.session_id, g.seq_index",
     )
-    suspend fun segmentsOfSessionsWithApp(pkgId: Long, fromDate: String, toDate: String): List<SessionSegmentEntity>
+    suspend fun segmentsOfSessionsWithApp(pkgId: Long, fromMs: Long, toMs: Long): List<SessionSegmentEntity>
+
+    /** Starts of real (not blocked) runs of the app in `[fromMs, toMs)`: follow-ups of exits near the window's end. */
+    @Query(
+        "SELECT g.start_ms FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
+            "WHERE g.pkg_id = :pkgId AND g.is_blocked_attempt = 0 AND g.duration_ms > 0 AND s.is_glance_only = 0 " +
+            "AND g.start_ms >= :fromMs AND g.start_ms < :toMs ORDER BY g.start_ms",
+    )
+    suspend fun runStarts(pkgId: Long, fromMs: Long, toMs: Long): List<Long>
 
     @Query(
         "SELECT timestamp_utc_ms AS timestampMs, event_kind AS eventKind, outcome FROM friction_events " +
-            "WHERE pkg_id = :pkgId AND logical_date >= :fromDate AND logical_date <= :toDate ORDER BY timestamp_utc_ms, id",
+            "WHERE pkg_id = :pkgId AND timestamp_utc_ms >= :fromMs AND timestamp_utc_ms < :toMs ORDER BY timestamp_utc_ms, id",
     )
-    suspend fun frictionOf(pkgId: Long, fromDate: String, toDate: String): List<FrictionLite>
+    suspend fun frictionOf(pkgId: Long, fromMs: Long, toMs: Long): List<FrictionLite>
 
     @Query("SELECT * FROM packages WHERE id = :id")
     suspend fun packageById(id: Long): PackageEntity?
@@ -133,13 +151,12 @@ interface AnalyticsDao {
     suspend fun setDailyGoal(id: Long, goalMs: Long?, nowMs: Long): Int
 
     /**
-     * A fingerprint of the derived rows Trends draws from: changes when a rebuild rewrites rollups (usage, counts,
-     * coverage or status) or a rating is written. Only a refresh signal, never shown.
+     * Changes a rebuild doesn't announce through `derived_last_run_at_ms`: a rating written from Today, or a friction
+     * event. Only a refresh signal, never shown. (Rebuilds are observed through that ingestion key.)
      */
     @Query(
-        "SELECT (SELECT COUNT(*) || ':' || COALESCE(SUM(active_usage_ms + total_screen_ms + distracting_ms + episode_count + glance_count " +
-            "+ physical_pickup_count + rabbit_hole_count), 0) || ':' || COALESCE(SUM(LENGTH(day_status) * 31 + LENGTH(coverage_status)), 0) " +
-            "FROM daily_rollups) || '|' || (SELECT COUNT(worth_it_rating) || ':' || COALESCE(SUM(worth_it_rating * (id % 9973)), 0) FROM sessions)",
+        "SELECT (SELECT COUNT(worth_it_rating) || ':' || COALESCE(SUM(worth_it_rating * (id % 9973 + 1)), 0) FROM sessions) || '|' || " +
+            "(SELECT COUNT(*) || ':' || COALESCE(MAX(id), 0) FROM friction_events)",
     )
-    fun observeDerivedSignature(): Flow<String>
+    fun observeUserSignals(): Flow<String>
 }

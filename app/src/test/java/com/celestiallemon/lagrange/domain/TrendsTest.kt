@@ -70,6 +70,12 @@ class TrendsTest {
         assertEquals(DateRange(d(-179), today), TrendCalculator.loadRange(quarter))
     }
 
+    @Test
+    fun `without a comparison the load range is only the moving-average lead-in`() {
+        val quarter = DateRange(d(-89), today)
+        assertEquals(DateRange(d(-89 - 27), today), TrendCalculator.loadRange(quarter, withPrevious = false))
+    }
+
     // -- Day quality -------------------------------------------------------------------------------------------------
 
     @Test
