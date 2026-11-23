@@ -152,7 +152,7 @@ class TimeChangeReceiver : BroadcastReceiver() {
                 WorkScheduler.enqueueHarvestNow(app, HarvestTrigger.TIME_CHANGED)
                 graph.timezoneTracker.check()
                 // The wall clock jumped: queued digests were timed against the old clock.
-                DigestScheduler.ensureScheduled(app, DigestScheduler.Settings.of(graph.preferences.current()), force = true)
+                DigestScheduler.ensureScheduled(app, force = true) { DigestScheduler.Settings.of(graph.preferences.current()) }
                 graph.surfaces.refresh()
             } catch (e: CancellationException) {
                 throw e
@@ -180,7 +180,7 @@ class TimezoneChangeReceiver : BroadcastReceiver() {
                 graph.awaitStarted()
                 graph.timezoneTracker.check()
                 // Digests are due at a local time: a new zone makes the queued run's delay stale.
-                DigestScheduler.ensureScheduled(context.applicationContext, DigestScheduler.Settings.of(graph.preferences.current()))
+                DigestScheduler.ensureScheduled(context.applicationContext) { DigestScheduler.Settings.of(graph.preferences.current()) }
                 graph.surfaces.refresh()
             } catch (e: CancellationException) {
                 throw e

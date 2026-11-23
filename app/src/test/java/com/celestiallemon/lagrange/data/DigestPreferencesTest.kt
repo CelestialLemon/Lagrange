@@ -142,4 +142,20 @@ class DigestPreferencesTest {
         assertFalse(p.claimCoverageAlert(1000))
         assertTrue(p.claimCoverageAlert(2000))
     }
+
+    @Test
+    fun `digest claims are a high-water mark, so a clock rollback cannot re-post an older period`() = runBlocking {
+        val p = prefs()
+        assertTrue(p.claimDailyDigest("2026-11-25"))
+        assertFalse(p.claimDailyDigest("2026-11-24")) // wall clock went back a day
+        assertTrue(p.claimDailyDigest("2026-11-26"))
+        p.releaseDailyDigest("2026-11-26") // posting failed: the same day can be retried
+        assertFalse(p.claimDailyDigest("2026-11-25")) // but nothing older reopens
+        assertTrue(p.claimDailyDigest("2026-11-26"))
+        assertFalse(p.claimDailyDigest("2026-11-26"))
+
+        assertTrue(p.claimWeeklyDigest("2026-W48"))
+        assertFalse(p.claimWeeklyDigest("2026-W47"))
+        assertTrue(p.claimWeeklyDigest("2027-W01"))
+    }
 }

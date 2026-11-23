@@ -313,23 +313,49 @@ class LagrangePreferences(
      * Atomically claims the daily digest for [logicalDate]: true (and recorded) only the first time, so a retried or
      * duplicated worker can never post the same day twice.
      */
-    suspend fun claimDailyDigest(logicalDate: String): Boolean = claim(LAST_DAILY_DIGEST_DATE, logicalDate)
+    suspend fun claimDailyDigest(logicalDate: String): Boolean = claimForward(LAST_DAILY_DIGEST_DATE, logicalDate)
 
     /** Atomically claims the weekly digest for [isoWeek]; see [claimDailyDigest]. */
-    suspend fun claimWeeklyDigest(isoWeek: String): Boolean = claim(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
+    suspend fun claimWeeklyDigest(isoWeek: String): Boolean = claimForward(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
 
     /** Atomically claims the coverage-gap alert for the harvest it is about (one alert per silence). */
     suspend fun claimCoverageAlert(lastHarvestAtMs: Long): Boolean = claim(LAST_COVERAGE_ALERT_HARVEST, lastHarvestAtMs.toString())
 
     /** Undoes [claimDailyDigest] for [logicalDate] (only if it is still the latest claim). */
-    suspend fun releaseDailyDigest(logicalDate: String) = release(LAST_DAILY_DIGEST_DATE, logicalDate)
+    suspend fun releaseDailyDigest(logicalDate: String) = releaseForward(LAST_DAILY_DIGEST_DATE, logicalDate)
 
-    suspend fun releaseWeeklyDigest(isoWeek: String) = release(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
+    suspend fun releaseWeeklyDigest(isoWeek: String) = releaseForward(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
 
     suspend fun releaseCoverageAlert(lastHarvestAtMs: Long) = release(LAST_COVERAGE_ALERT_HARVEST, lastHarvestAtMs.toString())
 
     private suspend fun release(key: Preferences.Key<String>, value: String) {
         store.edit { if (it[key] == value) it.remove(key) }
+    }
+
+    /**
+     * A high-water claim: only a period later than the last one claimed can be claimed. Keys are ISO dates
+     * (`2026-11-24`) or ISO weeks (`2026-W48`), both of which sort chronologically as strings, so rolling the clock
+     * back can never re-post a day or week that was already delivered.
+     */
+    private suspend fun claimForward(key: Preferences.Key<String>, value: String): Boolean {
+        var claimed = false
+        store.edit {
+            val last = it[key]
+            val base = last?.removeSuffix(RELEASED_SUFFIX)
+            if (base == null || value > base || (last != base && value == base)) {
+                it[key] = value
+                claimed = true
+            }
+        }
+        return claimed
+    }
+
+    /**
+     * Gives back a [claimForward] claim of [value] (posting failed) without lowering the high-water mark: the same
+     * period may be claimed again, earlier ones still may not.
+     */
+    private suspend fun releaseForward(key: Preferences.Key<String>, value: String) {
+        store.edit { if (it[key] == value) it[key] = value + RELEASED_SUFFIX }
     }
 
     private suspend fun claim(key: Preferences.Key<String>, value: String): Boolean {
@@ -566,6 +592,9 @@ class LagrangePreferences(
             if (raw.isBlank()) return emptyList()
             return raw.split(',').mapNotNull { it.trim().toIntOrNull() }.filter { it in 1..120 }.distinct().sorted()
         }
+
+        /** Marks a released high-water claim (see [releaseForward]); sorts after nothing it could be compared with. */
+        private const val RELEASED_SUFFIX = "~released"
 
         private fun Preferences.toUserPrefs() = UserPrefs(
             rolloverHour = this[ROLLOVER_HOUR] ?: UserPrefs.DEFAULT_ROLLOVER_HOUR,

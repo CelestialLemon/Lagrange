@@ -45,7 +45,15 @@ class DigestWorker(context: Context, params: WorkerParameters) : CoroutineWorker
         // Even when this kind was switched off meanwhile, the run ends through the locked hand-off: it re-reads the
         // settings there, so an off-then-on toggle while this ran (which ensureScheduled left alone) still queues the
         // next occurrence.
-        if (DigestScheduler.enabled(graph.preferences.current(), kind)) {
+        val enabled = try {
+            DigestScheduler.enabled(graph.preferences.current(), kind)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.e(TAG, "$kind digest settings unreadable", e)
+            return Result.retry() // this run still owns the chain
+        }
+        if (enabled) {
             try {
                 // Fresh numbers first; a failed harvest still leaves whatever was derived before.
                 runCatching { graph.harvestAndDerive(HarvestTrigger.PERIODIC, recomputeInline = true) }
@@ -160,26 +168,38 @@ object DigestScheduler {
     /** Serializes every change to the digest chains in this process (WorkManager runs workers in-process). */
     private val lock = Mutex()
 
-    /**
-     * Brings both digests' queued runs in line with [settings] and the device zone: cancels disabled ones, keeps an
-     * up-to-date run, and replaces a stale one. Safe to call often (startup, restore, settings, zone/time change).
-     */
+    /** [ensureScheduled] with fixed [settings] and [zone] (tests). */
     suspend fun ensureScheduled(
         context: Context,
         settings: Settings,
         force: Boolean = false,
         zone: ZoneId = ZoneId.systemDefault(),
+    ) = ensureScheduled(context, force, zone = { zone }, settings = { settings })
+
+    /**
+     * Brings both digests' queued runs in line with the digest settings and the device zone: cancels disabled ones,
+     * keeps an up-to-date run, and replaces a stale one. Safe to call often (startup, restore, settings, zone/time
+     * change). [settings] and [zone] are read under the lock, so a reconciliation that waited for it can never apply
+     * values older than the one that ran before it.
+     */
+    suspend fun ensureScheduled(
+        context: Context,
+        force: Boolean = false,
+        zone: () -> ZoneId = { ZoneId.systemDefault() },
+        settings: suspend () -> Settings,
     ) = lock.withLock {
         withContext(Dispatchers.IO) {
+            val current = settings()
+            val currentZone = zone()
             val wm = WorkManager.getInstance(context)
             for (kind in DigestKind.entries) {
                 val jobs = wm.getWorkInfosForUniqueWork(uniqueName(kind)).get()
                     .filter { !it.state.isFinished }
                     .map { info -> Job(info.state == WorkInfo.State.RUNNING, info.tags.firstOrNull { it.startsWith(FINGERPRINT_PREFIX) }) }
-                when (plan(settings.enabled(kind), jobs, fingerprint(settings, kind, zone), force)) {
+                when (plan(current.enabled(kind), jobs, fingerprint(current, kind, currentZone), force)) {
                     Plan.CancelAll -> wm.cancelUniqueWork(uniqueName(kind)).result.get()
                     Plan.Keep -> Unit
-                    Plan.Replace -> enqueue(context, settings, kind, zone = zone)?.result?.get()
+                    Plan.Replace -> enqueue(context, current, kind, zone = currentZone)?.result?.get()
                 }
             }
         }

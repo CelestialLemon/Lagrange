@@ -55,7 +55,7 @@ class FocusBoostTileService : TileService() {
         hydrated = false // a reused instance must not act on what it saw before the shade last closed
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         listening = scope
-        if (graph.startupState.value != StartupGate.State.Ready) renderUnready(failed = false)
+        if (graph.startupState.value != StartupGate.State.Ready) renderUnready(failed = false) else renderHydrating()
         scope.launch {
             try {
                 graph.awaitReady()
@@ -108,26 +108,12 @@ class FocusBoostTileService : TileService() {
             openApp(Destination.TODAY)
             return
         }
-        // Normally the tile already observed the friction switch while listening, so the tap is handled right here
-        // in the click callback (setup must launch while System UI's click token is valid). Only a tap that beats
-        // the first preference emission reads it first, so a stale default "off" can't misroute a boost to setup.
-        if (hydrated) {
-            act(frictionEnabled)
-            return
-        }
-        graph.applicationScope.launch(Dispatchers.Main.immediate) {
-            val enabled = try {
-                graph.preferences.current().frictionEnabled
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: Exception) {
-                Log.e(TAG, "friction setting unreadable", e)
-                frictionEnabled
-            }
-            frictionEnabled = enabled
-            hydrated = true
-            act(enabled)
-        }
+        // Every tap is decided right here in the click callback, while System UI's click token is valid for a setup
+        // launch: from what this tile observed while listening, else the process-wide value (e.g. a tap replayed by
+        // unlockAndRun after listening stopped). Only before DataStore's very first emission is a tap dropped (the
+        // tile is shown unavailable then), never suspended past the token or decided on a guessed default.
+        val enabled = if (hydrated) frictionEnabled else graph.frictionEnabledState.value ?: return
+        act(enabled)
     }
 
     private fun act(enabled: Boolean) {
@@ -178,6 +164,13 @@ class FocusBoostTileService : TileService() {
             // The tile was unbound in the meantime (shade closed): nothing to collapse into.
             Log.w(TAG, "could not open $destination from the tile", e)
         }
+    }
+
+    /** Until the first preference emission: unavailable, so no tap can be acted on with a guessed friction switch. */
+    private fun renderHydrating() {
+        val tile = qsTile ?: return
+        tile.state = Tile.STATE_UNAVAILABLE
+        tile.updateTile()
     }
 
     private fun renderUnready(failed: Boolean) {

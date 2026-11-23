@@ -52,7 +52,9 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
@@ -173,6 +175,14 @@ class AppGraph(private val app: Application) {
 
     val digestNotifier by lazy { DigestNotifier(app) }
 
+    /**
+     * The friction switch, kept current for the whole process (null until DataStore's first emission). The Quick
+     * Settings tile reads it synchronously in its click callback. Touch only after [awaitReady].
+     */
+    val frictionEnabledState: StateFlow<Boolean?> by lazy {
+        preferences.prefs.map { it.frictionEnabled }.stateIn(applicationScope, SharingStarted.Eagerly, null)
+    }
+
     private val digestRepository by lazy { DigestRepository(database, derived, lab, preferences) }
 
     /** Reflection digests and the coverage-gap alert: composed, claimed once per day / week, then posted. */
@@ -261,18 +271,20 @@ class AppGraph(private val app: Application) {
         } catch (e: Exception) {
             Log.e(TAG, "surface refresher failed to start", e)
         }
+        frictionEnabledState // starts collecting, so the tile has a value before its first tap
         // Once synchronously, so [awaitStarted] covers it; the collector below then follows every change.
         try {
-            DigestScheduler.ensureScheduled(app, DigestScheduler.Settings.of(preferences.current()))
+            DigestScheduler.ensureScheduled(app) { DigestScheduler.Settings.of(preferences.current()) }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             Log.e(TAG, "digest scheduling failed", e)
         }
         applicationScope.launch(Dispatchers.IO) {
-            preferences.prefs.map { DigestScheduler.Settings.of(it) }.distinctUntilChanged().collect { settings ->
+            preferences.prefs.map { DigestScheduler.Settings.of(it) }.distinctUntilChanged().collect {
                 try {
-                    DigestScheduler.ensureScheduled(app, settings)
+                    // The change is only the trigger: the latest settings are re-read under the scheduler lock.
+                    DigestScheduler.ensureScheduled(app) { DigestScheduler.Settings.of(preferences.current()) }
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {

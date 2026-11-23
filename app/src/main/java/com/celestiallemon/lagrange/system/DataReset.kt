@@ -104,6 +104,9 @@ class DataReset(
                     "Reset couldn't delete ${survivors.joinToString { it.name }}. Lagrange will retry on the next start.",
                 )
             }
+            // A worker cancelled by the reset may still have posted a digest of the deleted data before the old
+            // process exited: withdraw everything again before any new worker can run.
+            runCatching { NotificationManagerCompat.from(context).cancelAll() }
             if (!marker.delete()) throw IllegalStateException("Reset couldn't be completed. Lagrange will retry on the next start.")
             Log.i(TAG, "all data deleted; cutoff $cutoff")
             return true
