@@ -368,7 +368,7 @@ To prevent false pauses from `TYPE_WINDOW_STATE_CHANGED` noise:
 5. Clear any visible overlay immediately on screen lock, incoming call, app switch, or service disconnect.
 
 ### 5.3 Escalating Mindful Launch Pause (`TYPE_ACCESSIBILITY_OVERLAY`)
-* **Overlay Delivery:** Drawn via `TYPE_ACCESSIBILITY_OVERLAY` (no `SYSTEM_ALERT_WINDOW` needed). While displayed, request `AUDIOFOCUS_GAIN_TRANSIENT` so YouTube/Reels/TikTok don't play audio behind the pause card, releasing audio focus immediately when dismissed.
+* **Overlay Delivery:** Drawn via `TYPE_ACCESSIBILITY_OVERLAY` (no `SYSTEM_ALERT_WINDOW` needed). While displayed, request `AUDIOFOCUS_GAIN_TRANSIENT` (best-effort) so YouTube/Reels/TikTok don't play audio behind the pause card, releasing audio focus immediately when dismissed. Android 15+ only grants audio focus to apps that are on top or run a foreground service, so the platform may deny the request for an accessibility overlay; a denial is logged and the pause still works, with audio possibly continuing behind it (verify on-device).
 * **Escalation Tiers** *(driven by today's **real opens** and distracting time—blocked attempts where you chose to close do **NOT** escalate you!)*:
   * **Tier 0** (Real opens 1–2 & `< 15m` distracting): `3s` pause
   * **Tier 1** (Real opens 3–5 or `15–45m`): `5s` pause + optional timer chips

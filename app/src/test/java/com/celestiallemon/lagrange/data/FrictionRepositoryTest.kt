@@ -343,7 +343,7 @@ class FrictionRepositoryTest {
     }
 
     @Test
-    fun `live commands reach a restored service, fall back offline when it cannot apply them, and snooze clears pending expiry`() = runBlocking {
+    fun `live commands reach a restored service, are deferred while it tears down, and snooze clears pending expiry`() = runBlocking {
         // A pending (0 ms) expiry persisted on disk from an earlier connection.
         prefs.saveFrictionRuntime(
             FrictionRuntimeSnapshot(bootCount = bootCount, savedAtElapsedMs = elapsed, activeTimerRemainingMs = 0L, activeTimerInitialMin = 10),
@@ -353,7 +353,7 @@ class FrictionRepositoryTest {
         var restored: FrictionRuntimeSnapshot? = null
         var applies = true
         val handler: suspend (FrictionControlCommand) -> Boolean = { cmd -> if (applies) { received += cmd; true } else false }
-        repo.attachLiveService(handler) { saved -> restored = saved }
+        val registration = repo.attachLiveService(handler) { saved -> restored = saved }
         assertEquals(0L, restored?.activeTimerRemainingMs)
 
         // Bound + restored service applies the command; nothing is written offline behind its back.
@@ -361,9 +361,20 @@ class FrictionRepositoryTest {
         assertEquals(listOf<FrictionControlCommand>(FrictionControlCommand.ActivateFocusBoost1h), received)
         assertNull(prefs.loadFrictionRuntime()?.focusBoostUntilElapsedMs)
 
-        // Service still attached but unable to apply (tearing down): the command is persisted offline, never lost.
+        // Service still registered but tearing down: the command is deferred, not written yet (its final snapshot
+        // is still queued and would overwrite it) and not lost.
         applies = false
         repo.activateSnooze1h()
+        assertNull(prefs.loadFrictionRuntime()?.snoozeUntilElapsedMs)
+
+        // A stale registration from an earlier connection never detaches the current one.
+        repo.detachLiveService(FrictionRepository.LiveRegistration(handler))
+        assertNull(prefs.loadFrictionRuntime()?.snoozeUntilElapsedMs)
+        // The service's final snapshot lands, then detach applies the deferred snooze on top of it.
+        prefs.saveFrictionRuntime(
+            FrictionRuntimeSnapshot(bootCount = bootCount, savedAtElapsedMs = elapsed, activeTimerRemainingMs = 0L, activeTimerInitialMin = 10),
+        )
+        repo.detachLiveService(registration)
         val offline = prefs.loadFrictionRuntime()!!
         assertNotNull(offline.snoozeUntilElapsedMs)
         // Snoozing clears an unresolved expiry so the check-in cannot immediately re-fire.
@@ -371,7 +382,6 @@ class FrictionRepositoryTest {
         assertNull(offline.activeTimerInitialMin)
 
         // After detach, commands use the offline path directly.
-        repo.detachLiveService(handler)
         repo.cancelSnooze()
         assertNull(prefs.loadFrictionRuntime()?.snoozeUntilElapsedMs)
         assertEquals(1, received.size)

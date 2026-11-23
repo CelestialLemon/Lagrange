@@ -326,6 +326,118 @@ class FrictionEngineTest {
     }
 
     @Test
+    fun `screen-off over a pause re-prompts on a resumed unlock, Home unlock stops accrual, restart recovery resumes timer, card snooze counts as prompt`() {
+        val w0 = 1_700_000_000_000L
+        val present: (FrictionEngine, Long) -> List<FrictionEffect> = { eng, el ->
+            eng.onUserPresent(w0 + el, el, zone, settings, emptyList(), { apps[it]!! }, { usageOf() })
+        }
+
+        // 1. Power off over a YouTube pause, unlock 5s later straight back into the SAME resumed activity (Android
+        // emits no fresh window event): the fallback must re-evaluate YouTube and show the pause again.
+        val a = FrictionEngine(classifier)
+        enter(a, youtube.packageName, w0, 1_000L)
+        assertTrue(a.activeOverlay is ActiveOverlay.LaunchPause)
+        a.onScreenOff(w0 + 2_000L, 2_000L)
+        val unlock = present(a, 7_000L)
+        assertTrue(unlock.any { it is FrictionEffect.ScheduleUnlockFallback })
+        val fallback = a.onUnlockFallbackTimeout(w0 + 7_400L, 7_400L, zone, settings, emptyList(), { apps[it]!! }, { usageOf() })
+        assertTrue(fallback.any { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.LaunchPause })
+
+        // 2. Long lock in Reddit; the launcher is observed before USER_PRESENT: nothing may keep accruing for Reddit.
+        val b = FrictionEngine(classifier)
+        enter(b, reddit.packageName, w0, 1_000L)
+        b.onPauseContinue(w0 + 20_000L, 20_000L, settings)
+        b.onScreenOff(w0 + 30_000L, 30_000L)
+        enter(b, "com.launcher", w0 + 60_000L, 60_000L)
+        assertTrue(present(b, 61_000L).none { it is FrictionEffect.ShowOverlay })
+        val later = 61_000L + 16 * 60_000L
+        assertTrue(b.onTick(w0 + later, later, zone, settings, emptyList()) { usageOf() }.none { it is FrictionEffect.ShowOverlay })
+        assertEquals(0L, b.liveStatus(later).sessionDistractingMs)
+
+        // 3. Host restart with a running timer while Reddit stays resumed (no new window event): recovery adopts it
+        // without prompting and the countdown continues; a restored pending expiry fires on the next tick.
+        val running = FrictionRuntimeSnapshot(bootCount = 1, savedAtElapsedMs = 100_000L, activeTimerRemainingMs = 60_000L, activeTimerInitialMin = 5)
+        val c = FrictionEngine(classifier)
+        c.restore(running, currentBootCount = 1, nowElapsedMs = 101_000L)
+        val recovered = c.onForegroundRecovered(reddit.packageName, 101_000L) { apps[it]!! }
+        assertTrue(recovered.none { it is FrictionEffect.ShowOverlay })
+        c.onTick(w0 + 111_000L, 111_000L, zone, settings, emptyList()) { usageOf() }
+        assertEquals(50_000L, c.liveStatus(111_000L).activeTimerRemainingMs)
+        // Launcher / own app are never adopted.
+        assertTrue(FrictionEngine(classifier).onForegroundRecovered("com.launcher", 1L) { apps[it]!! }.isEmpty())
+
+        val d = FrictionEngine(classifier)
+        d.restore(running.copy(activeTimerRemainingMs = 0L), currentBootCount = 1, nowElapsedMs = 101_000L)
+        d.onForegroundRecovered(reddit.packageName, 101_000L) { apps[it]!! }
+        val due = d.onTick(w0 + 102_000L, 102_000L, zone, settings, emptyList()) { usageOf() }
+        assertTrue(due.any { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.TimerExpired })
+
+        // 4. "Pause friction for 1 hour" on a launch pause still logs the shown pause (CONTINUED, never blocked) so the
+        // daily prompt cap and real-open counts stay accurate.
+        val e = FrictionEngine(classifier)
+        enter(e, reddit.packageName, w0, 1_000L)
+        val snooze = e.activateSnooze1h(w0 + 4_000L, 4_000L, "2026-11-23", own.pkgId)
+        val logged = snooze.filterIsInstance<FrictionEffect.LogEvent>().map { it.record.eventKind to it.record.outcome }
+        assertTrue(logged.contains(FrictionVocab.LAUNCH_PAUSE to FrictionVocab.OUTCOME_CONTINUED))
+        assertTrue(logged.contains(FrictionVocab.SNOOZE_1H to FrictionVocab.OUTCOME_SNOOZE_ACTIVATED))
+    }
+
+    @Test
+    fun `disconnect never logs a block, expiry under snooze is dropped, calls keep the check-in, restore clears stale screen-off`() {
+        val w0 = 1_700_000_000_000L
+
+        // 1. Service unbinds while a pause is visible: the window goes away but nothing is logged as blocked.
+        val a = FrictionEngine(classifier)
+        enter(a, reddit.packageName, w0, 1_000L)
+        val disconnect = a.onServiceDisconnected(w0 + 2_000L, 2_000L)
+        assertTrue(disconnect.any { it is FrictionEffect.DismissOverlay })
+        assertTrue(disconnect.none { it is FrictionEffect.LogEvent })
+        assertNull(a.activeOverlay)
+
+        // 2. A timer that runs out while snoozed is dropped, so cancelling the snooze never ambushes the user.
+        val b = FrictionEngine(classifier)
+        enter(b, reddit.packageName, w0, 1_000L)
+        b.onPauseTimerSelected(2)
+        b.onPauseContinue(w0 + 4_000L, 4_000L, settings)
+        b.activateSnooze1h(w0 + 10_000L, 10_000L, "2026-11-23", own.pkgId)
+        b.onTick(w0 + 200_000L, 200_000L, zone, settings, emptyList()) { usageOf() }
+        assertNull(b.liveStatus(200_000L).activeTimerRemainingMs)
+        b.cancelSnooze(201_000L)
+        assertTrue(b.onTick(w0 + 202_000L, 202_000L, zone, settings, emptyList()) { usageOf() }.none { it is FrictionEffect.ShowOverlay })
+
+        // 3. An incoming call interrupts a timer check-in; back in Reddit the check-in returns. Locking over it and
+        // unlocking 5s later straight back into the resumed app shows it again too.
+        val c = FrictionEngine(classifier)
+        enter(c, reddit.packageName, w0, 1_000L)
+        c.onPauseTimerSelected(2)
+        c.onPauseContinue(w0 + 4_000L, 4_000L, settings)
+        c.onTick(w0 + 125_000L, 125_000L, zone, settings, emptyList()) { usageOf() }
+        assertTrue(c.activeOverlay is ActiveOverlay.TimerExpired)
+        enter(c, "com.dialer", w0 + 126_000L, 126_000L)
+        assertEquals(0L, c.liveStatus(126_000L).activeTimerRemainingMs)
+        val back = enter(c, reddit.packageName, w0 + 130_000L, 130_000L)
+        assertTrue(back.any { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.TimerExpired })
+        c.onScreenOff(w0 + 131_000L, 131_000L)
+        c.onUserPresent(w0 + 136_000L, 136_000L, zone, settings, emptyList(), { apps[it]!! }, { usageOf() })
+        val fallback = c.onUnlockFallbackTimeout(w0 + 136_400L, 136_400L, zone, settings, emptyList(), { apps[it]!! }, { usageOf() })
+        assertTrue(fallback.any { it is FrictionEffect.ShowOverlay && it.overlay is ActiveOverlay.TimerExpired })
+
+        // 4. Restart after the screen was unlocked while the host was dead: the stale screen-off marker is dropped so a
+        // later restart cannot expire the new session.
+        val stale = FrictionRuntimeSnapshot(bootCount = 1, savedAtElapsedMs = 100_000L, screenOffAtElapsedMs = 100_000L)
+        val d = FrictionEngine(classifier)
+        d.setInitialScreenInteractive(true)
+        d.restore(stale, currentBootCount = 1, nowElapsedMs = 205_000L)
+        val persisted = d.activateFocusBoost1h(206_000L).filterIsInstance<FrictionEffect.PersistState>().single().snapshot
+        assertNull(persisted.screenOffAtElapsedMs)
+        // Screen still off at restart: the marker is armed so the next unlock is a real (long) unlock.
+        val e = FrictionEngine(classifier)
+        e.setInitialScreenInteractive(false)
+        e.restore(null, currentBootCount = 1, nowElapsedMs = 300_000L)
+        assertEquals(300_000L, e.activateFocusBoost1h(300_000L).filterIsInstance<FrictionEffect.PersistState>().single().snapshot.screenOffAtElapsedMs)
+    }
+
+    @Test
     fun `monotonic state checkpoints during ticks, preserves pending expiry, clears screen-off on micro-lock, and invalidates on reboot`() {
         val engineA = FrictionEngine(classifier)
         engineA.restore(null, currentBootCount = 4, nowElapsedMs = 1_000L)

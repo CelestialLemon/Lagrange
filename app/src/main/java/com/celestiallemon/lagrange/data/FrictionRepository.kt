@@ -54,10 +54,14 @@ class FrictionRepository(
 ) {
     private val runtimeMutex = Mutex()
     /**
-     * Live service command sink. Returns `true` when the bound service applied the command to its engine, or
-     * `false` when it is not able to (e.g. tearing down), in which case the command falls back to offline persistence.
+     * Registration of the bound service's command sink. Its handler returns `true` when the service applied the
+     * command to its engine, or `false` while it is tearing down; declined commands are deferred and applied offline
+     * on [detachLiveService], after the service's final queued snapshot, so they are neither lost nor overwritten.
      */
-    private var liveCommandHandler: (suspend (FrictionControlCommand) -> Boolean)? = null
+    class LiveRegistration internal constructor(internal val handler: suspend (FrictionControlCommand) -> Boolean)
+
+    private var liveRegistration: LiveRegistration? = null
+    private val deferredCommands = ArrayList<FrictionControlCommand>()
 
     private val _liveStatus = MutableStateFlow(FrictionLiveStatus())
     val liveStatus: StateFlow<FrictionLiveStatus> = _liveStatus.asStateFlow()
@@ -212,27 +216,34 @@ class FrictionRepository(
     }
 
     /**
-     * Runs [restoreAndRegister] under [runtimeMutex], loading the persisted monotonic snapshot and registering
-     * the live service's command handler atomically so no UI command can ever be dropped or race restore.
+     * Under [runtimeMutex], loads the persisted monotonic snapshot, lets the service restore from it and registers
+     * its command [handler] atomically, so no UI command can be dropped or race restore. Offline commands that ran
+     * before this call are already on disk and therefore part of the restored snapshot.
      */
     suspend fun attachLiveService(
         handler: suspend (FrictionControlCommand) -> Boolean,
         restoreFromDisk: suspend (FrictionRuntimeSnapshot?) -> Unit,
-    ) = runtimeMutex.withLock {
+    ): LiveRegistration = runtimeMutex.withLock {
         val saved = preferences.loadFrictionRuntime()
         restoreFromDisk(saved)
-        liveCommandHandler = handler
+        LiveRegistration(handler).also { liveRegistration = it }
     }
 
-    suspend fun detachLiveService(handler: suspend (FrictionControlCommand) -> Boolean) = runtimeMutex.withLock {
-        if (liveCommandHandler === handler) {
-            liveCommandHandler = null
-        }
+    /**
+     * Unregisters [registration] (a stale registration from an earlier connection is ignored) and applies any commands
+     * the service declined while tearing down. Callers must invoke this after the service's last snapshot write.
+     */
+    suspend fun detachLiveService(registration: LiveRegistration) = runtimeMutex.withLock {
+        if (liveRegistration !== registration) return@withLock
+        liveRegistration = null
+        val pending = deferredCommands.toList()
+        deferredCommands.clear()
+        pending.forEach { applyOffline(it) }
     }
 
     /** Hydrates [liveStatus] from persisted monotonic state (used at startup or when service isn't running). */
     suspend fun refreshLiveStatusFromDisk() = runtimeMutex.withLock {
-        if (liveCommandHandler != null) return@withLock
+        if (liveRegistration != null) return@withLock
         val boot = bootCountProvider()
         val nowElapsed = elapsedClock()
         val saved = preferences.loadFrictionRuntime()
@@ -255,8 +266,32 @@ class FrictionRepository(
     }
 
     /** Activates 1-hour snooze, serialized across live service and offline disk persistence. */
-    suspend fun activateSnooze1h() = runtimeMutex.withLock {
-        if (liveCommandHandler?.invoke(FrictionControlCommand.ActivateSnooze1h) == true) return@withLock
+    suspend fun activateSnooze1h() = dispatch(FrictionControlCommand.ActivateSnooze1h)
+
+    suspend fun cancelSnooze() = dispatch(FrictionControlCommand.CancelSnooze)
+
+    suspend fun activateFocusBoost1h() = dispatch(FrictionControlCommand.ActivateFocusBoost1h)
+
+    suspend fun cancelFocusBoost() = dispatch(FrictionControlCommand.CancelFocusBoost)
+
+    private suspend fun dispatch(cmd: FrictionControlCommand) = runtimeMutex.withLock {
+        val registration = liveRegistration
+        when {
+            registration == null -> applyOffline(cmd)
+            registration.handler(cmd) -> Unit
+            // Service is tearing down: apply after its final snapshot lands (see detachLiveService).
+            else -> deferredCommands += cmd
+        }
+    }
+
+    private suspend fun applyOffline(cmd: FrictionControlCommand) = when (cmd) {
+        FrictionControlCommand.ActivateSnooze1h -> activateSnooze1hOffline()
+        FrictionControlCommand.CancelSnooze -> cancelSnoozeOffline()
+        FrictionControlCommand.ActivateFocusBoost1h -> activateFocusBoost1hOffline()
+        FrictionControlCommand.CancelFocusBoost -> cancelFocusBoostOffline()
+    }
+
+    private suspend fun activateSnooze1hOffline() {
         val nowWall = wallClock()
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
@@ -297,8 +332,7 @@ class FrictionRepository(
         )
     }
 
-    suspend fun cancelSnooze() = runtimeMutex.withLock {
-        if (liveCommandHandler?.invoke(FrictionControlCommand.CancelSnooze) == true) return@withLock
+    private suspend fun cancelSnoozeOffline() {
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val base = validSavedOrFresh(boot, nowElapsed)
@@ -306,8 +340,7 @@ class FrictionRepository(
         _liveStatus.value = _liveStatus.value.copy(snoozeUntilElapsedMs = null)
     }
 
-    suspend fun activateFocusBoost1h() = runtimeMutex.withLock {
-        if (liveCommandHandler?.invoke(FrictionControlCommand.ActivateFocusBoost1h) == true) return@withLock
+    private suspend fun activateFocusBoost1hOffline() {
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val expiry = nowElapsed + FrictionSettings.FOCUS_BOOST_DURATION_MS
@@ -322,8 +355,7 @@ class FrictionRepository(
         _liveStatus.value = _liveStatus.value.copy(focusBoostUntilElapsedMs = expiry, snoozeUntilElapsedMs = null)
     }
 
-    suspend fun cancelFocusBoost() = runtimeMutex.withLock {
-        if (liveCommandHandler?.invoke(FrictionControlCommand.CancelFocusBoost) == true) return@withLock
+    private suspend fun cancelFocusBoostOffline() {
         val nowElapsed = elapsedClock()
         val boot = bootCountProvider()
         val base = validSavedOrFresh(boot, nowElapsed)

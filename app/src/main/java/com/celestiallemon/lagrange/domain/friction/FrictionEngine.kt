@@ -92,9 +92,13 @@ class FrictionEngine(
     fun restore(saved: FrictionRuntimeSnapshot?, currentBootCount: Int, nowElapsedMs: Long): Boolean {
         bootCount = currentBootCount
         lastCheckpointElapsedMs = nowElapsedMs
-        if (saved == null) return false
+        if (saved == null) {
+            syncScreenStateAfterRestore(nowElapsedMs)
+            return false
+        }
         if (saved.bootCount != currentBootCount || nowElapsedMs < saved.savedAtElapsedMs) {
             clearAllRuntimeState()
+            syncScreenStateAfterRestore(nowElapsedMs)
             return false
         }
         snoozeUntilElapsedMs = saved.snoozeUntilElapsedMs?.takeIf { it > nowElapsedMs }
@@ -120,8 +124,25 @@ class FrictionEngine(
             sessionLastNudgeMinutes = saved.sessionLastNudgeMinutes.coerceAtLeast(0)
             screenOffAtElapsedMs = offAt
         }
+        syncScreenStateAfterRestore(nowElapsedMs)
         lastTickElapsedMs = nowElapsedMs
         return true
+    }
+
+    /**
+     * Reconciles the restored screen-off marker with the actual screen state (set beforehand through
+     * [setInitialScreenInteractive]). Screen already on: no USER_PRESENT will clear the marker, so drop it now and it
+     * can never expire a session started after this restart. Screen off: arm the marker (and the state machine) so the
+     * next unlock is handled as a real unlock even if the screen-off broadcast arrived before the host was ready.
+     */
+    private fun syncScreenStateAfterRestore(nowElapsedMs: Long) {
+        if (foreground.isScreenInteractive) {
+            screenOffAtElapsedMs = null
+        } else {
+            val offAt = screenOffAtElapsedMs ?: nowElapsedMs
+            screenOffAtElapsedMs = offAt
+            foreground.onScreenOff(offAt)
+        }
     }
 
     // -- External state controls (UI / Quick Settings tile) -----------------------------------------------------------
@@ -163,12 +184,12 @@ class FrictionEngine(
                 outcome = FrictionVocab.OUTCOME_SNOOZE_ACTIVATED,
             ),
         )
-        // If snoozed from a launch pause, the user is now continuing into the distracting app.
+        // If snoozed from a launch pause, the user is now continuing into the distracting app: log the shown pause as
+        // CONTINUED so it counts toward the daily prompt cap and real opens (never as a blocked attempt).
         if (overlay is ActiveOverlay.LaunchPause) {
             recordDistractingAppVisit(currentAppPolicy)
-            currentAppPolicy?.let { app ->
-                if (app.pkgId > 0L) effects += FrictionEffect.RecordUnpromptedOpen(app.pkgId, nowWallMs)
-            }
+            val reaction = reactionMsIfPastCountdown(overlay, nowElapsedMs)
+            effects += FrictionEffect.LogEvent(overlay.toRecord(FrictionVocab.OUTCOME_CONTINUED, reaction, redirectPkgId = null))
         }
         resumeDistractingTrackingIfNeeded(nowElapsedMs)
         effects += persist(nowElapsedMs)
@@ -190,6 +211,24 @@ class FrictionEngine(
     fun cancelFocusBoost(nowElapsedMs: Long): List<FrictionEffect> {
         if (focusBoostUntilElapsedMs == null) return emptyList()
         focusBoostUntilElapsedMs = null
+        return listOf(persist(nowElapsedMs))
+    }
+
+    /**
+     * Host restart recovery: adopts [packageName] (the app Android reports as already resumed) as the foreground app
+     * without prompting, so a restored soft timer keeps counting down (and a pending expiry fires on the next tick)
+     * even when no fresh window event arrives.
+     */
+    fun onForegroundRecovered(
+        packageName: String,
+        nowElapsedMs: Long,
+        resolveApp: (String) -> FrictionAppPolicy,
+    ): List<FrictionEffect> {
+        if (activeOverlay != null || !foreground.adoptRecoveredForeground(packageName)) return emptyList()
+        val app = resolveApp(packageName)
+        currentAppPolicy = app
+        recordDistractingAppVisit(app)
+        resumeDistractingTrackingIfNeeded(nowElapsedMs)
         return listOf(persist(nowElapsedMs))
     }
 
@@ -245,15 +284,16 @@ class FrictionEngine(
         advanceActiveClocks(nowElapsedMs)
         timerRunning = false
         screenOffAtElapsedMs = nowElapsedMs
-        // Dismiss unresolved blocking overlays and mark exit blocked BEFORE foreground.onScreenOff() so a
-        // subsequent <15s micro-lock cannot bypass an unresolved launch pause or timer expiry.
+        // Dismiss unresolved blocking overlays and tell the state machine the exit was blocked, so unlocking
+        // (even a <15s micro-lock straight back into the same activity) re-evaluates the app as a fresh entry.
         val hadBlocking = isBlockingOverlayShowing()
-        dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = true, effects = effects)
-        if (hadBlocking) {
-            foreground.markLastExitBlocked()
-            currentAppPolicy = null
-        }
-        foreground.onScreenOff(nowElapsedMs)
+        // Keep a pending (0 ms) expiry armed: a micro-lock straight back into the app shows the check-in again, while a
+        // long lock clears it with the rest of the session on unlock.
+        dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = false, effects = effects)
+        // Nothing accrues while the screen is off; unlock re-resolves the foreground policy from its transition,
+        // so an unlock that lands on Home never keeps counting the pre-lock app.
+        currentAppPolicy = null
+        foreground.onScreenOff(nowElapsedMs, exitBlocked = hadBlocking)
         effects += persist(nowElapsedMs)
         return effects
     }
@@ -305,7 +345,16 @@ class FrictionEngine(
         effects += FrictionEffect.CancelUnlockFallback
         advanceActiveClocks(nowElapsedMs)
         timerRunning = false
-        dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = false, effects = effects)
+        // The service is going away while the user may well still be in the app: remove the window without logging a
+        // blocked outcome (that would scrub a real session). A pending timer expiry stays armed for the next start.
+        when (activeOverlay) {
+            null -> Unit
+            is ActiveOverlay.TimeBlindnessNudge -> logAndDismissNudge(FrictionVocab.OUTCOME_NUDGE_IGNORED, effects)
+            is ActiveOverlay.LaunchPause, is ActiveOverlay.TimerExpired -> {
+                activeOverlay = null
+                effects += FrictionEffect.DismissOverlay
+            }
+        }
         effects += persist(nowElapsedMs)
         return effects
     }
@@ -365,8 +414,10 @@ class FrictionEngine(
                 effects += persist(nowElapsedMs)
                 return effects
             } else {
-                // Friction disabled or snoozed: do not interrupt with a blocking timer check-in.
-                timerRunning = false
+                // Friction disabled or snoozed: the check-in is dropped, not deferred, so it can never ambush the user
+                // the moment the snooze ends or friction is switched back on.
+                clearTimer()
+                effects += persist(nowElapsedMs)
             }
         }
 
@@ -623,7 +674,13 @@ class FrictionEngine(
                 timerRunning = false
                 currentAppPolicy = null
                 val hadBlocking = isBlockingOverlayShowing()
-                dismissActiveOverlayAsSystemExit(nowWallMs, nowElapsedMs, clearExpiredTimer = true, effects = effects)
+                // An incoming call only interrupts the check-in; it returns when the user goes back to a distracting app.
+                dismissActiveOverlayAsSystemExit(
+                    nowWallMs,
+                    nowElapsedMs,
+                    clearExpiredTimer = transition !is ForegroundTransition.CallInterrupted,
+                    effects = effects,
+                )
                 if (hadBlocking && transition is ForegroundTransition.LeftToHome) {
                     // Prevent a <1.5s Home bounce from bypassing an unresolved launch pause or timer expiry.
                     foreground.markLastExitBlocked()
@@ -705,7 +762,7 @@ class FrictionEngine(
                     is LaunchDecision.Suppress -> {
                         recordDistractingAppVisit(app)
                         // Record unprompted real opens (grace, snooze, daily cap, disabled) so live escalation stays accurate.
-                        if (app.countsAsDistracting && app.pkgId > 0L) {
+                        if ((app.countsAsDistracting || app.isFrictionEligible) && app.pkgId > 0L) {
                             effects += FrictionEffect.RecordUnpromptedOpen(app.pkgId, nowWallMs)
                         }
                         resumeDistractingTrackingIfNeeded(nowElapsedMs)

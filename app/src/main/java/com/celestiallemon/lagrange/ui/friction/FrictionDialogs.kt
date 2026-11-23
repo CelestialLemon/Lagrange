@@ -342,7 +342,7 @@ fun AppFrictionOverrideDialog(
                 Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
                     Text("Launch pause for this app", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s)) {
-                        val defaultLabel = if (app.category == AppCategory.DISTRACTING) "Default (On)" else "Default (Off)"
+                        val defaultLabel = if (app.category == AppCategory.DISTRACTING && app.confirmed) "Default (On)" else "Default (Off)"
                         FilterChip(selected = mode == "DEFAULT", onClick = { mode = "DEFAULT" }, label = { Text(defaultLabel) })
                         FilterChip(selected = mode == "ON", onClick = { mode = "ON" }, label = { Text("Always on") })
                         FilterChip(selected = mode == "OFF", onClick = { mode = "OFF" }, label = { Text("Off") })

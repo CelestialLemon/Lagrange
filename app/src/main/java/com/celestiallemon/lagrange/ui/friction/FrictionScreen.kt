@@ -426,9 +426,13 @@ fun FrictionScreen(
                     HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
                     // Healthy redirect app picker
-                    val redirectName = loadedPrefs.redirectPackageName?.let { pkg ->
-                        appList.firstOrNull { it.packageName == pkg }?.displayName ?: pkg
-                    } ?: "None"
+                    val redirectApp = loadedPrefs.redirectPackageName?.let { pkg -> appList.firstOrNull { it.packageName == pkg } }
+                    val redirectName = loadedPrefs.redirectPackageName?.let { pkg -> redirectApp?.displayName ?: pkg } ?: "None"
+                    // Same eligibility rule the pause card applies (EscalationPolicy): otherwise the button is hidden.
+                    val redirectInactive = loadedPrefs.redirectPackageName != null && (
+                        redirectApp == null || redirectApp.isFrictionEligible ||
+                            redirectApp.category == AppCategory.DISTRACTING || redirectApp.category == AppCategory.SELF_APP
+                        )
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                         Column(Modifier.weight(1f)) {
                             Text("Healthy redirect app", style = MaterialTheme.typography.titleSmall)
@@ -437,6 +441,13 @@ fun FrictionScreen(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
+                            if (redirectInactive) {
+                                Text(
+                                    "Not shown on pauses: this app is uninstalled, distracting, or has its own launch pause. Pick another.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
                         }
                         Spacer(Modifier.width(Space.s))
                         OutlinedButton(onClick = { showRedirectPicker = true }) {

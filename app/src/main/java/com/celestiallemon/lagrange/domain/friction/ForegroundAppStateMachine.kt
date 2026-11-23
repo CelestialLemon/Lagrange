@@ -65,6 +65,8 @@ class ForegroundAppStateMachine(
         private set
 
     private var appBeforeScreenOff: String? = null
+    /** True when the screen turned off over an unresolved launch pause / timer expiry for [appBeforeScreenOff]. */
+    private var blockedBeforeScreenOff: Boolean = false
     private var screenOffAtElapsedMs: Long? = null
     /** Real non-SystemUI activity observed while screen was waking/locked (e.g., camera shortcut or lockscreen notification). */
     private var postWakeObservedApp: String? = null
@@ -195,13 +197,21 @@ class ForegroundAppStateMachine(
         return ForegroundTransition.AppEntered(pkg, prev, fromUnlock = fromUnlock)
     }
 
-    fun onScreenOff(elapsedMs: Long): ForegroundTransition {
+    /**
+     * @param exitBlocked `true` when the screen turned off over an unresolved launch pause or timer expiry: the
+     *   pre-lock app is kept as a candidate but must be re-evaluated as a fresh entry on unlock (never resumed),
+     *   so even a `<15s` micro-lock straight back into the same activity cannot bypass the pause.
+     */
+    fun onScreenOff(elapsedMs: Long, exitBlocked: Boolean = false): ForegroundTransition {
         val prev = currentPackage
         isScreenInteractive = false
         screenOffAtElapsedMs = elapsedMs
-        // If currentPackage was cleared via markLastExitBlocked(), appBeforeScreenOff stays null so a <15s
-        // micro-lock cannot bypass an unresolved pause.
         appBeforeScreenOff = prev
+        blockedBeforeScreenOff = exitBlocked && prev != null
+        if (exitBlocked) {
+            currentPackage = null
+            lastAppWasBlocked = true
+        }
         postWakeObservedApp = null
         postWakeObservedLauncher = false
         pendingUnlockFallbackApp = null
@@ -218,9 +228,11 @@ class ForegroundAppStateMachine(
         val prevApp = appBeforeScreenOff
         val observedApp = postWakeObservedApp
         val observedLauncher = postWakeObservedLauncher
+        val blocked = blockedBeforeScreenOff
         isScreenInteractive = true
         screenOffAtElapsedMs = null
         appBeforeScreenOff = null
+        blockedBeforeScreenOff = false
         postWakeObservedApp = null
         postWakeObservedLauncher = false
 
@@ -234,6 +246,15 @@ class ForegroundAppStateMachine(
             }
             if (observedApp != null && observedApp != prevApp) {
                 return resolveObservedAppOnUnlock(observedApp, prevApp, fromUnlock = false)
+            }
+            if (blocked) {
+                // The pre-lock app was behind an unresolved pause: re-evaluate it as a fresh entry instead of resuming.
+                currentPackage = null
+                lastAppWasBlocked = false
+                if (observedApp != null) return resolveObservedAppOnUnlock(observedApp, previousPackage = null, fromUnlock = false)
+                val candidate = unlockCandidate(prevApp)
+                pendingUnlockFallbackApp = candidate
+                return ForegroundTransition.UnlockAwaitingApp(candidate)
             }
             currentPackage = prevApp
             return ForegroundTransition.MicroLockResumed(prevApp)
@@ -253,14 +274,28 @@ class ForegroundAppStateMachine(
         // No post-wake Activity seen yet: defer briefly for Android's real top Activity event so a lockscreen
         // notification tap into Gmail doesn't flash a phantom Reddit pause. If nothing arrives within
         // unlockConfirmDelayMs, host calls onUnlockFallbackTimeout().
-        val candidate = prevApp?.takeIf {
-            it != classifier.ownPackage &&
-                !classifier.isLauncherPackage(it) &&
-                !classifier.isSystemUiPackage(it) &&
-                !classifier.isCallOrDialerPackage(it)
-        }
+        val candidate = unlockCandidate(prevApp)
         pendingUnlockFallbackApp = candidate
         return ForegroundTransition.UnlockAwaitingApp(candidate)
+    }
+
+    /**
+     * Adopts [packageName] as the current foreground app after a host restart, when Android emits no fresh window
+     * event for an activity that is already resumed. Returns `false` (and changes nothing) unless the screen is
+     * interactive, no foreground app is known yet, and the package is a real non-system, non-self app.
+     */
+    fun adoptRecoveredForeground(packageName: String): Boolean {
+        if (!isScreenInteractive || screenOffAtElapsedMs != null || currentPackage != null) return false
+        if (unlockCandidate(packageName) == null || classifier.isImePackage(packageName)) return false
+        currentPackage = packageName
+        return true
+    }
+
+    private fun unlockCandidate(pkg: String?): String? = pkg?.takeIf {
+        it != classifier.ownPackage &&
+            !classifier.isLauncherPackage(it) &&
+            !classifier.isSystemUiPackage(it) &&
+            !classifier.isCallOrDialerPackage(it)
     }
 
     /**

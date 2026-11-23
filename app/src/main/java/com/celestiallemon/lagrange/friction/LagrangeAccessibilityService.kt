@@ -2,6 +2,8 @@ package com.celestiallemon.lagrange.friction
 
 import android.accessibilityservice.AccessibilityService
 import android.app.KeyguardManager
+import android.app.usage.UsageEvents
+import android.app.usage.UsageStatsManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -12,10 +14,11 @@ import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
-import androidx.room3.useReaderConnection
+import androidx.room3.withReadTransaction
 import com.celestiallemon.lagrange.LagrangeApplication
 import com.celestiallemon.lagrange.StartupFailedException
 import com.celestiallemon.lagrange.data.FrictionControlCommand
+import com.celestiallemon.lagrange.data.FrictionRepository
 import com.celestiallemon.lagrange.data.FrictionRepository.Companion.toAppPolicy
 import com.celestiallemon.lagrange.data.IngestionKeys
 import com.celestiallemon.lagrange.data.UserPrefs
@@ -34,6 +37,7 @@ import com.celestiallemon.lagrange.domain.friction.TodayUsageSnapshot
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -84,6 +88,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
     private var cachedRollupDistractingMs: Long = 0L
     private var cachedAppRollupOpens: Map<Long, Int> = emptyMap()
     private var accruedAtLastDerivedAdvanceMs: Long = 0L
+    /** (wallMs, engine.totalAccruedDistractingMs) step samples, so live usage can be rebased exactly at the harvest cutoff. */
+    private val accrualSamples = ArrayDeque<Pair<Long, Long>>()
     private val recentLiveOpens = ArrayList<TimestampedOpen>()
     private val recentLivePrompts = ArrayList<Long>()
 
@@ -93,6 +99,11 @@ class LagrangeAccessibilityService : AccessibilityService() {
 
     /** True once [FrictionEngine.restore] ran for this connection; commands are applied from then on (before [ready]). */
     private var engineRestored = false
+    /** Bumped on every connect and teardown so a late attach from an earlier connection is detached, never kept. */
+    private var connectionGeneration = 0
+    private var liveRegistration: FrictionRepository.LiveRegistration? = null
+    /** Latest window event that arrived after binding but before [ready]; replayed once ready. */
+    private var pendingStartupEvent: Pair<String?, String?>? = null
 
     private val liveCommandHandler: suspend (FrictionControlCommand) -> Boolean = { cmd ->
         withContext(Dispatchers.Main.immediate) {
@@ -138,8 +149,7 @@ class LagrangeAccessibilityService : AccessibilityService() {
         super.onCreate()
         classifier = AndroidWindowClassifier(this)
         engine = FrictionEngine(classifier)
-        val interactive = getSystemService(PowerManager::class.java)?.isInteractive ?: true
-        engine.setInitialScreenInteractive(interactive)
+        engine.setInitialScreenInteractive(isScreenInteractiveNow())
         overlayController = FrictionOverlayController(
             service = this,
             mainScope = mainScope,
@@ -170,17 +180,25 @@ class LagrangeAccessibilityService : AccessibilityService() {
     override fun onServiceConnected() {
         super.onServiceConnected()
         connected = true
-        val nowElapsed = SystemClock.elapsedRealtime()
+        connectionGeneration++
+        pendingStartupEvent = null
         registerScreenReceiver()
-        startObserversAndRestore(nowElapsed)
+        startObserversAndRestore()
         startTicker()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
-        if (!ready || event == null) return
-        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
+        if (event == null || event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) return
         val pkg = event.packageName?.toString()
         val cls = event.className?.toString()
+        if (!ready) {
+            if (connected) pendingStartupEvent = pkg to cls
+            return
+        }
+        handleWindowEvent(pkg, cls)
+    }
+
+    private fun handleWindowEvent(pkg: String?, cls: String?) {
         val nowWall = System.currentTimeMillis()
         val nowElapsed = SystemClock.elapsedRealtime()
         val effects = engine.onWindowStateChanged(
@@ -204,15 +222,9 @@ class LagrangeAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
-        unlockFallbackJob?.cancel()
-        unlockFallbackJob = null
-        if (ready && ::engine.isInitialized) {
-            val effects = engine.onServiceDisconnected(System.currentTimeMillis(), SystemClock.elapsedRealtime())
-            applyEffects(effects)
-        }
-        if (::overlayController.isInitialized) {
-            overlayController.dismiss()
-        }
+        // Android calls this to interrupt spoken/haptic *feedback* while the service stays bound. Lagrange gives no
+        // such feedback, so there is nothing to stop: the overlay and engine state must stay exactly as they are
+        // (treating it as a disconnect would log a false blocked attempt and freeze a running timer).
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
@@ -232,6 +244,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
         val wasRestored = engineRestored
         ready = false
         engineRestored = false
+        connectionGeneration++
+        pendingStartupEvent = null
         _readyState.value = false
         connected = false
 
@@ -250,8 +264,11 @@ class LagrangeAccessibilityService : AccessibilityService() {
         if (::overlayController.isInitialized) {
             overlayController.dismiss()
         }
-        ioScope.launch {
-            runCatching { graph.friction.detachLiveService(liveCommandHandler) }
+        // Detach through the FIFO work queue so it runs after the final PersistState queued above: commands the
+        // service declined meanwhile are then applied offline on top of that snapshot instead of being overwritten.
+        liveRegistration?.let { registration ->
+            liveRegistration = null
+            work.trySend { graph.friction.detachLiveService(registration) }
         }
         if (coverageOpened) {
             coverageOpened = false
@@ -260,7 +277,7 @@ class LagrangeAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun startObserversAndRestore(connectedElapsedMs: Long) {
+    private fun startObserversAndRestore() {
         observersJob?.cancel()
         observersJob = mainScope.launch {
             try {
@@ -281,15 +298,37 @@ class LagrangeAccessibilityService : AccessibilityService() {
             currentSchedules = schedules
             appPoliciesByPackage = policies
 
-            graph.friction.attachLiveService(
-                handler = liveCommandHandler,
-                restoreFromDisk = { saved ->
-                    withContext(Dispatchers.Main.immediate) {
-                        engine.restore(saved, currentBootCount(), connectedElapsedMs)
-                        engineRestored = true
+            // Attach through the FIFO work queue so restore reads disk only after any snapshot an earlier
+            // connection queued; the monotonic clock is read inside the callback so a same-boot offline command saved
+            // while policies loaded is never rejected as "from the future".
+            val generation = connectionGeneration
+            val attached = CompletableDeferred<Boolean>()
+            val queued = work.trySend {
+                try {
+                    val registration = graph.friction.attachLiveService(
+                        handler = liveCommandHandler,
+                        restoreFromDisk = { saved ->
+                            withContext(Dispatchers.Main.immediate) {
+                                if (generation == connectionGeneration) {
+                                    // Re-sync: a screen-off broadcast may have arrived before the engine was ready.
+                                    engine.setInitialScreenInteractive(isScreenInteractiveNow())
+                                    engine.restore(saved, currentBootCount(), SystemClock.elapsedRealtime())
+                                    engineRestored = true
+                                }
+                            }
+                        },
+                    )
+                    val keep = withContext(Dispatchers.Main.immediate) {
+                        (generation == connectionGeneration && engineRestored).also { if (it) liveRegistration = registration }
                     }
-                },
-            )
+                    if (!keep) graph.friction.detachLiveService(registration)
+                    attached.complete(keep)
+                } catch (e: Throwable) {
+                    attached.complete(false)
+                    throw e
+                }
+            }
+            if (queued.isFailure || !attached.await()) return@launch
 
             refreshUsageCache()
 
@@ -301,6 +340,7 @@ class LagrangeAccessibilityService : AccessibilityService() {
             ready = true
             _readyState.value = true
             publishStatus(SystemClock.elapsedRealtime())
+            reconcileStartupForeground()
 
             launch {
                 graph.preferences.prefs.collect { p ->
@@ -379,7 +419,7 @@ class LagrangeAccessibilityService : AccessibilityService() {
             val logicalDate = date.toString()
             val window = graph.derived.windowOf(date)
             // Read rollups, cutoff, and today's friction events in a single read transaction for snapshot consistency.
-            graph.database.useReaderConnection {
+            graph.database.withReadTransaction {
                 val dao = graph.database.derivedDao()
                 val dayRollup = dao.dailyRollup(logicalDate)
                 val derivedEndMs = graph.database.ingestionStateDao().get(IngestionKeys.DERIVED_DATA_END_MS) ?: 0L
@@ -406,18 +446,14 @@ class LagrangeAccessibilityService : AccessibilityService() {
             }
         }
 
-        val dayChanged = snapshot.logicalDate != cachedLogicalDate
-        val derivedAdvanced = snapshot.derivedDataEndMs > cachedDerivedDataEndMs
-        if (dayChanged) {
+        if (snapshot.logicalDate != cachedLogicalDate) {
             cachedLogicalDate = snapshot.logicalDate
             recentLiveOpens.clear()
             recentLivePrompts.clear()
-            accruedAtLastDerivedAdvanceMs = engine.totalAccruedDistractingMs
-        } else if (derivedAdvanced) {
-            // Only rebase live distracting time when DERIVED_DATA_END_MS actually moved forward with new harvest data,
-            // never on a non-harvest derived recompute triggered by logging a friction event!
-            accruedAtLastDerivedAdvanceMs = engine.totalAccruedDistractingMs
         }
+        // The rollup already contains usage up to the harvest cutoff (or nothing before the day starts): count as
+        // live only what the engine accrued after that instant, however late this refresh runs.
+        accruedAtLastDerivedAdvanceMs = accruedAtWall(maxOf(snapshot.windowStartMs, snapshot.derivedDataEndMs))
 
         cachedWindowStartMs = snapshot.windowStartMs
         cachedWindowEndMs = snapshot.windowEndMs
@@ -582,7 +618,9 @@ class LagrangeAccessibilityService : AccessibilityService() {
     }
 
     private fun launchRedirectSafely(targetPackage: String): RedirectLaunchResult {
-        val launch = packageManager.getLaunchIntentForPackage(targetPackage)
+        // A suspended app (e.g. paused by Digital Wellbeing) "launches" into a system dialog, never the app itself.
+        val suspended = runCatching { packageManager.isPackageSuspended(targetPackage) }.getOrDefault(true)
+        val launch = if (suspended) null else packageManager.getLaunchIntentForPackage(targetPackage)
             ?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
         if (launch != null) {
             val launched = runCatching {
@@ -603,7 +641,59 @@ class LagrangeAccessibilityService : AccessibilityService() {
             LogicalDay.dateOf(nowWallMs, currentPrefs.rolloverHour, ZoneId.systemDefault()).toString()
         }
 
+    private fun recordAccrualSample(nowWallMs: Long) {
+        val accrued = engine.totalAccruedDistractingMs
+        if (accrualSamples.lastOrNull()?.second != accrued) accrualSamples.addLast(nowWallMs to accrued)
+        // Keep the newest sample older than the horizon as the floor so earlier cutoffs still resolve.
+        while (accrualSamples.size > 1 && accrualSamples[1].first <= nowWallMs - ACCRUAL_SAMPLE_HORIZON_MS) {
+            accrualSamples.removeFirst()
+        }
+    }
+
+    /** Engine accrual as of [wallMs]: the latest step sample at or before it (0 before the first sample). */
+    private fun accruedAtWall(wallMs: Long): Long {
+        var value = 0L
+        for ((at, accrued) in accrualSamples) {
+            if (at > wallMs) break
+            value = accrued
+        }
+        return value
+    }
+
+    /**
+     * After a (re)start, replays the window event that arrived before [ready]; if the foreground is still unknown,
+     * adopts the app UsageStats reports as currently resumed so a restored timer keeps counting without a prompt.
+     */
+    private suspend fun reconcileStartupForeground() {
+        pendingStartupEvent?.let { (pkg, cls) ->
+            pendingStartupEvent = null
+            handleWindowEvent(pkg, cls)
+        }
+        if (engine.currentForegroundPackage != null) return
+        val generation = connectionGeneration
+        val resumed = withContext(Dispatchers.IO) { currentlyResumedPackage(System.currentTimeMillis()) } ?: return
+        if (!ready || generation != connectionGeneration || engine.currentForegroundPackage != null) return
+        applyEffects(engine.onForegroundRecovered(resumed, SystemClock.elapsedRealtime(), ::resolvePolicyCached))
+    }
+
+    private fun currentlyResumedPackage(nowWallMs: Long): String? = runCatching {
+        val usm = getSystemService(UsageStatsManager::class.java) ?: return null
+        val events = usm.queryEvents(nowWallMs - FOREGROUND_RECOVERY_LOOKBACK_MS, nowWallMs) ?: return null
+        val event = UsageEvents.Event()
+        var resumed: String? = null
+        while (events.hasNextEvent()) {
+            events.getNextEvent(event)
+            when (event.eventType) {
+                UsageEvents.Event.ACTIVITY_RESUMED -> resumed = event.packageName
+                UsageEvents.Event.ACTIVITY_PAUSED, UsageEvents.Event.ACTIVITY_STOPPED ->
+                    if (event.packageName == resumed) resumed = null
+            }
+        }
+        resumed
+    }.getOrNull()
+
     private fun publishStatus(nowElapsedMs: Long) {
+        if (::engine.isInitialized) recordAccrualSample(System.currentTimeMillis())
         if (ready) {
             graph.friction.publishLiveStatus(engine.liveStatus(nowElapsedMs))
         }
@@ -695,6 +785,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
         screenReceiverRegistered = false
     }
 
+    private fun isScreenInteractiveNow(): Boolean = getSystemService(PowerManager::class.java)?.isInteractive ?: true
+
     private fun currentBootCount(): Int =
         runCatching { Settings.Global.getInt(contentResolver, Settings.Global.BOOT_COUNT, 0) }.getOrDefault(0)
 
@@ -715,6 +807,8 @@ class LagrangeAccessibilityService : AccessibilityService() {
         private const val TAG = "LagrangeFriction"
         private const val TICK_INTERVAL_MS = 1_000L
         private const val HEARTBEAT_INTERVAL_MS = 15 * 60_000L
+        private const val ACCRUAL_SAMPLE_HORIZON_MS = 6 * 60 * 60_000L
+        private const val FOREGROUND_RECOVERY_LOOKBACK_MS = 3 * 60 * 60_000L
 
         /** True while Android has this AccessibilityService bound in this process. */
         @Volatile
