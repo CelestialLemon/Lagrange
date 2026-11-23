@@ -114,7 +114,12 @@ data class RhythmData(val scope: LabScope, val report: RhythmReport)
 data class FrictionData(val scope: LabScope, val report: FrictionReport, val apps: LabApps)
 
 /** The check-in card: one unrated rabbit hole to ask about. */
-data class CheckInCard(val episode: LabEpisode, val apps: LabApps)
+data class CheckInCard(
+    val episode: LabEpisode,
+    val apps: LabApps,
+    /** When this offer stops being eligible (it ended too long ago); Long.MAX_VALUE if unknown. */
+    val expiresAtMs: Long = Long.MAX_VALUE,
+)
 
 /**
  * Reads for the Behavior Lab (spec §4.2 C). Every section is one read transaction over the derived tables (plus raw
@@ -136,11 +141,12 @@ class LabRepository(
 
     suspend fun spikes(window: TrendWindow): SpikesReport {
         return io {
-            // Inside the same read transaction, so the headline and the history come from one generation.
-            val comparison = comparison()
             val ctx = derived.analyticsContext()
             val scope = scope(ctx, window)
             val days = facts(ctx, scope.range.start.minusDays(BASELINE_LOOKBACK_DAYS), scope.range.end)
+            // Inside the same read transaction, so the headline and the history come from one generation; and only
+            // when today could be judged at all (the comparison reconstructs every matched day's current hour).
+            val comparison = if (ctx.today in scope.range && days[ctx.today]?.coverageOk == true) comparison() else null
             val history = SpikeAnalyzer.history(scope.range, days)
             val base = Baselines.baseline(ctx.today, SpikeAnalyzer.points(days))
             val live = if (ctx.today in scope.range && comparison?.date == ctx.today) liveHighlight(ctx, comparison, days) else null
@@ -151,10 +157,10 @@ class LabRepository(
     /** The autopsy of a settled spike or good day, or of today's live one. Null when [date] isn't one (any more). */
     suspend fun autopsy(date: LocalDate): SpikeAutopsy? {
         return io {
-            val comparison = comparison()
             val ctx = derived.analyticsContext()
             val days = facts(ctx, date.minusDays(BASELINE_LOOKBACK_DAYS), date)
             val live = date == ctx.today
+            val comparison = if (live && days[date]?.coverageOk == true) comparison() else null
             val highlight = if (live) {
                 comparison?.takeIf { it.date == date }?.let { liveHighlight(ctx, it, days) }
             } else {
@@ -249,7 +255,9 @@ class LabRepository(
         // From the day before the window too: the idle stretch before the window's first pickup starts there, and a
         // notification posted then can still be the one a session in the window consumed.
         val loadFrom = ctx.zones.window(scope.range.start.minusDays(1), ctx.rolloverHour).startMs
-        val notifications = if (end > scope.fromMs) dao.countableNotificationsBetween(loadFrom, end).map { it.toLab() } else emptyList()
+        // Every notification alive then, however long before it was posted (as the reconstructor loads them); the
+        // analyzer narrows the report to the ones posted in the window.
+        val notifications = if (end > scope.fromMs) db.rawNotificationDao().eligibleAlive(loadFrom, end).map { it.toLab() } else emptyList()
         // Still-open sessions count as pickups; the analyzer credits downstream minutes only once they close.
         val episodes = episodesBetween(scope.range.start.minusDays(1), scope.range.end).filter { it.startMs < scope.dataEndMs }
         val usage = SpanSet.usageObserved(ctx.coverage)
@@ -270,7 +278,9 @@ class LabRepository(
             .groupBy { LocalDate.parse(it.logicalDate) }
         // A night can begin on the day before the range; the rollup picked its gap among these same episodes.
         val nearby = dao.unlockedSessions(scope.range.start.minusDays(1).toString(), scope.range.end.plusDays(1).toString())
-        val nearbySpans = nearby.map { Span(it.startMs, it.endMs) }
+        // A night longer than a day still starts where the last earlier episode ended.
+        val before = nearby.firstOrNull()?.let { dao.lastUnlockedEndingBefore(it.startMs) }
+        val nearbySpans = (listOfNotNull(before) + nearby).map { Span(it.startMs, it.endMs) }
         val episodes = nearby.filter { it.logicalDate in from..to }.groupBy { LocalDate.parse(it.logicalDate) }
         val rollups = dao.rollups(from, scope.range.end.plusDays(1).toString()).associateBy { LocalDate.parse(it.logicalDate) }
         val usage = UsageCoverage.of(ctx.coverage)
@@ -396,7 +406,7 @@ class LabRepository(
             if (sel.log == log && raw != null) raw else encodeLog(sel.log)
         }
         val key = picked ?: return null
-        return candidates.firstOrNull { it.episodeKey == key }?.let { CheckInCard(it, apps) }
+        return candidates.firstOrNull { it.episodeKey == key }?.let { CheckInCard(it, apps, it.endMs + checkInRules.recentMs) }
     }
 
     /** "Not now": this episode is never offered again. */

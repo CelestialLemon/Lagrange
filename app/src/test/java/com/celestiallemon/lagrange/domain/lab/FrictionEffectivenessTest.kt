@@ -92,6 +92,15 @@ class FrictionEffectivenessTest {
     }
 
     @Test
+    fun `a direct switch logged a moment before the recorded exit is a quick reopen`() {
+        val shown = 12 * HOUR_MS
+        // 30 s countdown, left 15 s after it (12:00:45) by switching straight to TikTok, whose run starts at 12:00:44.9.
+        val events = listOf(pause(shown, FrictionVocab.OUTCOME_CLOSED_SYSTEM_NAV, reaction = 15_000, countdownSec = 30))
+        val out = FrictionAnalyzer.exits(events, FrictionInput(events, listOf(shown + 44_900), 0, day, day, harvest), testApps)
+        assertEquals(1, out.quickReopens)
+    }
+
+    @Test
     fun `reopening a paused app that isn't distracting is a reopen too`() {
         val events = listOf(pause(HOUR_MS, FrictionVocab.OUTCOME_CLOSED_GO_HOME, pkg = KINDLE))
         val input = FrictionInput(events, emptyList(), 0, day, day, harvest)

@@ -537,7 +537,7 @@ class DerivedRepository(
         val wholeHours = cutoff.copy(fraction = 0.0)
         val prior = hourly.filter { it.pkgId in activePkgs }.groupBy { LocalDate.parse(it.logicalDate) }.mapValues { (date, cells) ->
             val slots = cells.groupBy { it.hourSlot }.mapValues { (_, c) -> c.sumOf { it.durationMs } }
-            PartialDayBaseline.sliceMs(slots, wholeHours, HourSlots.repeatedSlot(ctx.zones.window(date, ctx.rollover), ctx.rollover))
+            PartialDayBaseline.sliceMs(slots, wholeHours, HourSlots.repeatedSlot(ctx.zones.window(date, ctx.rollover), ctx.rollover, ctx.zones))
         }
         val nowLocal = java.time.Instant.ofEpochMilli(ctx.dataEnd).atZone(nowZone).toLocalDateTime()
         // After a westward trip the clock can read a time before this logical day's own rollover: no past day has

@@ -183,6 +183,7 @@ private fun HighlightCard(h: DayHighlight, autopsy: AutopsyState?, onToggle: () 
         if (autopsy != null) {
             when {
                 autopsy.loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
+                autopsy.failed -> Muted("Couldn't load this autopsy. Collapse and open it again to retry.")
                 autopsy.autopsy == null -> Muted("This day changed after a rebuild; it no longer stands out.")
                 else -> AutopsyBody(autopsy.autopsy, onOpenSession)
             }
@@ -595,7 +596,7 @@ fun LazyListScope.frictionSection(data: FrictionData) {
                         StatTile("Unknown", "${e.unresolved}", Modifier.weight(1f), caption = "not yet / gap")
                     }
                 }
-                Muted("\"Stayed away\" only counts when ten minutes were fully recorded with no distracting app reopened.")
+                Muted("\"Stayed away\" only counts when ten minutes were fully recorded with no distracting app, nor the paused app itself, reopened.")
             }
         }
     }

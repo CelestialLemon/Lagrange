@@ -203,6 +203,8 @@ class LabRepositoryTest {
 
         val card = e.repo.checkIn()!!
         assertEquals(latest, card.episode.episodeKey)
+        // The card knows when it stops being offered, so the UI can re-sample right then instead of every minute.
+        assertEquals(card.episode.endMs + 36 * 60 * MINUTE_MS, card.expiresAtMs)
         val log = LabRepository.decodeLog(e.store.state.value)
         assertEquals(listOf(latest), log.shown)
         assertEquals(today.toString(), log.date)
@@ -294,6 +296,23 @@ class LabRepositoryTest {
         assertEquals(1, r.exits.sustained)
         assertEquals(0, r.exits.unresolved)
         assertEquals(1, r.coveredDays)
+    }
+
+    @Test
+    fun `a night that began days before the report still finds its start`() = runBlocking {
+        val e = env()
+        val maps = e.pkg("com.google.android.apps.maps", AppCategory.UTILITY)
+        val range = e.repo.rhythm(TrendWindow(WindowKind.D7)).scope.range
+        val first = range.start
+        // Phone left alone from 22:00 two days before the report's first day to 02:00 the night after it (52 h):
+        // the midpoint is the first day's midnight, so the rollup filed it there, but its start is two days back.
+        val lastBefore = at(first.minusDays(2), 22)
+        val back = at(first.plusDays(1), 2) // still the first logical day (rollover 04:00)
+        e.session(first.minusDays(2), lastBefore - 10 * MINUTE_MS, maps, 10)
+        e.session(first, back, maps, 10)
+        e.rollup(first, overnightGapMs = back - lastBefore)
+        e.coverage(ServiceKind.USAGE_HARVEST, at(first.minusDays(5), 0), now)
+        assertEquals(back - lastBefore, e.repo.rhythm(TrendWindow(WindowKind.D7)).report.sleep.overnightGap.overallMs)
     }
 
     @Test

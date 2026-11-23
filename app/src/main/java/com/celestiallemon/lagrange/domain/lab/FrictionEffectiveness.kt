@@ -189,9 +189,10 @@ object FrictionAnalyzer {
         var unresolved = 0
         for (e in exits) {
             val (earliest, latest) = e.exitWindow.let { it.startMs to it.endMs }
-            // The paused open itself (at the prompt, [earliest]) doesn't count. The overlay covers the screen until the
-            // user leaves it, so any later open, even one inside the countdown bound, came after they left.
-            val next = opensFor(e.pkgId).firstOrNull { it > earliest }
+            // The paused open itself (the prompt instant; its own run is scrubbed as blocked) doesn't count. The overlay
+            // covers the screen until the user leaves it, so any later open came as or after they left, even one logged
+            // a moment before the recorded exit (a direct switch dismisses the overlay as the next app comes forward).
+            val next = opensFor(e.pkgId).firstOrNull { it > e.timestampMs }
             val followEnd = latest + rules.sustainMs
             when {
                 next != null && next - earliest < rules.sustainMs -> quick++ // within 10 min whenever exactly they left

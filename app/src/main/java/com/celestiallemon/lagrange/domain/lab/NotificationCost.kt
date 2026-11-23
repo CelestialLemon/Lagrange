@@ -213,17 +213,17 @@ object NotificationCostAnalyzer {
         val consumed = HashSet<Long>()
         for (e in sorted) if (e.triggerEvidence in ATTRIBUTING) e.triggerNotificationId?.let { consumed += it }
 
-        val out = ArrayList<Attribution>()
-        for (e in sorted) {
-            val credits = ArrayList<Triple<Long, TriggerEvidence, Long>>()
-            val sessionNotif = e.triggerNotificationId
-            if (sessionNotif != null && e.triggerEvidence in ATTRIBUTING && sessionNotif in byId) credits += Triple(sessionNotif, e.triggerEvidence, e.startMs)
+        // Like the reconstructor: direct evidence (taps, app self-cancels) is matched everywhere first, so a
+        // circumstantial "recent alert" can't use up the notification a later switch was observed tapping.
+        val segmentMatch = java.util.IdentityHashMap<LabSegment, Pair<Long, TriggerEvidence>>()
+        for (direct in listOf(true, false)) for (e in sorted) {
             val real = e.segments.filter { !it.isBlockedAttempt }
             val entry = real.firstOrNull { it.pkgId == e.entryPkgId } ?: real.firstOrNull()
             for (seg in e.segments) {
                 if (seg === entry || seg.isBlockedAttempt) continue
                 val ev = seg.triggerEvidence ?: continue
                 if (ev !in ATTRIBUTING) continue
+                if ((ev != TriggerEvidence.RECENT_POSSIBLE_ALERT) != direct) continue
                 val at = seg.startMs
                 val match = when (ev) {
                     TriggerEvidence.OBSERVED_CLICK -> byPkg[seg.triggerPkgId ?: seg.pkgId].orEmpty().filter {
@@ -239,8 +239,16 @@ object NotificationCostAnalyzer {
                     }.maxByOrNull { it.postedAtMs }
                 } ?: continue
                 consumed += match.id
-                credits += Triple(match.id, ev, at)
+                segmentMatch[seg] = match.id to ev
             }
+        }
+
+        val out = ArrayList<Attribution>()
+        for (e in sorted) {
+            val credits = ArrayList<Triple<Long, TriggerEvidence, Long>>()
+            val sessionNotif = e.triggerNotificationId
+            if (sessionNotif != null && e.triggerEvidence in ATTRIBUTING && sessionNotif in byId) credits += Triple(sessionNotif, e.triggerEvidence, e.startMs)
+            for (seg in e.segments) segmentMatch[seg]?.let { (id, ev) -> credits += Triple(id, ev, seg.startMs) }
             if (credits.isEmpty()) continue
             credits.sortBy { it.third }
             val segs = apps.realSegments(e).filter { apps.isDistracting(it.pkgId) }

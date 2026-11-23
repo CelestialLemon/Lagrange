@@ -38,6 +38,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -181,20 +183,27 @@ internal suspend fun loadSessionDetail(db: LagrangeDatabase, episode: EpisodeUi)
 }
 
 /**
- * The check-in card, re-sampled every minute (an offer expires 36 hours after its episode, at any time of day) and
- * whenever ratings, rebuilds or the check-in memory change. Asking the
+ * The check-in card, re-sampled whenever the logical day, ratings, rebuilds or the check-in memory change, and once
+ * more when the offer on screen expires (36 hours after its episode, at any time of day). Asking the
  * repository records the offer, which changes the memory once; the second pass then finds nothing new to write.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 internal fun AppGraph.checkInFlow(): Flow<CheckInCard?> = afterReady {
     val state = database.ingestionStateDao()
     combine(
-        minuteTickFlow(),
+        minuteTickFlow().map { derived.dateOf(it) }.distinctUntilChanged(),
         state.observe(IngestionKeys.DERIVED_LAST_RUN_AT_MS).distinctUntilChanged(),
         database.analyticsDao().observeUserSignals().distinctUntilChanged(),
         preferences.worthCheckInLog.distinctUntilChanged(),
     ) { a, b, c, d -> listOf(a, b, c, d) }
-        .mapLatest { runCatching { lab.checkIn() }.onFailure { if (it is CancellationException) throw it }.getOrNull() }
+        .transformLatest {
+            while (true) {
+                val card = runCatching { lab.checkIn() }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+                emit(card)
+                val expiresAt = card?.expiresAtMs?.takeIf { it != Long.MAX_VALUE } ?: break
+                delay((expiresAt - System.currentTimeMillis() + 1).coerceAtLeast(1))
+            }
+        }
         .distinctUntilChanged()
 }
 

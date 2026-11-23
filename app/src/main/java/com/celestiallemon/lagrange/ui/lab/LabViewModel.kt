@@ -88,7 +88,7 @@ data class LabUiState(
 /** The session sheet opened from a Lab card. */
 data class LabSheet(val episode: EpisodeUi, val packages: Map<Long, PackageEntity>, val detail: SessionDetail?)
 
-data class AutopsyState(val date: LocalDate, val autopsy: SpikeAutopsy?, val loading: Boolean)
+data class AutopsyState(val date: LocalDate, val autopsy: SpikeAutopsy?, val loading: Boolean, val failed: Boolean = false)
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class LabViewModel(app: Application) : AndroidViewModel(app) {
@@ -142,7 +142,7 @@ class LabViewModel(app: Application) : AndroidViewModel(app) {
             when (ev) {
                 Load.Started -> AutopsyState(date, null, loading = true)
                 is Load.Done -> AutopsyState(date, ev.value, loading = false)
-                is Load.Failed -> AutopsyState(date, null, loading = false)
+                is Load.Failed -> AutopsyState(date, null, loading = false, failed = true)
             }
         }
         .flowOn(Dispatchers.IO)

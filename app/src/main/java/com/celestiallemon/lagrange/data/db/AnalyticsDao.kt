@@ -160,6 +160,10 @@ interface AnalyticsDao {
     )
     suspend fun unlockedSessions(fromDate: String, toDate: String): List<SessionEntity>
 
+    /** Of the unlocked episodes that started before [beforeMs], the one that ended last. */
+    @Query("SELECT * FROM sessions WHERE is_glance_only = 0 AND start_ms < :beforeMs ORDER BY end_ms DESC, id DESC LIMIT 1")
+    suspend fun lastUnlockedEndingBefore(beforeMs: Long): SessionEntity?
+
     /** Every segment of those episodes, in order. */
     @Query(
         "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
@@ -212,13 +216,6 @@ interface AnalyticsDao {
             "WHERE p.category = :category AND h.logical_date >= :fromDate AND h.logical_date <= :toDate",
     )
     suspend fun hourlyOfCategory(category: String, fromDate: String, toDate: String): List<HourlyAppUsageEntity>
-
-    /** Notifications that count toward volume (not ongoing, foreground-service or group summaries), by post time. */
-    @Query(
-        "SELECT * FROM raw_notifications WHERE posted_at_ms >= :fromMs AND posted_at_ms < :toMs " +
-            "AND is_ongoing = 0 AND is_foreground_service = 0 AND is_group_summary = 0 ORDER BY posted_at_ms, id",
-    )
-    suspend fun countableNotificationsBetween(fromMs: Long, toMs: Long): List<RawNotificationEntity>
 
     /** Starts of real (not blocked) runs of any app in `[fromMs, toMs)`. */
     @Query(

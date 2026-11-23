@@ -154,6 +154,33 @@ class NotificationCostTest {
     }
 
     @Test
+    fun `a tap observed later keeps its notification from an earlier alert match`() {
+        val h = HOUR_MS
+        val start = 3 * h
+        val at = start + 5 * MIN // first hop into Instagram (alert evidence)
+        val at2 = at + 15 * MIN // second hop into Instagram (observed tap)
+        val notifs = listOf(
+            n(1, INSTA, at - 30_000, channel = "a"),
+            n(2, INSTA, at - 10_000, channel = "b", removed = at2 + 1_000, reason = RemovalReason.CLICK),
+        )
+        val e = episode(start, KINDLE to 5, INSTA to 10, KINDLE to 5, INSTA to 10).let { ep ->
+            ep.copy(
+                segments = ep.segments.mapIndexed { i, s ->
+                    when (i) {
+                        1 -> s.copy(triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT)
+                        3 -> s.copy(triggerEvidence = TriggerEvidence.OBSERVED_CLICK, triggerPkgId = INSTA)
+                        else -> s
+                    }
+                },
+            )
+        }
+        val a = NotificationCostAnalyzer.attribute(notifs, listOf(e), testApps)
+        // The tap is direct evidence and is matched first; the alert rule then takes the older notification.
+        assertEquals(listOf(1L to at, 2L to at2), a.map { it.notificationId to it.fromMs })
+        assertEquals(listOf(10 * MIN, 10 * MIN), a.map { it.downstreamMs })
+    }
+
+    @Test
     fun `pseudonymized or missing channel ids fall back to the app's notification settings`() {
         val pkg = "com.example"
         assertEquals(NotificationSettingsTarget.Channel(pkg, "promotions"), ChannelSettings.target(pkg, "promotions"))
