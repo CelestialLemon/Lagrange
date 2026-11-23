@@ -55,6 +55,19 @@ data class UserPrefs(
     val dailyPromptCap: Int? = null,
     /** Optional healthy redirect app package name (e.g., Kindle, Notes). */
     val redirectPackageName: String? = null,
+    /** Daily reflection digest notification (opt-in: it needs POST_NOTIFICATIONS). */
+    val dailyDigestEnabled: Boolean = false,
+    /** Local minute of day the daily digest is posted at (default 21:30). */
+    val dailyDigestMinuteOfDay: Int = DEFAULT_DAILY_DIGEST_MINUTE,
+    val weeklyDigestEnabled: Boolean = false,
+    /** ISO day of week (1 = Monday … 7 = Sunday) the weekly digest is posted on. */
+    val weeklyDigestDayOfWeek: Int = DEFAULT_WEEKLY_DIGEST_DAY,
+    /** Local minute of day the weekly digest is posted at (default 20:00). */
+    val weeklyDigestMinuteOfDay: Int = DEFAULT_WEEKLY_DIGEST_MINUTE,
+    /** Device-local dedupe key: the logical date the last daily digest summarized. Never exported. */
+    val lastDailyDigestDate: String? = null,
+    /** Device-local dedupe key: the ISO week (e.g. `2026-W48`) of the last weekly digest. Never exported. */
+    val lastWeeklyDigestWeek: String? = null,
 ) {
     fun toFrictionSettings(): FrictionSettings = FrictionSettings(
         frictionEnabled = frictionEnabled,
@@ -80,6 +93,11 @@ data class UserPrefs(
         val GRACE_WINDOW_RANGE_SEC = 0..600
         val NUDGE_INTERVAL_RANGE_MIN = 0..120
         val DAILY_CAP_RANGE = 1..200
+        const val DEFAULT_DAILY_DIGEST_MINUTE = 21 * 60 + 30
+        const val DEFAULT_WEEKLY_DIGEST_DAY = 7
+        const val DEFAULT_WEEKLY_DIGEST_MINUTE = 20 * 60
+        val MINUTE_OF_DAY_RANGE = 0..1439
+        val DAY_OF_WEEK_RANGE = 1..7
     }
 }
 
@@ -248,6 +266,71 @@ class LagrangePreferences(
         }
     }
 
+    // -- Reflection digests (settings logged to settings_history; dedupe keys are device-local) ---------------------
+
+    /** Turns the daily digest on/off and/or moves it; null keeps the current value. */
+    suspend fun setDailyDigest(enabled: Boolean? = null, minuteOfDay: Int? = null) {
+        if (minuteOfDay != null) require(minuteOfDay in UserPrefs.MINUTE_OF_DAY_RANGE) { "minute of day must be 0..1439" }
+        val cur = current()
+        val on = enabled ?: cur.dailyDigestEnabled
+        val minute = minuteOfDay ?: cur.dailyDigestMinuteOfDay
+        if (cur.dailyDigestEnabled == on && cur.dailyDigestMinuteOfDay == minute) return
+        recordSettingHistory(HISTORY_DAILY_DIGEST, "{\"enabled\":$on,\"minute_of_day\":$minute}")
+        store.edit {
+            it[DAILY_DIGEST_ENABLED] = on
+            it[DAILY_DIGEST_MINUTE] = minute
+        }
+    }
+
+    /** Turns the weekly digest on/off and/or moves it (ISO day 1 = Monday … 7 = Sunday); null keeps the current value. */
+    suspend fun setWeeklyDigest(enabled: Boolean? = null, dayOfWeek: Int? = null, minuteOfDay: Int? = null) {
+        if (dayOfWeek != null) require(dayOfWeek in UserPrefs.DAY_OF_WEEK_RANGE) { "day of week must be 1..7" }
+        if (minuteOfDay != null) require(minuteOfDay in UserPrefs.MINUTE_OF_DAY_RANGE) { "minute of day must be 0..1439" }
+        val cur = current()
+        val on = enabled ?: cur.weeklyDigestEnabled
+        val day = dayOfWeek ?: cur.weeklyDigestDayOfWeek
+        val minute = minuteOfDay ?: cur.weeklyDigestMinuteOfDay
+        if (cur.weeklyDigestEnabled == on && cur.weeklyDigestDayOfWeek == day && cur.weeklyDigestMinuteOfDay == minute) return
+        recordSettingHistory(HISTORY_WEEKLY_DIGEST, "{\"enabled\":$on,\"day_of_week\":$day,\"minute_of_day\":$minute}")
+        store.edit {
+            it[WEEKLY_DIGEST_ENABLED] = on
+            it[WEEKLY_DIGEST_DAY] = day
+            it[WEEKLY_DIGEST_MINUTE] = minute
+        }
+    }
+
+    /**
+     * Atomically claims the daily digest for [logicalDate]: true (and recorded) only the first time, so a retried or
+     * duplicated worker can never post the same day twice.
+     */
+    suspend fun claimDailyDigest(logicalDate: String): Boolean = claim(LAST_DAILY_DIGEST_DATE, logicalDate)
+
+    /** Atomically claims the weekly digest for [isoWeek]; see [claimDailyDigest]. */
+    suspend fun claimWeeklyDigest(isoWeek: String): Boolean = claim(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
+
+    /** Atomically claims the coverage-gap alert for the harvest it is about (one alert per silence). */
+    suspend fun claimCoverageAlert(lastHarvestAtMs: Long): Boolean = claim(LAST_COVERAGE_ALERT_HARVEST, lastHarvestAtMs.toString())
+
+    /** Undoes [claimDailyDigest] for [logicalDate] (only if it is still the latest claim). */
+    suspend fun releaseDailyDigest(logicalDate: String) = release(LAST_DAILY_DIGEST_DATE, logicalDate)
+
+    suspend fun releaseWeeklyDigest(isoWeek: String) = release(LAST_WEEKLY_DIGEST_WEEK, isoWeek)
+
+    private suspend fun release(key: Preferences.Key<String>, value: String) {
+        store.edit { if (it[key] == value) it.remove(key) }
+    }
+
+    private suspend fun claim(key: Preferences.Key<String>, value: String): Boolean {
+        var claimed = false
+        store.edit {
+            if (it[key] != value) {
+                it[key] = value
+                claimed = true
+            }
+        }
+        return claimed
+    }
+
     /** Device-local monotonic friction runtime state (never exported in backups). */
     suspend fun loadFrictionRuntime(): FrictionRuntimeSnapshot? =
         FrictionRuntimeSnapshot.decode(store.data.first()[FRICTION_RUNTIME_STATE])
@@ -342,6 +425,11 @@ class LagrangePreferences(
             put(TIMER_PRESETS_MIN.name, JsonArray(p.timerPresetsMin.map { JsonPrimitive(it) }))
             put(DAILY_PROMPT_CAP.name, p.dailyPromptCap?.let { JsonPrimitive(it) } ?: JsonNull)
             put(REDIRECT_PACKAGE_NAME.name, p.redirectPackageName?.let { JsonPrimitive(it) } ?: JsonNull)
+            put(DAILY_DIGEST_ENABLED.name, JsonPrimitive(p.dailyDigestEnabled))
+            put(DAILY_DIGEST_MINUTE.name, JsonPrimitive(p.dailyDigestMinuteOfDay))
+            put(WEEKLY_DIGEST_ENABLED.name, JsonPrimitive(p.weeklyDigestEnabled))
+            put(WEEKLY_DIGEST_DAY.name, JsonPrimitive(p.weeklyDigestDayOfWeek))
+            put(WEEKLY_DIGEST_MINUTE.name, JsonPrimitive(p.weeklyDigestMinuteOfDay))
         }
         return obj.toString()
     }
@@ -383,6 +471,16 @@ class LagrangePreferences(
             val pkg = (obj[REDIRECT_PACKAGE_NAME.name] as? JsonPrimitive)?.takeIf { it.isString }?.content?.trim()?.takeIf { it.isNotEmpty() }
             if (pkg == null) prefs.remove(REDIRECT_PACKAGE_NAME) else prefs[REDIRECT_PACKAGE_NAME] = pkg
 
+            // Digest settings, reset to defaults when absent (pre-digest backups). Dedupe keys stay device-local.
+            prefs[DAILY_DIGEST_ENABLED] = (obj[DAILY_DIGEST_ENABLED.name] as? JsonPrimitive)?.booleanOrNull ?: defaults.dailyDigestEnabled
+            prefs[DAILY_DIGEST_MINUTE] = (obj[DAILY_DIGEST_MINUTE.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in UserPrefs.MINUTE_OF_DAY_RANGE } ?: defaults.dailyDigestMinuteOfDay
+            prefs[WEEKLY_DIGEST_ENABLED] = (obj[WEEKLY_DIGEST_ENABLED.name] as? JsonPrimitive)?.booleanOrNull ?: defaults.weeklyDigestEnabled
+            prefs[WEEKLY_DIGEST_DAY] = (obj[WEEKLY_DIGEST_DAY.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in UserPrefs.DAY_OF_WEEK_RANGE } ?: defaults.weeklyDigestDayOfWeek
+            prefs[WEEKLY_DIGEST_MINUTE] = (obj[WEEKLY_DIGEST_MINUTE.name] as? JsonPrimitive)?.intOrNull
+                ?.takeIf { it in UserPrefs.MINUTE_OF_DAY_RANGE } ?: defaults.weeklyDigestMinuteOfDay
+
             // Always discard device-local monotonic runtime state when restoring a backup.
             prefs.remove(FRICTION_RUNTIME_STATE)
         }
@@ -406,10 +504,20 @@ class LagrangePreferences(
         private val TIMER_PRESETS_MIN = stringPreferencesKey("timer_presets_min")
         private val DAILY_PROMPT_CAP = intPreferencesKey("daily_prompt_cap")
         private val REDIRECT_PACKAGE_NAME = stringPreferencesKey("redirect_package_name")
+        private val DAILY_DIGEST_ENABLED = booleanPreferencesKey("daily_digest_enabled")
+        private val DAILY_DIGEST_MINUTE = intPreferencesKey("daily_digest_minute_of_day")
+        private val WEEKLY_DIGEST_ENABLED = booleanPreferencesKey("weekly_digest_enabled")
+        private val WEEKLY_DIGEST_DAY = intPreferencesKey("weekly_digest_day_of_week")
+        private val WEEKLY_DIGEST_MINUTE = intPreferencesKey("weekly_digest_minute_of_day")
+        private val LAST_DAILY_DIGEST_DATE = stringPreferencesKey("last_daily_digest_date")
+        private val LAST_WEEKLY_DIGEST_WEEK = stringPreferencesKey("last_weekly_digest_week")
+        private val LAST_COVERAGE_ALERT_HARVEST = stringPreferencesKey("last_coverage_alert_harvest_ms")
 
         /** `settings_history.setting_key` values. */
         const val HISTORY_ROLLOVER_HOUR = "rollover_hour"
         const val HISTORY_DAILY_BUDGET_MS = "daily_budget_ms"
+        const val HISTORY_DAILY_DIGEST = "daily_digest"
+        const val HISTORY_WEEKLY_DIGEST = "weekly_digest"
         private val BACKUP_TREE_URI = stringPreferencesKey("backup_tree_uri")
         private val LAST_BACKUP_AT_MS = longPreferencesKey("last_backup_at_ms")
         private val LAST_BACKUP_STATUS = stringPreferencesKey("last_backup_status")
@@ -466,6 +574,13 @@ class LagrangePreferences(
             timerPresetsMin = decodePresets(this[TIMER_PRESETS_MIN]),
             dailyPromptCap = this[DAILY_PROMPT_CAP],
             redirectPackageName = this[REDIRECT_PACKAGE_NAME],
+            dailyDigestEnabled = this[DAILY_DIGEST_ENABLED] ?: false,
+            dailyDigestMinuteOfDay = this[DAILY_DIGEST_MINUTE] ?: UserPrefs.DEFAULT_DAILY_DIGEST_MINUTE,
+            weeklyDigestEnabled = this[WEEKLY_DIGEST_ENABLED] ?: false,
+            weeklyDigestDayOfWeek = this[WEEKLY_DIGEST_DAY] ?: UserPrefs.DEFAULT_WEEKLY_DIGEST_DAY,
+            weeklyDigestMinuteOfDay = this[WEEKLY_DIGEST_MINUTE] ?: UserPrefs.DEFAULT_WEEKLY_DIGEST_MINUTE,
+            lastDailyDigestDate = this[LAST_DAILY_DIGEST_DATE],
+            lastWeeklyDigestWeek = this[LAST_WEEKLY_DIGEST_WEEK],
         )
     }
 }

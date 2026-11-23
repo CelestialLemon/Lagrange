@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.celestiallemon.lagrange.StartupGate
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.celestiallemon.lagrange.Destination
 import com.celestiallemon.lagrange.ui.friction.FrictionScreen
 import com.celestiallemon.lagrange.ui.lab.LabScreen
 import com.celestiallemon.lagrange.ui.onboarding.OnboardingScreen
@@ -103,6 +104,18 @@ fun LagrangeShell(main: MainViewModel) {
     // Predictive back: from any other tab, back returns to Today before leaving the app. The deep dive registers
     // its own (later, so higher-priority) handler that returns to the Trends list first.
     BackHandler(enabled = tab != Tab.Today) { tab = Tab.Today }
+    val destination by main.destination.collectAsStateWithLifecycle()
+    LaunchedEffect(destination) {
+        val target = destination ?: return@LaunchedEffect
+        tab = when (target) {
+            Destination.TODAY -> Tab.Today
+            Destination.TRENDS -> Tab.Trends.also { setDeepDive(null) }
+            Destination.LAB -> Tab.Lab
+            Destination.FRICTION -> Tab.Friction
+            Destination.SYSTEM -> Tab.System
+        }
+        main.consumeDestination()
+    }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
         bottomBar = {

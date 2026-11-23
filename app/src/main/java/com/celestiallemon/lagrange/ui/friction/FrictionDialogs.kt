@@ -180,7 +180,7 @@ fun ScheduleEditorDialog(
 }
 
 @Composable
-private fun TimeStepperRow(label: String, minuteOfDay: Int, onStep: (Int) -> Unit) {
+internal fun TimeStepperRow(label: String, minuteOfDay: Int, onStep: (Int) -> Unit) {
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
         Text(label, style = MaterialTheme.typography.titleSmall)
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Space.s)) {

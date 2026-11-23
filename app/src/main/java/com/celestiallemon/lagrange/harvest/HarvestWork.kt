@@ -16,6 +16,7 @@ import androidx.work.workDataOf
 import com.celestiallemon.lagrange.LagrangeApplication
 import com.celestiallemon.lagrange.StartupFailedException
 import com.celestiallemon.lagrange.backup.WeeklyBackupWorker
+import com.celestiallemon.lagrange.digest.DigestScheduler
 import java.util.concurrent.TimeUnit
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -34,10 +35,19 @@ class HarvestWorker(context: Context, params: WorkerParameters) : CoroutineWorke
         }
         val trigger = inputData.getString(KEY_TRIGGER)?.let { name -> HarvestTrigger.entries.firstOrNull { it.name == name } }
             ?: HarvestTrigger.PERIODIC
-        return run(
+        val result = run(
             harvest = { graph.harvestAndDerive(trigger, recomputeInline = true) },
             sideTasks = listOf({ graph.timezoneTracker.check() }, { graph.heartbeatListenerIfConnected() }),
         )
+        // After the harvest, so a harvest that just recovered never raises a stale gap alert.
+        try {
+            graph.digests.checkCoverage()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "coverage check failed", e)
+        }
+        return result
     }
 
     companion object {
@@ -79,6 +89,9 @@ object WorkScheduler {
     const val HARVEST_NOW = "harvest-now"
     const val WEEKLY_BACKUP = "weekly-backup"
 
+    /** Reflection digest chains (see DigestScheduler); cancelled with everything else on reset. */
+    val DIGEST_WORK = listOf(DigestScheduler.DAILY_WORK, DigestScheduler.WEEKLY_WORK)
+
     fun schedulePeriodicHarvest(context: Context) {
         val request = PeriodicWorkRequestBuilder<HarvestWorker>(1, TimeUnit.HOURS)
             .setConstraints(Constraints.Builder().setRequiresBatteryNotLow(false).build())
@@ -119,7 +132,9 @@ object WorkScheduler {
     /** Cancels every Lagrange job and waits until WorkManager has recorded the cancellations. */
     suspend fun cancelAllAndAwait(context: Context) = withContext(Dispatchers.IO) {
         val wm = WorkManager.getInstance(context)
-        listOf(HARVEST_PERIODIC, HARVEST_NOW, WEEKLY_BACKUP).map { wm.cancelUniqueWork(it) }.forEach { it.result.get() }
+        (listOf(HARVEST_PERIODIC, HARVEST_NOW, WEEKLY_BACKUP) + DIGEST_WORK)
+            .map { wm.cancelUniqueWork(it) }
+            .forEach { it.result.get() }
     }
 }
 
@@ -136,6 +151,9 @@ class TimeChangeReceiver : BroadcastReceiver() {
                 graph.harvester.requestRescan()
                 WorkScheduler.enqueueHarvestNow(app, HarvestTrigger.TIME_CHANGED)
                 graph.timezoneTracker.check()
+                // The wall clock jumped: queued digests were timed against the old clock.
+                DigestScheduler.ensureScheduled(app, DigestScheduler.Settings.of(graph.preferences.current()), force = true)
+                graph.surfaces.requestRefresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -161,6 +179,9 @@ class TimezoneChangeReceiver : BroadcastReceiver() {
             try {
                 graph.awaitReady()
                 graph.timezoneTracker.check()
+                // Digests are due at a local time: a new zone makes the queued run's delay stale.
+                DigestScheduler.ensureScheduled(context.applicationContext, DigestScheduler.Settings.of(graph.preferences.current()))
+                graph.surfaces.requestRefresh()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {

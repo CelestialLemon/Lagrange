@@ -5,4 +5,8 @@
     <string name="accessibility_service_label">Lagrange gentle friction</string>
     <string name="accessibility_service_summary">Detects distracting app opens for mindful launch pauses and session timers</string>
     <string name="accessibility_service_description">Lagrange observes only foreground app transitions (never screen content, text, or passwords) to display calm mindful launch pauses, soft session timers, and time-blindness nudges on the apps you choose. All data stays strictly on this device.</string>
+    <string name="tile_focus_boost_label">Focus Boost</string>
+    <string name="widget_name">Lagrange today</string>
+    <string name="widget_description">Today\'s distracting time against your budget, your phone-free stretch and friction status.</string>
+    <string name="widget_loading">Lagrange…</string>
 </resources>

@@ -6,6 +6,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.celestiallemon.lagrange.data.UserPrefs
 import com.celestiallemon.lagrange.data.db.FrictionScheduleEntity
+import com.celestiallemon.lagrange.digest.DigestService
+import com.celestiallemon.lagrange.domain.digest.DigestKind
+import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import com.celestiallemon.lagrange.domain.friction.FrictionLiveStatus
 import com.celestiallemon.lagrange.domain.friction.FrictionSchedule
 import com.celestiallemon.lagrange.ui.afterReady
@@ -89,6 +92,46 @@ class FrictionViewModel(app: Application) : AndroidViewModel(app) {
     fun activateFocusBoost1h() = launchIo { graph.friction.activateFocusBoost1h() }
 
     fun cancelFocusBoost() = launchIo { graph.friction.cancelFocusBoost() }
+
+    // -- Reflection digests (the app graph reschedules the workers whenever these settings change) -----------------
+
+    private val _digestMessage = MutableStateFlow<String?>(null)
+
+    /** Result of the last "Send preview digest", shown under the buttons. */
+    val digestMessage: StateFlow<String?> = _digestMessage.asStateFlow()
+
+    fun setDailyDigestEnabled(enabled: Boolean) = launchIo { graph.preferences.setDailyDigest(enabled = enabled) }
+
+    fun setDailyDigestMinute(minuteOfDay: Int) = launchIo { graph.preferences.setDailyDigest(minuteOfDay = minuteOfDay) }
+
+    fun setWeeklyDigestEnabled(enabled: Boolean) = launchIo { graph.preferences.setWeeklyDigest(enabled = enabled) }
+
+    fun setWeeklyDigestDay(dayOfWeek: Int) = launchIo { graph.preferences.setWeeklyDigest(dayOfWeek = dayOfWeek) }
+
+    fun setWeeklyDigestMinute(minuteOfDay: Int) = launchIo { graph.preferences.setWeeklyDigest(minuteOfDay = minuteOfDay) }
+
+    /** Posts what the digest would say right now; never counts as the real one for that day or week. */
+    fun sendPreviewDigest(kind: DigestKind) = launchIo {
+        _digestMessage.value = "Composing ${kind.label()} preview…"
+        // Fresh numbers first, as the scheduled digest does.
+        runCatching { graph.harvestAndDerive(HarvestTrigger.MANUAL, recomputeInline = true) }
+            .onFailure { if (it is CancellationException) throw it }
+        _digestMessage.value = when (graph.digests.sendTest(kind)) {
+            DigestService.Outcome.POSTED -> "Preview ${kind.label()} digest posted."
+            DigestService.Outcome.NOTIFICATIONS_OFF -> "Notifications are off for Lagrange, so nothing was posted."
+            DigestService.Outcome.NOTHING_TO_SAY -> when (kind) {
+                DigestKind.DAILY -> "Nothing to summarize yet: no recorded data for that day."
+                DigestKind.WEEKLY -> "Nothing to summarize yet: no fully covered day in the last week."
+            }
+            DigestService.Outcome.ALREADY_POSTED -> "Already posted."
+        }
+    }
+
+    fun clearDigestMessage() {
+        _digestMessage.value = null
+    }
+
+    private fun DigestKind.label() = if (this == DigestKind.DAILY) "daily" else "weekly"
 
     fun saveSchedule(schedule: FrictionScheduleEntity, onSaved: () -> Unit = {}) = viewModelScope.launch {
         try {

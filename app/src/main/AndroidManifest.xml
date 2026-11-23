@@ -17,6 +17,8 @@
         tools:ignore="QueryAllPackagesPermission" />
     <uses-permission android:name="android.permission.QUERY_ADVANCED_PROTECTION_MODE" />
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+    <!-- Already merged in by WorkManager; declared so the boot refresh below never depends on a library. -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Nothing goes to cloud backup or device-to-device transfer: see data_extraction_rules and backup_rules.
          Backups are files the user saves (manually or weekly) into a folder they choose. -->
@@ -75,6 +77,44 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Home-screen widget (Jetpack Glance). Exported only for the launcher's APPWIDGET_UPDATE broadcasts. -->
+        <receiver
+            android:name=".widget.LagrangeWidgetReceiver"
+            android:exported="true"
+            android:label="@string/widget_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/lagrange_widget_info" />
+        </receiver>
+
+        <!-- Quick Settings "Focus Boost" tile; only System UI (holding BIND_QUICK_SETTINGS_TILE) can bind it. -->
+        <service
+            android:name=".tile.FocusBoostTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_focus_boost"
+            android:label="@string/tile_focus_boost_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.TOGGLEABLE_TILE"
+                android:value="true" />
+        </service>
+
+        <!-- After a reboot the monotonic boost/snooze clocks restart: redraw the widget and tile. System-only broadcasts. -->
+        <receiver
+            android:name=".widget.BootRefreshReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

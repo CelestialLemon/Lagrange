@@ -184,6 +184,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun restartApp() = AppRestarter.restart(getApplication())
 
+    private val _destination = MutableStateFlow<com.celestiallemon.lagrange.Destination?>(null)
+
+    /** A tab another surface asked to open (widget, tile, digest); the shell consumes it once. */
+    val destination: StateFlow<com.celestiallemon.lagrange.Destination?> = _destination
+
+    fun openDestination(destination: com.celestiallemon.lagrange.Destination) {
+        _destination.value = destination
+    }
+
+    fun consumeDestination() {
+        _destination.value = null
+    }
+
     fun dismissRestoreNotice() {
         graph.restoreNotice.value = null
     }
@@ -282,6 +295,11 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
     fun exportSqlite(uri: Uri) = run("Exporting database…") {
         graph.backups.exportRawSqliteTo(uri)
         "Raw .sqlite exported"
+    }
+
+    fun exportCsv(uri: Uri) = run("Exporting CSV bundle…") {
+        val summary = graph.backups.exportCsvBundleTo(uri)
+        "CSV bundle exported · ${summary.rowsPerFile.size} files · ${formatCount(summary.totalRows)} rows"
     }
 
     fun stageRestore(uri: Uri) = run("Validating backup…") {

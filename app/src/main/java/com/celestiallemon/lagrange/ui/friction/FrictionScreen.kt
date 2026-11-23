@@ -509,6 +509,10 @@ fun FrictionScreen(
             }
         }
 
+        loadedPrefs?.let { p ->
+            item("digests") { DigestSettingsCard(p, vm) }
+        }
+
         item("categories") {
             SectionCard(title = "App categories & per-app friction", eyebrow = "Applies to all history", icon = Icons.Outlined.Category) {
                 Text(

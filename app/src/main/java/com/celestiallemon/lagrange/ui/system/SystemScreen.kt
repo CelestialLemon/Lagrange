@@ -44,6 +44,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.celestiallemon.lagrange.backup.BackupFormat
+import com.celestiallemon.lagrange.backup.CsvExporter
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.harvest.HarvestResult
 import com.celestiallemon.lagrange.ui.DataViewModel
@@ -83,6 +84,9 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
     }
     val createSqlite = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.sqlite3")) { uri ->
         uri?.let(data::exportSqlite)
+    }
+    val createCsv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
+        uri?.let(data::exportCsv)
     }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         uri?.let(data::setBackupFolder)
@@ -241,7 +245,15 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
                     OutlinedButton(onClick = { createSqlite.launch("lagrange-${System.currentTimeMillis() / 1000}.sqlite") }, enabled = !op.busy) {
                         Text("Export .sqlite")
                     }
+                    OutlinedButton(onClick = { createCsv.launch(CsvExporter.fileName(System.currentTimeMillis())) }, enabled = !op.busy) {
+                        Text("Export CSV bundle (.zip)")
+                    }
                 }
+                Text(
+                    "The CSV bundle holds daily summaries, per-app days, sessions, session segments, notification metadata and friction events, with local ISO-8601 and UTC timestamps.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
                 if (staged) {
                     Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.tertiaryContainer) {
                         Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.s)) {

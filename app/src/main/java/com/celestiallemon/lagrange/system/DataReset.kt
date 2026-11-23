@@ -3,6 +3,7 @@ package com.celestiallemon.lagrange.system
 import android.content.Context
 import android.content.Intent
 import android.util.Log
+import androidx.core.app.NotificationManagerCompat
 import com.celestiallemon.lagrange.backup.RestoreCoordinator
 import com.celestiallemon.lagrange.data.IngestionKeys
 import com.celestiallemon.lagrange.data.db.IngestionStateEntity
@@ -15,6 +16,9 @@ import kotlinx.coroutines.withContext
 
 /**
  * Local Delete / Reset Data.
+ *
+ * Digest jobs are cancelled with every other job (see [WorkScheduler.cancelAllAndAwait]) and posted digests are
+ * withdrawn; the widget and Quick Settings tile redraw from the empty database when the restarted process starts.
  *
  * Wiping tables under live writers (harvester, notification listener, backups, timezone tracker) would race them
  * and leave old pages in the SQLite freelist and WAL. Instead [requestReset] stops background work, releases
@@ -45,6 +49,8 @@ class DataReset(
             cancelWork()
             val stage: suspend () -> Long = {
                 releaseFolderGrants(context)
+                // Digests and gap alerts describe data that is about to be deleted.
+                runCatching { NotificationManagerCompat.from(context).cancelAll() }
                 val cutoff = clock()
                 writeSynced(markerFile(context), cutoff.toString())
                 cutoff

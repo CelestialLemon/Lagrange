@@ -1,0 +1,64 @@
+package com.celestiallemon.lagrange.digest
+
+import com.celestiallemon.lagrange.domain.digest.Digest
+import com.celestiallemon.lagrange.domain.digest.DigestKind
+
+/** Where digests go: the system notification shade in the app, a recorder in tests. */
+interface DigestPoster {
+    fun canPost(): Boolean
+    fun post(digest: Digest): Boolean
+    fun postCoverageAlert(silentHours: Long): Boolean
+}
+
+/**
+ * Composes, deduplicates and posts reflection digests. Each digest is claimed (atomically, in preferences) under its
+ * key before it is posted, so a retried or doubled worker never posts the same day or week twice; a test digest is
+ * never claimed, so previewing never suppresses the real one.
+ */
+class DigestService(
+    private val compose: suspend (DigestKind) -> Digest?,
+    private val claim: suspend (DigestKind, String) -> Boolean,
+    /** Gives a claim back when posting failed after it, so the next run can still deliver that day / week. */
+    private val release: suspend (DigestKind, String) -> Unit = { _, _ -> },
+    private val poster: DigestPoster,
+    private val lastHarvestAtMs: suspend () -> Long?,
+    private val claimCoverageAlert: suspend (Long) -> Boolean,
+    private val clock: () -> Long = System::currentTimeMillis,
+    private val gapAlertMs: Long = COVERAGE_GAP_ALERT_MS,
+) {
+    enum class Outcome { POSTED, ALREADY_POSTED, NOTHING_TO_SAY, NOTIFICATIONS_OFF }
+
+    suspend fun runScheduled(kind: DigestKind): Outcome {
+        if (!poster.canPost()) return Outcome.NOTIFICATIONS_OFF
+        val digest = compose(kind) ?: return Outcome.NOTHING_TO_SAY
+        if (!claim(kind, digest.key)) return Outcome.ALREADY_POSTED
+        if (poster.post(digest)) return Outcome.POSTED
+        release(kind, digest.key)
+        return Outcome.NOTIFICATIONS_OFF
+    }
+
+    /** "Preview / Send test digest": posts what the digest would say right now, without claiming it. */
+    suspend fun sendTest(kind: DigestKind): Outcome {
+        if (!poster.canPost()) return Outcome.NOTIFICATIONS_OFF
+        val digest = compose(kind) ?: return Outcome.NOTHING_TO_SAY
+        return if (poster.post(digest)) Outcome.POSTED else Outcome.NOTIFICATIONS_OFF
+    }
+
+    /**
+     * Alerts once per silence when no harvest has succeeded for over [gapAlertMs] (usually Usage Access revoked or
+     * the app restricted), before Android's roughly week-long event retention loses that history. Returns true when
+     * an alert was posted.
+     */
+    suspend fun checkCoverage(): Boolean {
+        val last = lastHarvestAtMs() ?: return false
+        val silent = clock() - last
+        if (silent <= gapAlertMs || !poster.canPost()) return false
+        if (!claimCoverageAlert(last)) return false
+        return poster.postCoverageAlert(silent / HOUR_MS)
+    }
+
+    companion object {
+        private const val HOUR_MS = 60 * 60_000L
+        const val COVERAGE_GAP_ALERT_MS = 48 * HOUR_MS
+    }
+}

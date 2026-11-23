@@ -52,6 +52,50 @@ class ManifestHardeningTest {
     }
 
     @Test
+    fun `widget receiver and Focus Boost tile are declared and locked to the system`() {
+        val pm = context.packageManager
+        val tile = pm.getServiceInfo(
+            android.content.ComponentName(context, com.celestiallemon.lagrange.tile.FocusBoostTileService::class.java),
+            PackageManager.ComponentInfoFlags.of(PackageManager.GET_META_DATA.toLong()),
+        )
+        assertEquals("android.permission.BIND_QUICK_SETTINGS_TILE", tile.permission)
+        assertTrue(tile.exported)
+        assertTrue(tile.icon != 0)
+
+        val widget = pm.getReceiverInfo(
+            android.content.ComponentName(context, com.celestiallemon.lagrange.widget.LagrangeWidgetReceiver::class.java),
+            PackageManager.ComponentInfoFlags.of(PackageManager.GET_META_DATA.toLong()),
+        )
+        assertTrue(widget.metaData?.containsKey("android.appwidget.provider") == true)
+
+        val manifest = File("src/main/AndroidManifest.xml").readText()
+        assertTrue(manifest.contains("android.service.quicksettings.action.QS_TILE"))
+        assertTrue(manifest.contains("android.appwidget.action.APPWIDGET_UPDATE"))
+        // Boot refresh receiver only takes system broadcasts.
+        val boot = pm.getReceiverInfo(
+            android.content.ComponentName(context, com.celestiallemon.lagrange.widget.BootRefreshReceiver::class.java),
+            PackageManager.ComponentInfoFlags.of(0),
+        )
+        assertFalse(boot.exported)
+
+        val info = File("src/main/res/xml/lagrange_widget_info.xml").readText()
+        assertTrue("the widget is redrawn by the app, never polled", info.contains("android:updatePeriodMillis=\"0\""))
+    }
+
+    @Test
+    fun `digest notification channels are distinct`() {
+        val ids = listOf(
+            com.celestiallemon.lagrange.digest.DigestNotifier.CHANNEL_DAILY,
+            com.celestiallemon.lagrange.digest.DigestNotifier.CHANNEL_WEEKLY,
+            com.celestiallemon.lagrange.digest.DigestNotifier.CHANNEL_COVERAGE,
+        )
+        assertEquals(listOf("lagrange_daily_digest", "lagrange_weekly_digest", "lagrange_coverage_alerts"), ids)
+        com.celestiallemon.lagrange.digest.DigestNotifier(context).ensureChannels()
+        val nm = context.getSystemService(android.app.NotificationManager::class.java)
+        ids.forEach { assertTrue(it, nm.getNotificationChannel(it) != null) }
+    }
+
+    @Test
     fun `merged source manifest keeps backup exclusions for the database and datastore`() {
         val rules = File("src/main/res/xml/data_extraction_rules.xml").readText()
         assertTrue(rules.contains("cloud-backup") && rules.contains("device-transfer"))
