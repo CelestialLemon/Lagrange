@@ -108,14 +108,14 @@ class BackupRestoreTest {
         restore.applyPendingIfAny()
         assertFalse(File("$path-wal").exists())
         assertFalse(File("$path-shm").exists())
-        assertTrue(restore.isVerifyPending())
+        assertTrue(restore.needsVerification())
 
         db = LagrangeDatabase.create(context)
         assertEquals(setOf("com.kept"), packageNames().minus(""))
         restore.markVerified()
-        assertFalse(restore.isVerifyPending())
+        assertFalse(restore.needsVerification())
         assertEquals("Backup restored.", restore.consumeOutcome())
-        assertTrue(restore.pendingPreferencesFile.isFile)
+        assertNotNull(restore.pendingPreferences())
     }
 
     @Test
@@ -130,7 +130,7 @@ class BackupRestoreTest {
         db = LagrangeDatabase.create(context)
         assertEquals(setOf("com.kept", "com.after_backup"), packageNames().minus(""))
         assertNotNull(restore.consumeOutcome())
-        assertFalse(restore.pendingPreferencesFile.exists())
+        assertNull(restore.pendingPreferences())
     }
 
     @Test
@@ -141,7 +141,7 @@ class BackupRestoreTest {
         assertFalse(restore.hasStagedRestore())
         db.close()
         restore.applyPendingIfAny()
-        assertFalse(restore.isVerifyPending())
+        assertFalse(restore.needsVerification())
         db = LagrangeDatabase.create(context)
         assertNull(restore.consumeOutcome())
     }
@@ -177,7 +177,7 @@ class BackupRestoreTest {
     }
 
     @Test
-    fun `an interrupted swap rolls back on the next start`() = runBlocking {
+    fun `an interrupted swap journaled by the first build rolls back on the next start`() = runBlocking {
         addPackage("com.kept")
         db.close()
         val root = File(context.noBackupFilesDir, "restore").apply { mkdirs() }

@@ -3,6 +3,7 @@ package com.celestiallemon.lagrange.data
 import androidx.room3.withWriteTransaction
 import com.celestiallemon.lagrange.data.db.ClassEntity
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
+import com.celestiallemon.lagrange.data.db.NameId
 import com.celestiallemon.lagrange.data.db.PackageEntity
 import java.util.concurrent.ConcurrentHashMap
 
@@ -24,14 +25,11 @@ class Interner(
 
     suspend fun packageIds(names: Collection<String>): Map<String, Long> {
         val result = HashMap<String, Long>(names.size)
-        val missing = ArrayList<String>()
-        for (name in names.toSet()) {
-            val cached = packageIds[name]
-            if (cached != null) result[name] = cached else missing += name
-        }
+        val missing = names.toSet().filter { name -> packageIds[name]?.also { result[name] = it } == null }
         if (missing.isEmpty()) return result
         val dao = db.packageDao()
-        val unknown = missing.filter { name -> dao.idOf(name)?.also { result[name] = it; packageIds[name] = it } == null }
+        lookup(missing, dao::idsOf, result, packageIds)
+        val unknown = missing.filter { it !in result }
         if (unknown.isNotEmpty()) {
             // Resolve labels outside the transaction: PackageManager calls are slow and must not hold the writer.
             val metas = unknown.associateWith { resolver.resolve(it) }
@@ -51,38 +49,52 @@ class Interner(
                     )
                 }
             }
-            for (name in unknown) {
-                val id = checkNotNull(dao.idOf(name)) { "package row for $name was not created" }
-                result[name] = id
-                packageIds[name] = id
-            }
+            lookup(unknown, dao::idsOf, result, packageIds)
+            for (name in unknown) checkNotNull(result[name]) { "package row for $name was not created" }
         }
         return result
     }
 
     suspend fun classIds(names: Collection<String>): Map<String, Long> {
         val result = HashMap<String, Long>(names.size)
-        val missing = ArrayList<String>()
-        for (name in names.toSet()) {
-            val cached = classIds[name]
-            if (cached != null) result[name] = cached else missing += name
-        }
+        val missing = names.toSet().filter { name -> classIds[name]?.also { result[name] = it } == null }
         if (missing.isEmpty()) return result
         val dao = db.classDao()
-        db.withWriteTransaction {
-            for (name in missing) dao.insertIgnore(ClassEntity(className = name))
-        }
-        for (name in missing) {
-            val id = checkNotNull(dao.idOf(name)) { "class row for $name was not created" }
-            result[name] = id
-            classIds[name] = id
+        // Cold cache: one batched lookup first, so known classes never cost an insert attempt each.
+        lookup(missing, dao::idsOf, result, classIds)
+        val unknown = missing.filter { it !in result }
+        if (unknown.isNotEmpty()) {
+            db.withWriteTransaction {
+                for (name in unknown) dao.insertIgnore(ClassEntity(className = name))
+            }
+            lookup(unknown, dao::idsOf, result, classIds)
+            for (name in unknown) checkNotNull(result[name]) { "class row for $name was not created" }
         }
         return result
+    }
+
+    private suspend fun lookup(
+        names: List<String>,
+        query: suspend (List<String>) -> List<NameId>,
+        result: MutableMap<String, Long>,
+        cache: MutableMap<String, Long>,
+    ) {
+        for (chunk in names.chunked(LOOKUP_CHUNK)) {
+            for (row in query(chunk)) {
+                result[row.name] = row.id
+                cache[row.name] = row.id
+            }
+        }
     }
 
     /** Must be called after the tables are wiped, otherwise cached ids would dangle. */
     fun clearCaches() {
         packageIds.clear()
         classIds.clear()
+    }
+
+    private companion object {
+        /** Stays well under SQLite's bound-parameter limit. */
+        const val LOOKUP_CHUNK = 500
     }
 }

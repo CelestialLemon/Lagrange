@@ -25,16 +25,26 @@ import org.robolectric.annotation.Config
 class NotificationRecorderTest {
     private val db = LagrangeDatabase.inMemory(ApplicationProvider.getApplicationContext())
     private val coverage = CoverageRepository(db)
-    private val recorder = NotificationRecorder(db, Interner(db, FakeResolver()), coverage)
+    private val recorder = NotificationRecorder(db, Interner(db, FakeResolver()), coverage, ByteArray(32) { it.toByte() })
 
     @After
     fun close() = db.close()
 
-    private fun meta(key: String = "0|com.chat|7|tag|10001", flags: Set<String> = emptySet(), post: Long = 1_000) = NotificationMeta(
+    private fun meta(
+        key: String = "0|com.chat|7|tag|10001",
+        flags: Set<String> = emptySet(),
+        post: Long = 1_000,
+        channel: String? = "messages",
+        conversation: Boolean = true,
+        parent: String? = null,
+        conversationChannel: Boolean = false,
+        matched: Boolean = true,
+        ambient: Boolean = false,
+    ) = NotificationMeta(
         key = key,
         packageName = "com.chat",
         postTimeMs = post,
-        channelId = "messages",
+        channelId = channel,
         androidCategory = "msg",
         groupKey = "g|com.chat",
         isOngoing = "ongoing" in flags,
@@ -42,10 +52,12 @@ class NotificationRecorderTest {
         isGroupSummary = "summary" in flags,
         isOnlyAlertOnce = false,
         importance = 4,
-        matchedInterruptionFilter = true,
-        isAmbient = false,
-        isConversation = true,
+        matchedInterruptionFilter = matched,
+        isAmbient = ambient,
+        isConversation = conversation,
         dndOrSilent = false,
+        parentChannelId = parent,
+        isConversationChannel = conversationChannel,
     )
 
     @Test
@@ -121,5 +133,103 @@ class NotificationRecorderTest {
         assertEquals(RemovalReason.TIMEOUT, RemovalReason.fromAndroid(19))
         assertEquals(RemovalReason.BUNDLE_DISMISSED, RemovalReason.fromAndroid(24))
         assertEquals(RemovalReason.OTHER, RemovalReason.fromAndroid(18))
+    }
+
+    @Test
+    fun `an unavailable snapshot on connect never closes open records`() = runBlocking {
+        recorder.onPosted(meta(key = "a", post = 1_000), 1_000)
+        recorder.onPosted(meta(key = "b", post = 1_100), 1_100)
+        recorder.onConnected(null, 5_000)
+        val rows = db.rawNotificationDao().all()
+        assertTrue(rows.all { it.removedAtMs == null && it.removalReason == RemovalReason.ACTIVE.name })
+        assertEquals(1, db.coverageDao().all().count { it.endMs == null })
+
+        // The retry later gets a real snapshot and reconciles then.
+        recorder.reconcile(listOf(meta(key = "b", post = 1_100)), 6_000)
+        val after = db.rawNotificationDao().all().associateBy { it.postedAtMs }
+        assertEquals(RemovalReason.DISCONNECT_RECONCILED.name, after.getValue(1_000).removalReason)
+        assertNull(after.getValue(1_100).removedAtMs)
+    }
+
+    @Test
+    fun `a key re-posted while disconnected closes the old record and opens a new one`() = runBlocking {
+        recorder.onPosted(meta(key = "k", post = 1_000), 1_000)
+        recorder.onDisconnected(2_000)
+        // While disconnected the app cancelled and re-posted the same key at 4_000.
+        recorder.onConnected(listOf(meta(key = "k", post = 4_000)), 9_000)
+        val rows = db.rawNotificationDao().all().sortedBy { it.id }
+        assertEquals(2, rows.size)
+        assertEquals(RemovalReason.DISCONNECT_RECONCILED.name, rows[0].removalReason)
+        assertEquals(9_000L, rows[0].removedAtMs)
+        assertEquals(4_000L, rows[1].postedAtMs)
+        assertNull(rows[1].removedAtMs)
+
+        // An unchanged key across a reconnect stays one record.
+        recorder.onConnected(listOf(meta(key = "k", post = 4_000)), 12_000)
+        assertEquals(2, db.rawNotificationDao().all().size)
+    }
+
+    @Test
+    fun `conversation channels store the parent channel or a keyed pseudonym, never the raw id`() = runBlocking {
+        val raw = "chat_+15551234567"
+        recorder.onPosted(meta(key = "p", channel = raw, parent = "messages", conversationChannel = true), 1_000)
+        recorder.onPosted(meta(key = "q", channel = raw, conversationChannel = true), 1_100)
+        recorder.onPosted(meta(key = "r", channel = "promo", conversation = false), 1_200)
+        val rows = db.rawNotificationDao().all().sortedBy { it.id }
+        assertEquals("messages", rows[0].channelId)
+        val pseudonym = rows[1].channelId!!
+        assertTrue(pseudonym.startsWith(NotificationRecorder.CONVERSATION_PREFIX))
+        assertFalse(pseudonym.contains("5551234567"))
+        assertEquals("promo", rows[2].channelId)
+        // Stable per install, different under another install's key.
+        assertEquals(pseudonym, recorder.storedChannelId(meta(channel = raw, conversationChannel = true)))
+        val other = NotificationRecorder(db, Interner(db, FakeResolver()), coverage, ByteArray(32) { 7 })
+        assertTrue(other.storedChannelId(meta(channel = raw, conversationChannel = true)) != pseudonym)
+        // An update never writes the raw id either.
+        recorder.onPosted(meta(key = "q", channel = raw, conversationChannel = true), 1_300)
+        assertEquals(pseudonym, db.rawNotificationDao().all().single { it.id == rows[1].id }.channelId)
+    }
+
+    @Test
+    fun `an update refreshes interruption-filter match and ambient state`() = runBlocking {
+        recorder.onPosted(meta(matched = true, ambient = false), 1_000)
+        recorder.onPosted(meta(matched = false, ambient = true), 2_000)
+        val row = db.rawNotificationDao().all().single()
+        assertFalse(row.matchedInterruptionFilter)
+        assertTrue(row.isAmbient)
+    }
+
+    @Test
+    fun `vibrate is not silent, the silent ringer and DND are`() {
+        val all = android.service.notification.NotificationListenerService.INTERRUPTION_FILTER_ALL
+        val priority = android.service.notification.NotificationListenerService.INTERRUPTION_FILTER_PRIORITY
+        val unknown = android.service.notification.NotificationListenerService.INTERRUPTION_FILTER_UNKNOWN
+        assertFalse(LagrangeNotificationListenerService.isDndOrSilent(all, android.media.AudioManager.RINGER_MODE_NORMAL))
+        assertFalse(LagrangeNotificationListenerService.isDndOrSilent(all, android.media.AudioManager.RINGER_MODE_VIBRATE))
+        assertFalse(LagrangeNotificationListenerService.isDndOrSilent(unknown, android.media.AudioManager.RINGER_MODE_VIBRATE))
+        assertTrue(LagrangeNotificationListenerService.isDndOrSilent(all, android.media.AudioManager.RINGER_MODE_SILENT))
+        assertTrue(LagrangeNotificationListenerService.isDndOrSilent(priority, android.media.AudioManager.RINGER_MODE_NORMAL))
+    }
+
+    @Test
+    fun `heartbeats extend only an open listener interval and destroy closes it`() = runBlocking {
+        recorder.onConnected(emptyList(), 1_000)
+        recorder.heartbeat(50_000)
+        assertEquals(50_000L, db.coverageDao().all().single().lastSeenMs)
+        recorder.onDisconnected(60_000)
+        recorder.heartbeat(70_000)
+        val closed = db.coverageDao().all().single()
+        assertEquals(60_000L, closed.endMs)
+        assertEquals(60_000L, closed.lastSeenMs)
+    }
+
+    @Test
+    fun `the pseudonym key is created once and reused`() {
+        val dir = java.nio.file.Files.createTempDirectory("key").toFile()
+        val file = java.io.File(dir, "pseudonym.key")
+        val first = NotificationRecorder.loadOrCreateKey(file)
+        assertEquals(32, first.size)
+        assertTrue(first.contentEquals(NotificationRecorder.loadOrCreateKey(file)))
+        dir.deleteRecursively()
     }
 }

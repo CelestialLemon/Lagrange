@@ -8,8 +8,14 @@ import androidx.room3.Update
 import androidx.room3.Upsert
 import kotlinx.coroutines.flow.Flow
 
+/** An interned name and its id. */
+data class NameId(val id: Long, val name: String)
+
 @Dao
 interface PackageDao {
+    @Query("SELECT id AS id, package_name AS name FROM packages WHERE package_name IN (:names)")
+    suspend fun idsOf(names: List<String>): List<NameId>
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertIgnore(pkg: PackageEntity): Long
 
@@ -45,6 +51,9 @@ interface ClassDao {
 
     @Query("SELECT id FROM classes WHERE class_name = :name")
     suspend fun idOf(name: String): Long?
+
+    @Query("SELECT id AS id, class_name AS name FROM classes WHERE class_name IN (:names)")
+    suspend fun idsOf(names: List<String>): List<NameId>
 
     @Query("SELECT COUNT(*) FROM classes WHERE class_name = ''")
     suspend fun emptyClassRows(): Int

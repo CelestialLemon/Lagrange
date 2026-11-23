@@ -53,10 +53,11 @@
             </intent-filter>
         </service>
 
-        <!-- Both broadcasts are exempt from the implicit-broadcast limits, so manifest receivers still get them. -->
+        <!-- Both broadcasts are exempt from the implicit-broadcast limits, so manifest receivers still get them.
+             They are protected broadcasts sent by the system, which reaches non-exported receivers; no other app can. -->
         <receiver
             android:name=".harvest.TimezoneChangeReceiver"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.TIMEZONE_CHANGED" />
             </intent-filter>
@@ -64,7 +65,7 @@
 
         <receiver
             android:name=".harvest.TimeChangeReceiver"
-            android:exported="true">
+            android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.TIME_SET" />
             </intent-filter>

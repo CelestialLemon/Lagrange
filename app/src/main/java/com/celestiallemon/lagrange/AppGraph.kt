@@ -19,19 +19,38 @@ import com.celestiallemon.lagrange.harvest.AndroidUsageEventSource
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
 import com.celestiallemon.lagrange.harvest.UsageStatsHarvester
 import com.celestiallemon.lagrange.notifications.NotificationRecorder
+import com.celestiallemon.lagrange.harvest.WorkScheduler
+import com.celestiallemon.lagrange.notifications.LagrangeNotificationListenerService
+import com.celestiallemon.lagrange.system.DataReset
+import java.io.File
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 
-/** Hand-wired dependencies, one instance per process. */
+/**
+ * Hand-wired dependencies, one instance per process.
+ *
+ * Nothing here may touch the database from the main thread. [start] opens (and, after a restore, verifies) the
+ * database on the IO dispatcher, applies restored preferences and records a reset cutoff; everything that reads
+ * or writes data first calls [awaitReady].
+ */
 class AppGraph(private val app: Application) {
     val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     val restore = RestoreCoordinator(app)
 
+    private val ready = CompletableDeferred<Unit>()
+
+    /** Suspends until startup (database open/verify, restored preferences) has finished. */
+    suspend fun awaitReady() = ready.await()
+
+    /** First touched by [start] on the IO dispatcher; other callers come after [awaitReady]. */
     val database: LagrangeDatabase by lazy { openDatabase() }
 
     private val dataStore by lazy {
@@ -44,41 +63,91 @@ class AppGraph(private val app: Application) {
 
     val usageSource by lazy { AndroidUsageEventSource(app) }
 
-    val interner by lazy { Interner(database, AndroidPackageMetaResolver(app)) }
+    private val packageResolver by lazy { AndroidPackageMetaResolver(app) }
+
+    val interner by lazy { Interner(database, packageResolver) }
 
     val harvester by lazy { UsageStatsHarvester(database, usageSource, interner) }
 
     val coverage by lazy { CoverageRepository(database) }
 
-    val notificationRecorder by lazy { NotificationRecorder(database, interner, coverage) }
+    val notificationRecorder by lazy {
+        NotificationRecorder(database, interner, coverage, NotificationRecorder.loadOrCreateKey(File(app.noBackupFilesDir, "pseudonym.key")))
+    }
 
     val timezoneTracker by lazy { TimezoneTracker(database) }
 
-    val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages) }
+    val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages, packageResolver) }
 
     val backups by lazy {
         LagrangeBackups(app, database, preferences, restore, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong())
     }
 
-    /** Message about the last restore attempt, shown once in System & Data. */
+    /** Message about the last restore attempt, shown once wherever the user is (onboarding included). */
     val restoreNotice = MutableStateFlow<String?>(null)
+
+    /** Startup, off the main thread. Called once from [LagrangeApplication.onCreate]. */
+    fun start() {
+        applicationScope.launch(Dispatchers.IO) {
+            try {
+                database // opens, and verifies a fresh restore
+                restoreNotice.value = restore.consumeOutcome()
+                DataReset.recordPendingCutoff(app, database)
+                applyRestoredPreferences()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "startup failed", e)
+            } finally {
+                ready.complete(Unit)
+            }
+            try {
+                backups.clearSnapshots()
+                timezoneTracker.check()
+                if (preferences.current().backupTreeUri != null) WorkScheduler.setWeeklyBackup(app, true)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.e(TAG, "startup housekeeping failed", e)
+            }
+        }
+    }
 
     fun harvestInBackground(trigger: HarvestTrigger) {
         applicationScope.launch {
             try {
+                awaitReady()
                 harvester.harvest(trigger)
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
                 Log.e(TAG, "harvest failed", e)
             }
         }
     }
 
-    /** Applies preferences that came with a restored backup, once the restored database is confirmed good. */
+    /** Extends the notification listener's coverage, but only while it really is connected in this process. */
+    suspend fun heartbeatListenerIfConnected() {
+        if (LagrangeNotificationListenerService.connected) {
+            withContext(Dispatchers.IO) { notificationRecorder.heartbeat(System.currentTimeMillis()) }
+        }
+    }
+
+    /**
+     * Applies preferences that came with a restored backup, but only those of the restore generation that was
+     * verified (a rolled-back generation's preferences are discarded). If the import fails the file is kept and
+     * retried on the next start.
+     */
     suspend fun applyRestoredPreferences() {
-        val file = restore.pendingPreferencesFile
-        if (!file.isFile) return
-        runCatching { preferences.importJson(file.readText()) }.onFailure { Log.w(TAG, "restored preferences ignored", it) }
-        file.delete()
+        val file = restore.pendingPreferences() ?: return
+        try {
+            preferences.importJson(file.readText())
+            file.delete()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "restored preferences not applied yet; will retry", e)
+        }
     }
 
     private fun launchablePackages(): List<String> {
@@ -89,14 +158,17 @@ class AppGraph(private val app: Application) {
     }
 
     /**
-     * Opens Room. If a restore was just swapped in, the first open is the verification step: success commits the
-     * restore, failure rolls back to the previous database generation and opens that instead.
+     * Opens Room. If a restore was just swapped in, the first open is the verification step: `VERIFYING` is
+     * journaled first (so a crash during the open rolls back on the next start instead of looping), success
+     * commits the restore, failure rolls back to the previous database generation and opens that instead.
+     * Blocking: only ever reached from [start] on the IO dispatcher.
      */
     private fun openDatabase(): LagrangeDatabase {
         val db = LagrangeDatabase.create(app)
-        if (!restore.isVerifyPending()) return db
+        if (!restore.needsVerification()) return db
+        restore.beginVerification()
         return try {
-            runBlocking(Dispatchers.IO) { db.identityHash() }
+            runBlocking { db.identityHash() ?: error("the restored database has no Room identity") }
             restore.markVerified()
             db
         } catch (e: Exception) {

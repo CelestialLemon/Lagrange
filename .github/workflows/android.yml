@@ -20,5 +20,6 @@ jobs:
       - name: Install Android 17 (API 37) SDK platform
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-37.0" "build-tools;37.0.0" > /dev/null
       - uses: gradle/actions/setup-gradle@v4
-      # The release keystore is never available on CI, so only debug artifacts are built here.
-      - run: ./gradlew testDebugUnitTest assembleDebug --console=plain
+      # The release keystore is never available on CI: the release build is assembled unsigned, which still runs
+      # R8 shrinking over Room, WorkManager and kotlinx.serialization.
+      - run: ./gradlew testDebugUnitTest assembleDebug assembleRelease --console=plain

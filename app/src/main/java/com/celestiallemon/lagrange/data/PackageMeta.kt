@@ -17,6 +17,9 @@ data class PackageMeta(
 
 fun interface PackageMetaResolver {
     fun resolve(packageName: String): PackageMeta
+
+    /** Cheaper than [resolve] when only installation state is needed. */
+    fun isInstalled(packageName: String): Boolean = resolve(packageName).isInstalled
 }
 
 /**
@@ -88,7 +91,19 @@ class AndroidPackageMetaResolver(private val context: Context) : PackageMetaReso
         }
     }
 
+    override fun isInstalled(packageName: String): Boolean = try {
+        pm.getPackageInfo(packageName, PackageManager.PackageInfoFlags.of(0))
+        true
+    } catch (_: PackageManager.NameNotFoundException) {
+        false
+    }
+
     private companion object {
-        val SYSTEM_SURFACES = setOf("android", "com.android.systemui", "com.google.android.permissioncontroller")
+        val SYSTEM_SURFACES = setOf(
+            "android",
+            "com.android.systemui",
+            "com.android.permissioncontroller",
+            "com.google.android.permissioncontroller",
+        )
     }
 }

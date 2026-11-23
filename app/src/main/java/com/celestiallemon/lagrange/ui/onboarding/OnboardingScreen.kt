@@ -38,6 +38,7 @@ import com.celestiallemon.lagrange.ui.theme.Space
 fun OnboardingScreen(main: MainViewModel, catalog: CatalogViewModel = viewModel()) {
     val health by main.health.collectAsStateWithLifecycle()
     val apps by catalog.apps.collectAsStateWithLifecycle()
+    val synced by catalog.synced.collectAsStateWithLifecycle()
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
         bottomBar = {
@@ -50,7 +51,7 @@ fun OnboardingScreen(main: MainViewModel, catalog: CatalogViewModel = viewModel(
                 ) {
                     Button(
                         onClick = { catalog.confirmAndFinishOnboarding() },
-                        enabled = apps != null,
+                        enabled = apps != null && synced,
                         modifier = Modifier.fillMaxWidth(),
                         contentPadding = PaddingValues(vertical = Space.m),
                     ) { Text("Confirm categories & start collecting") }
@@ -80,7 +81,7 @@ fun OnboardingScreen(main: MainViewModel, catalog: CatalogViewModel = viewModel(
                 }
             }
             val list = apps
-            if (list == null) {
+            if (list == null || !synced) {
                 item("loading") { CircularProgressIndicator() }
             } else {
                 items(list, key = { it.packageName }) { app ->

@@ -12,11 +12,15 @@ import android.service.notification.StatusBarNotification
 import android.util.Log
 import com.celestiallemon.lagrange.LagrangeApplication
 import com.celestiallemon.lagrange.harvest.HarvestTrigger
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Records notification metadata (never content) and, while it keeps the process warm, triggers a usage harvest each
@@ -30,19 +34,27 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
 
     private val graph get() = (application as LagrangeApplication).graph
     private var screenOffRegistered = false
+    private var reconcileRetry: Job? = null
 
     private val screenOffReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == Intent.ACTION_SCREEN_OFF) graph.harvestInBackground(HarvestTrigger.SCREEN_OFF)
+            if (intent.action != Intent.ACTION_SCREEN_OFF) return
+            val now = System.currentTimeMillis()
+            // The listener is alive even when no notification arrives; keep its coverage honest overnight.
+            work.trySend { graph.notificationRecorder.heartbeat(now) }
+            graph.harvestInBackground(HarvestTrigger.SCREEN_OFF)
         }
     }
 
     override fun onCreate() {
         super.onCreate()
         scope.launch {
+            graph.awaitReady()
             for (job in work) {
                 try {
                     job()
+                } catch (e: CancellationException) {
+                    throw e
                 } catch (e: Exception) {
                     Log.e(TAG, "notification write failed", e)
                 }
@@ -51,15 +63,11 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onListenerConnected() {
+        connected = true
         val now = System.currentTimeMillis()
-        val active = try {
-            val ranking = currentRankingSafe()
-            activeNotifications?.map { toMeta(it, ranking) }.orEmpty()
-        } catch (e: SecurityException) {
-            Log.w(TAG, "could not read active notifications", e)
-            emptyList()
-        }
+        val active = snapshotActive()
         work.trySend { graph.notificationRecorder.onConnected(active, now) }
+        if (active == null) scheduleReconcileRetry()
         if (!screenOffRegistered) {
             registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF), RECEIVER_NOT_EXPORTED)
             screenOffRegistered = true
@@ -67,28 +75,65 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
     }
 
     override fun onListenerDisconnected() {
+        connected = false
+        reconcileRetry?.cancel()
         val now = System.currentTimeMillis()
         work.trySend { graph.notificationRecorder.onDisconnected(now) }
         unregisterScreenOff()
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification, rankingMap: RankingMap?) {
-        val meta = toMeta(sbn, rankingMap)
+        val meta = toMeta(sbn, rankingMap, isDndOrSilent())
         val now = System.currentTimeMillis()
         work.trySend { graph.notificationRecorder.onPosted(meta, now) }
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification, rankingMap: RankingMap?, reason: Int) {
-        val meta = toMeta(sbn, rankingMap)
+        val meta = toMeta(sbn, rankingMap, isDndOrSilent())
         val now = System.currentTimeMillis()
         work.trySend { graph.notificationRecorder.onRemoved(meta, reason, now) }
     }
 
     override fun onDestroy() {
         unregisterScreenOff()
+        reconcileRetry?.cancel()
+        if (connected) {
+            // Destroyed without a disconnect callback: close the coverage interval cleanly, not at a stale heartbeat.
+            connected = false
+            val now = System.currentTimeMillis()
+            work.trySend { graph.notificationRecorder.onDisconnected(now) }
+        }
         // Closing (not cancelling) lets the consumer drain writes that are already queued, then finish.
         work.close()
         super.onDestroy()
+    }
+
+    /** What is showing now, or null when the system won't say (never "nothing", which would close every record). */
+    private fun snapshotActive(): List<NotificationMeta>? = try {
+        val ranking = currentRankingSafe()
+        val silent = isDndOrSilent()
+        activeNotifications?.map { toMeta(it, ranking, silent) }
+    } catch (e: SecurityException) {
+        Log.w(TAG, "could not read active notifications", e)
+        null
+    } catch (e: RuntimeException) {
+        Log.w(TAG, "active notifications unavailable", e)
+        null
+    }
+
+    private fun scheduleReconcileRetry() {
+        reconcileRetry?.cancel()
+        reconcileRetry = scope.launch {
+            for (delayMs in RETRY_DELAYS_MS) {
+                delay(delayMs)
+                if (!connected) return@launch
+                val active = withContext(Dispatchers.Main) { snapshotActive() } ?: continue
+                val now = System.currentTimeMillis()
+                work.trySend { graph.notificationRecorder.reconcile(active, now) }
+                return@launch
+            }
+            Log.w(TAG, "active notifications never became available; open records stay as they were")
+        }
     }
 
     private fun unregisterScreenOff() {
@@ -99,11 +144,12 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
     }
 
     /** Reads only metadata. `sbn.notification.extras` (title, text, people) is never touched. */
-    private fun toMeta(sbn: StatusBarNotification, rankingMap: RankingMap?): NotificationMeta {
+    private fun toMeta(sbn: StatusBarNotification, rankingMap: RankingMap?, dndOrSilent: Boolean): NotificationMeta {
         val n = sbn.notification
         val flags = n?.flags ?: 0
         val ranking = Ranking()
         val ranked = rankingMap?.getRanking(sbn.key, ranking) == true
+        val channel = if (ranked) ranking.channel else null
         return NotificationMeta(
             key = sbn.key,
             packageName = sbn.packageName,
@@ -119,7 +165,9 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
             matchedInterruptionFilter = if (ranked) ranking.matchesInterruptionFilter() else true,
             isAmbient = ranked && ranking.isAmbient,
             isConversation = ranked && ranking.isConversation,
-            dndOrSilent = isDndOrSilent(),
+            dndOrSilent = dndOrSilent,
+            parentChannelId = channel?.parentChannelId,
+            isConversationChannel = channel?.conversationId != null,
         )
     }
 
@@ -135,12 +183,26 @@ class LagrangeNotificationListenerService : NotificationListenerService() {
         } catch (_: SecurityException) {
             INTERRUPTION_FILTER_UNKNOWN
         }
-        val dnd = filter != INTERRUPTION_FILTER_ALL && filter != INTERRUPTION_FILTER_UNKNOWN
         val ringer = getSystemService(AudioManager::class.java)?.ringerMode ?: AudioManager.RINGER_MODE_NORMAL
-        return dnd || ringer != AudioManager.RINGER_MODE_NORMAL
+        return isDndOrSilent(filter, ringer)
     }
 
-    private companion object {
-        const val TAG = "LagrangeNotifications"
+    companion object {
+        private const val TAG = "LagrangeNotifications"
+        private val RETRY_DELAYS_MS = listOf(2_000L, 5_000L, 15_000L, 60_000L, 300_000L)
+
+        /** True while the system has this listener bound and connected in this process. */
+        @Volatile
+        var connected: Boolean = false
+            private set
+
+        /**
+         * DND (any interruption filter other than "all") or a silent ringer. Vibrate is not silent: the phone still
+         * buzzes, so the notification still interrupts.
+         */
+        fun isDndOrSilent(interruptionFilter: Int, ringerMode: Int): Boolean {
+            val dnd = interruptionFilter != INTERRUPTION_FILTER_ALL && interruptionFilter != INTERRUPTION_FILTER_UNKNOWN
+            return dnd || ringerMode == AudioManager.RINGER_MODE_SILENT
+        }
     }
 }

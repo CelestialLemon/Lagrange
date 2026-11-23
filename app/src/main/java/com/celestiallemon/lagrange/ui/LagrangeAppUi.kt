@@ -4,6 +4,8 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.ui.Alignment
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.AutoGraph
 import androidx.compose.material.icons.outlined.Science
@@ -48,17 +50,7 @@ enum class Tab(val label: String, val icon: ImageVector) {
 @Composable
 fun LagrangeRoot(main: MainViewModel = viewModel()) {
     val prefs by main.prefs.collectAsStateWithLifecycle()
-    LagrangeTheme(dynamicColor = prefs?.useDynamicColor == true) {
-        val loaded = prefs ?: return@LagrangeTheme Box(Modifier.fillMaxSize())
-        if (!loaded.onboardingComplete) OnboardingScreen(main) else LagrangeShell(main)
-    }
-}
-
-@Composable
-fun LagrangeShell(main: MainViewModel) {
-    var tab by rememberSaveable { mutableStateOf(Tab.Today) }
-    // Predictive back: from any other tab, back returns to Today before leaving the app.
-    BackHandler(enabled = tab != Tab.Today) { tab = Tab.Today }
+    // The restore notice lives at the root so it shows on every screen, onboarding included.
     val snackbar = remember { SnackbarHostState() }
     val restoreNotice by main.restoreNotice.collectAsStateWithLifecycle()
     LaunchedEffect(restoreNotice) {
@@ -67,9 +59,31 @@ fun LagrangeShell(main: MainViewModel) {
             main.dismissRestoreNotice()
         }
     }
+    LagrangeTheme(dynamicColor = prefs?.useDynamicColor == true) {
+        Box(Modifier.fillMaxSize()) {
+            val loaded = prefs
+            when {
+                loaded == null -> Unit
+                !loaded.onboardingComplete -> OnboardingScreen(main)
+                else -> LagrangeShell(main)
+            }
+            SnackbarHost(
+                snackbar,
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .statusBarsPadding(),
+            )
+        }
+    }
+}
+
+@Composable
+fun LagrangeShell(main: MainViewModel) {
+    var tab by rememberSaveable { mutableStateOf(Tab.Today) }
+    // Predictive back: from any other tab, back returns to Today before leaving the app.
+    BackHandler(enabled = tab != Tab.Today) { tab = Tab.Today }
     Scaffold(
         containerColor = MaterialTheme.colorScheme.surface,
-        snackbarHost = { SnackbarHost(snackbar) },
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
                 Tab.entries.forEach { t ->

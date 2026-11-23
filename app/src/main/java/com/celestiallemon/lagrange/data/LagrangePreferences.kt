@@ -7,6 +7,7 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
+import androidx.datastore.preferences.core.stringSetPreferencesKey
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.SettingsHistoryEntity
 import kotlinx.coroutines.flow.Flow
@@ -73,6 +74,28 @@ class LagrangePreferences(
 
     suspend fun clearAll() = store.edit { it.clear() }
 
+    // -- Backup-folder bookkeeping (device-specific, never exported) ------------------------------------------------
+
+    /** The document of a folder backup that was being written; set while writing, so a killed run can be cleaned up. */
+    suspend fun backupInProgress(): String? = store.data.first()[BACKUP_IN_PROGRESS]
+
+    suspend fun setBackupInProgress(documentId: String?) = store.edit {
+        if (documentId == null) it.remove(BACKUP_IN_PROGRESS) else it[BACKUP_IN_PROGRESS] = documentId
+    }
+
+    /** Folder backups Lagrange wrote and saw complete. Only these are ever counted for retention or pruned. */
+    suspend fun completedBackups(): Set<String> = store.data.first()[COMPLETED_BACKUPS].orEmpty()
+
+    /** Records a finished folder backup and clears the in-progress marker in one step. */
+    suspend fun recordCompletedBackup(documentId: String) = store.edit {
+        it[COMPLETED_BACKUPS] = it[COMPLETED_BACKUPS].orEmpty() + documentId
+        it.remove(BACKUP_IN_PROGRESS)
+    }
+
+    suspend fun forgetBackups(documentIds: Collection<String>) = store.edit {
+        it[COMPLETED_BACKUPS] = it[COMPLETED_BACKUPS].orEmpty() - documentIds.toSet()
+    }
+
     /** The portable subset that goes into a backup. Device-specific state (folder grants, backup status) is left out. */
     suspend fun exportJson(): String {
         val p = current()
@@ -103,6 +126,8 @@ class LagrangePreferences(
         private val BACKUP_TREE_URI = stringPreferencesKey("backup_tree_uri")
         private val LAST_BACKUP_AT_MS = longPreferencesKey("last_backup_at_ms")
         private val LAST_BACKUP_STATUS = stringPreferencesKey("last_backup_status")
+        private val BACKUP_IN_PROGRESS = stringPreferencesKey("backup_in_progress")
+        private val COMPLETED_BACKUPS = stringSetPreferencesKey("completed_backups")
 
         /** Throws [IllegalArgumentException] when [text] isn't a preferences object this version understands. */
         fun parsePortable(text: String): JsonObject {

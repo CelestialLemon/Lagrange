@@ -4,7 +4,7 @@ import android.app.Application
 import android.util.Log
 import com.celestiallemon.lagrange.backup.RestoreCoordinator
 import com.celestiallemon.lagrange.harvest.WorkScheduler
-import kotlinx.coroutines.launch
+import com.celestiallemon.lagrange.system.DataReset
 
 class LagrangeApplication : Application() {
     lateinit var graph: AppGraph
@@ -12,22 +12,24 @@ class LagrangeApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        // Must run before anything opens Room: a staged restore is swapped in here, never under an open database.
-        RestoreCoordinator(this).applyPendingIfAny()
-        graph = AppGraph(this)
-
-        graph.applicationScope.launch {
-            try {
-                graph.database // opens (and verifies a fresh restore) off the main thread
-                graph.restoreNotice.value = graph.restore.consumeOutcome()
-                graph.applyRestoredPreferences()
-                graph.backups.clearSnapshots()
-                graph.timezoneTracker.check()
-                graph.preferences.current().backupTreeUri?.let { WorkScheduler.setWeeklyBackup(this@LagrangeApplication, true) }
-            } catch (e: Exception) {
-                Log.e("Lagrange", "startup tasks failed", e)
-            }
+        // Both must run before anything opens Room or DataStore. Each is file deletes and renames only (no copies),
+        // so they are fast enough for the main thread; a failure is logged, never a crash loop.
+        try {
+            DataReset.applyPendingIfAny(this)
+        } catch (e: Exception) {
+            Log.e(TAG, "pending reset failed", e)
         }
+        try {
+            RestoreCoordinator(this).applyPendingIfAny()
+        } catch (e: Exception) {
+            Log.e(TAG, "pending restore failed", e)
+        }
+        graph = AppGraph(this)
+        graph.start()
         WorkScheduler.schedulePeriodicHarvest(this)
+    }
+
+    private companion object {
+        const val TAG = "Lagrange"
     }
 }

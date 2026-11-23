@@ -1,6 +1,8 @@
 package com.celestiallemon.lagrange.data.db
 
 import android.content.Context
+import com.celestiallemon.lagrange.backup.SchemaObject
+import com.celestiallemon.lagrange.backup.SqliteFileChecks
 import androidx.room3.Database
 import androidx.room3.Room
 import androidx.room3.RoomDatabase
@@ -66,6 +68,28 @@ abstract class LagrangeDatabase : RoomDatabase() {
                 .addMigrations(*MIGRATIONS)
                 .addCallback(SeedCallback)
                 .build()
+
+        /**
+         * The exact schema objects (tables, indices, triggers) this build creates, read from a throwaway in-memory
+         * database. A restored file must match it object for object.
+         */
+        suspend fun canonicalSchema(context: Context): List<SchemaObject> {
+            val db = inMemory(context)
+            try {
+                return db.useReaderConnection { connection ->
+                    connection.usePrepared(SqliteFileChecks.SCHEMA_QUERY) { stmt ->
+                        buildList {
+                            while (stmt.step()) {
+                                val obj = SchemaObject(stmt.getText(0), stmt.getText(1), stmt.getText(2), if (stmt.isNull(3)) null else stmt.getText(3))
+                                if (!SqliteFileChecks.isInternal(obj.name)) add(obj)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                db.close()
+            }
+        }
 
         fun inMemory(context: Context): LagrangeDatabase =
             Room.inMemoryDatabaseBuilder(context, LagrangeDatabase::class.java)

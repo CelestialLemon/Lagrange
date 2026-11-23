@@ -41,6 +41,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.celestiallemon.lagrange.backup.BackupFormat
 import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.harvest.HarvestResult
 import com.celestiallemon.lagrange.ui.DataViewModel
@@ -136,7 +137,7 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
                             Text("Platform probe (last 30 days)", style = MaterialTheme.typography.titleSmall)
                             Text("Events visible: ${formatCount(p.totalEvents)}", style = MaterialTheme.typography.bodySmall)
                             Text(
-                                "Retention: " + (p.retentionDays(now)?.let { String.format(java.util.Locale.US, "%.1f days", it) } ?: "none"),
+                                "Retention: " + (p.retentionDays(p.scannedToMs)?.let { String.format(java.util.Locale.US, "%.1f days", it) } ?: "none"),
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             Text(
@@ -212,13 +213,13 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
                     }
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                    OutlinedButton(onClick = { createBackup.launch(com.celestiallemon.lagrange.backup.BackupFormat.fileName(now)) }, enabled = !op.busy) {
+                    OutlinedButton(onClick = { createBackup.launch(BackupFormat.fileName(System.currentTimeMillis())) }, enabled = !op.busy) {
                         Text("Save backup…")
                     }
-                    OutlinedButton(onClick = { openRestore.launch(arrayOf("application/zip", "application/octet-stream")) }, enabled = !op.busy) {
+                    OutlinedButton(onClick = { openRestore.launch(BackupFormat.ZIP_MIME_TYPES) }, enabled = !op.busy) {
                         Text("Restore…")
                     }
-                    OutlinedButton(onClick = { createSqlite.launch("lagrange-${now / 1000}.sqlite") }, enabled = !op.busy) {
+                    OutlinedButton(onClick = { createSqlite.launch("lagrange-${System.currentTimeMillis() / 1000}.sqlite") }, enabled = !op.busy) {
                         Text("Export .sqlite")
                     }
                 }

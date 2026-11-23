@@ -25,7 +25,18 @@ import com.celestiallemon.lagrange.system.DataReset
 import com.celestiallemon.lagrange.system.PermissionHealth
 import com.celestiallemon.lagrange.system.PermissionHealthChecker
 import java.time.ZoneId
+import android.util.Log
+import com.celestiallemon.lagrange.AppGraph
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.mapLatest
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -57,18 +68,25 @@ data class CollectorStats(
         lastHarvestAtMs != null && nowMs - lastHarvestAtMs > UsageStatsHarvester.GAP_ALERT_MS
 }
 
-/** App-wide state: preferences, permission health and collector statistics. */
+/** Waits for startup (database verified, restored preferences applied), then mirrors [source]. */
+private fun <T> AppGraph.afterReady(source: AppGraph.() -> Flow<T>): Flow<T> = flow {
+    awaitReady()
+    emitAll(source())
+}.flowOn(Dispatchers.IO)
+
+/** App-wide state: preferences, permission health and collector statistics. Never touches the database on Main. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph
 
-    val prefs: StateFlow<UserPrefs?> = graph.preferences.prefs.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    /** Null until startup has applied any restored preferences, so the UI never flashes stale settings. */
+    val prefs: StateFlow<UserPrefs?> = graph.afterReady { preferences.prefs }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val _health = MutableStateFlow(PermissionHealthChecker.check(app))
     val health: StateFlow<PermissionHealth> = _health
 
-    val harvesting: StateFlow<Boolean> = graph.harvester.running
-    val lastHarvest: StateFlow<HarvestResult?> = graph.harvester.lastResult
+    val harvesting: StateFlow<Boolean> = graph.afterReady { harvester.running }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    val lastHarvest: StateFlow<HarvestResult?> = graph.afterReady { harvester.lastResult }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     private val minuteTicks = flow {
         while (true) {
@@ -77,13 +95,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Start of the current logical day; moves forward when the day rolls over while the app is open. */
-    private val dayStart = combine(graph.preferences.prefs.map { it.rolloverHour }.distinctUntilChanged(), minuteTicks) { hour, now ->
-        LogicalDay.startMs(now, hour, ZoneId.systemDefault())
-    }.distinctUntilChanged()
-
-    val stats: StateFlow<CollectorStats> = run {
-        val db = graph.database
+    val stats: StateFlow<CollectorStats> = graph.afterReady {
+        // Start of the current logical day; moves forward when the day rolls over while the app is open.
+        val dayStart = combine(preferences.prefs.map { it.rolloverHour }.distinctUntilChanged(), minuteTicks) { hour, now ->
+            LogicalDay.startMs(now, hour, ZoneId.systemDefault())
+        }.distinctUntilChanged()
+        val db = database
         val counts = combine(
             db.rawUsageEventDao().observeCount(),
             dayStart.flatMapLatest { db.rawUsageEventDao().observeCountSince(it) },
@@ -104,25 +121,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 gapCount = coverage.count { it.status == CoverageStatus.GAP.name },
                 backfill = coverage.firstOrNull { it.status == CoverageStatus.BACKFILL.name },
             )
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CollectorStats())
-    }
+        }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CollectorStats())
 
     fun refreshHealth() {
         _health.value = PermissionHealthChecker.check(getApplication())
     }
 
-    /** App-open catch-up: harvest whatever happened since the last run and record the current zone. */
+    /** App-open catch-up: harvest whatever happened since the last run, record the zone, extend listener coverage. */
     fun onAppForeground() {
         refreshHealth()
-        viewModelScope.launch { graph.timezoneTracker.check() }
+        viewModelScope.launch {
+            try {
+                graph.awaitReady()
+                withContext(Dispatchers.IO) {
+                    graph.timezoneTracker.check()
+                    graph.heartbeatListenerIfConnected()
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "foreground catch-up failed", e)
+            }
+        }
         graph.harvestInBackground(HarvestTrigger.APP_OPEN)
     }
 
     fun harvestNow() = graph.harvestInBackground(HarvestTrigger.MANUAL)
 
-    fun setRolloverHour(hour: Int) = viewModelScope.launch { graph.preferences.setRolloverHour(hour) }
+    fun setRolloverHour(hour: Int) = launchIo { graph.preferences.setRolloverHour(hour) }
 
-    fun setDynamicColor(enabled: Boolean) = viewModelScope.launch { graph.preferences.setUseDynamicColor(enabled) }
+    fun setDynamicColor(enabled: Boolean) = launchIo { graph.preferences.setUseDynamicColor(enabled) }
+
+    private fun launchIo(block: suspend () -> Unit) = viewModelScope.launch {
+        try {
+            graph.awaitReady()
+            withContext(Dispatchers.IO) { block() }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "preference update failed", e)
+        }
+    }
 
     val restoreNotice: StateFlow<String?> = graph.restoreNotice
 
@@ -132,27 +172,48 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 }
 
 /** The categorization review used by onboarding and the Friction tab. */
+@OptIn(ExperimentalCoroutinesApi::class)
 class CatalogViewModel(app: Application) : AndroidViewModel(app) {
     private val graph = app.graph
 
-    private val recentOpens = flow {
-        emit(graph.catalog.recentOpens(System.currentTimeMillis() - UsageStatsHarvester.BACKFILL_MS))
-    }
+    private val _synced = MutableStateFlow(false)
 
-    val apps: StateFlow<List<CatalogApp>?> = graph.catalog.observeReviewList(recentOpens)
+    /** True once the launchable-app sync has finished (successfully or not): the list is as complete as it gets. */
+    val synced: StateFlow<Boolean> = _synced
+
+    /** Recomputed whenever the ledger grows (the first backfill lands while onboarding is open). */
+    private val recentOpens: Flow<Map<Long, Long>> = graph.afterReady { database.rawUsageEventDao().observeCount() }
+        .conflate()
+        .mapLatest { graph.catalog.recentOpens(System.currentTimeMillis() - UsageStatsHarvester.BACKFILL_MS) }
+        .flowOn(Dispatchers.IO)
+
+    val apps: StateFlow<List<CatalogApp>?> = graph.afterReady { catalog.observeReviewList(recentOpens) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     init {
-        viewModelScope.launch { runCatching { graph.catalog.syncLaunchable() } }
+        viewModelScope.launch {
+            try {
+                graph.awaitReady()
+                withContext(Dispatchers.IO) { graph.catalog.syncLaunchable() }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(TAG, "app list sync failed", e)
+            }
+            _synced.value = true
+        }
     }
 
     fun setCategory(packageName: String, category: AppCategory) = viewModelScope.launch {
-        graph.catalog.setCategory(packageName, category)
+        withContext(Dispatchers.IO) { graph.catalog.setCategory(packageName, category) }
     }
 
     fun confirmAndFinishOnboarding() = viewModelScope.launch {
-        graph.catalog.confirmAll(apps.value.orEmpty().map { it.packageName })
-        graph.preferences.setOnboardingComplete(true)
+        if (!_synced.value) return@launch
+        withContext(Dispatchers.IO) {
+            graph.catalog.confirmAll(apps.value.orEmpty().map { it.packageName })
+            graph.preferences.setOnboardingComplete(true)
+        }
     }
 }
 
@@ -165,18 +226,26 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
     private val _op = MutableStateFlow(DataOpState())
     val op: StateFlow<DataOpState> = _op
 
-    private val _restoreStaged = MutableStateFlow(graph.restore.hasStagedRestore())
+    private val _restoreStaged = MutableStateFlow(false)
     val restoreStaged: StateFlow<Boolean> = _restoreStaged
 
     private val _probe = MutableStateFlow<ProbeReport?>(null)
     val probe: StateFlow<ProbeReport?> = _probe
+
+    init {
+        viewModelScope.launch { _restoreStaged.value = withContext(Dispatchers.IO) { graph.restore.hasStagedRestore() } }
+    }
 
     private fun run(start: String, block: suspend () -> String) {
         if (_op.value.busy) return
         _op.value = DataOpState(busy = true, message = start)
         viewModelScope.launch {
             _op.value = try {
+                graph.awaitReady()
                 DataOpState(message = block())
+            } catch (e: CancellationException) {
+                _op.value = DataOpState()
+                throw e
             } catch (e: Exception) {
                 DataOpState(message = e.message ?: e.javaClass.simpleName, isError = true)
             }
@@ -199,43 +268,48 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
         "Backup verified (created ${formatDateTime(m.createdAtUtcMs)}). Restart to apply it."
     }
 
-    fun cancelRestore() {
-        graph.restore.cancelStaged()
+    fun cancelRestore() = viewModelScope.launch {
+        withContext(Dispatchers.IO) { graph.restore.cancelStaged() }
         _restoreStaged.value = false
         _op.value = DataOpState(message = "Staged restore discarded")
     }
 
     fun restartToApplyRestore() = AppRestarter.restart(getApplication())
 
-    fun setBackupFolder(uri: Uri) = run("Saving backup folder…") {
+    /**
+     * Writes the first backup into the newly picked folder before anything else changes. Only once it succeeded is
+     * the old folder's grant released, the new folder saved, and the weekly job (re)scheduled a week out.
+     */
+    fun setBackupFolder(uri: Uri) = run("Writing first backup to the new folder…") {
         val app = getApplication<Application>()
-        app.contentResolver.takePersistableUriPermission(
-            uri,
-            Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-        )
+        val resolver = app.contentResolver
+        val old = graph.preferences.current().backupTreeUri
+        val isNew = old != uri.toString()
+        withContext(Dispatchers.IO) { resolver.takePersistableUriPermission(uri, GRANT_FLAGS) }
+        val name = try {
+            graph.backups.backUpToFolder(uri, automatic = false)
+        } catch (e: Throwable) {
+            if (isNew) withContext(NonCancellable + Dispatchers.IO) { runCatching { resolver.releasePersistableUriPermission(uri, GRANT_FLAGS) } }
+            throw e
+        }
+        if (old != null && isNew) withContext(Dispatchers.IO) { runCatching { resolver.releasePersistableUriPermission(Uri.parse(old), GRANT_FLAGS) } }
         graph.preferences.setBackupTreeUri(uri.toString())
         WorkScheduler.setWeeklyBackup(app, enabled = true, replace = true)
-        val name = graph.backups.backUpToFolder(uri)
         "Weekly backups on · first backup written: $name"
     }
 
     fun backUpToFolderNow() = run("Writing backup to folder…") {
         val tree = graph.preferences.current().backupTreeUri ?: error("Pick a backup folder first.")
-        "Backup written: ${graph.backups.backUpToFolder(Uri.parse(tree))}"
+        "Backup written: ${graph.backups.backUpToFolder(Uri.parse(tree), automatic = false)}"
     }
 
     fun clearBackupFolder() = run("Turning off weekly backups…") {
         val app = getApplication<Application>()
+        WorkScheduler.setWeeklyBackup(app, enabled = false)
         graph.preferences.current().backupTreeUri?.let { uri ->
-            runCatching {
-                app.contentResolver.releasePersistableUriPermission(
-                    Uri.parse(uri),
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
-                )
-            }
+            withContext(Dispatchers.IO) { runCatching { app.contentResolver.releasePersistableUriPermission(Uri.parse(uri), GRANT_FLAGS) } }
         }
         graph.preferences.setBackupTreeUri(null)
-        WorkScheduler.setWeeklyBackup(app, enabled = false)
         "Weekly backups off"
     }
 
@@ -246,9 +320,10 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
         "Probe complete · ${report.totalEvents} events"
     }
 
+    /** Stops background work, releases folder grants and restarts; the wipe itself happens before Room reopens. */
     fun resetAll() = run("Deleting all data…") {
         val app = getApplication<Application>()
-        DataReset(app, graph).resetAll()
+        DataReset(app).requestReset()
         AppRestarter.restart(app)
         "Reset"
     }
@@ -256,4 +331,10 @@ class DataViewModel(app: Application) : AndroidViewModel(app) {
     fun clearMessage() {
         if (!_op.value.busy) _op.value = DataOpState()
     }
+
+    private companion object {
+        const val GRANT_FLAGS = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+    }
 }
+
+private const val TAG = "LagrangeUi"

@@ -74,7 +74,8 @@ class UsageStatsHarvesterTest {
         val coverage = db.coverageDao().all()
         val backfill = coverage.single { it.status == CoverageStatus.BACKFILL.name }
         assertEquals(ServiceKind.USAGE_HARVEST.name, backfill.serviceKind)
-        assertEquals(start - UsageStatsHarvester.BACKFILL_MS, backfill.startMs)
+        // History really starts at the earliest event the OS still had, not at "now - 14 days".
+        assertEquals(start - 13 * DAY, backfill.startMs)
         assertEquals(start, db.ingestionStateDao().get(IngestionKeys.FIRST_HARVEST_AT_MS))
     }
 
@@ -139,7 +140,7 @@ class UsageStatsHarvesterTest {
         val r = h.harvest(HarvestTrigger.TIME_CHANGED) as HarvestResult.Success
         assertTrue(r.fromMs <= clock.now - UsageStatsHarvester.RESCAN_MS)
         assertEquals(2L, count())
-        assertNull(db.ingestionStateDao().get(IngestionKeys.RESCAN_REQUESTED_AT_MS))
+        assertEquals(1L, db.ingestionStateDao().get(IngestionKeys.RESCAN_DONE_GENERATION))
         clock.now += 60_000
         val next = h.harvest(HarvestTrigger.PERIODIC) as HarvestResult.Success
         assertTrue(next.fromMs > clock.now - HOUR)
@@ -180,5 +181,132 @@ class UsageStatsHarvesterTest {
             async(kotlinx.coroutines.Dispatchers.IO) { h.harvest(t) }
         }.awaitAll()
         assertEquals(20L, count())
+    }
+
+    @Test
+    fun `an interrupted backfill is still a backfill when it resumes`() = runBlocking {
+        val h = harvester(windowMs = HOUR)
+        source.events += listOf(ev(start - 6 * DAY), ev(start - 6 * DAY + 10), ev(start - 2 * HOUR))
+        source.failFromMs = start - 5 * DAY
+        assertTrue(h.harvest(HarvestTrigger.APP_OPEN) is HarvestResult.Unavailable)
+        assertEquals(start - 6 * DAY + 10, cursor())
+        assertNull(db.ingestionStateDao().get(IngestionKeys.FIRST_HARVEST_AT_MS))
+
+        source.failFromMs = null
+        clock.now = start + 10 * 60_000
+        val r = h.harvest(HarvestTrigger.APP_OPEN) as HarvestResult.Success
+        assertTrue("resumed run must still count as the backfill", r.wasBackfill)
+        assertEquals(clock.now, db.ingestionStateDao().get(IngestionKeys.FIRST_HARVEST_AT_MS))
+        val coverage = db.coverageDao().all()
+        val backfill = coverage.single { it.status == CoverageStatus.BACKFILL.name }
+        assertEquals("earliest event from the first, interrupted run", start - 6 * DAY, backfill.startMs)
+        val active = coverage.single { it.status == CoverageStatus.ACTIVE.name }
+        assertEquals(clock.now, active.startMs)
+        assertEquals(3L, count())
+
+        // The next run is an ordinary incremental harvest.
+        clock.now += HOUR
+        source.events += ev(clock.now - 10)
+        assertTrue(!(h.harvest(HarvestTrigger.PERIODIC) as HarvestResult.Success).wasBackfill)
+        assertEquals(1, db.coverageDao().all().count { it.status == CoverageStatus.BACKFILL.name })
+    }
+
+    @Test
+    fun `live coverage after a GAP starts at now and never overlaps it`() = runBlocking {
+        val h = harvester()
+        source.events += ev(start - 1000)
+        h.harvest(HarvestTrigger.MANUAL)
+        clock.now = start + 3 * DAY
+        source.events += ev(start + 3 * DAY - 500)
+        h.harvest(HarvestTrigger.APP_OPEN)
+        val coverage = db.coverageDao().all()
+        val gap = coverage.single { it.status == CoverageStatus.GAP.name }
+        val actives = coverage.filter { it.status == CoverageStatus.ACTIVE.name }.sortedBy { it.startMs }
+        assertEquals(2, actives.size)
+        val after = actives.last()
+        assertEquals(clock.now, after.startMs)
+        assertTrue("ACTIVE must not overlap GAP", after.startMs >= gap.endMs!!)
+    }
+
+    @Test
+    fun `a backward clock jump brings a future cursor back to the present`() = runBlocking {
+        val h = harvester()
+        source.events += listOf(ev(start - 2 * HOUR), ev(start - 1000))
+        h.harvest(HarvestTrigger.MANUAL)
+        assertEquals(start - 1000, cursor())
+        // The clock is set back three hours; nothing new was rescanned yet.
+        clock.now = start - 3 * HOUR
+        source.events += ev(start - 3 * HOUR - 5_000, pkg = "com.after_jump")
+        val r = h.harvest(HarvestTrigger.TIME_CHANGED) as HarvestResult.Success
+        assertTrue(r.fromMs <= clock.now - UsageStatsHarvester.RESCAN_MS)
+        assertTrue("cursor ${cursor()} must not stay ahead of now ${clock.now}", cursor()!! <= clock.now)
+        assertEquals(start - 3 * HOUR - 5_000, cursor())
+        val active = db.coverageDao().all().single { it.status == CoverageStatus.ACTIVE.name }
+        assertTrue(active.endMs!! >= active.startMs)
+
+        // Time moves on normally: an incremental harvest starts from the corrected cursor, not 24 hours back.
+        clock.now += HOUR
+        source.events += ev(clock.now - 100)
+        val next = h.harvest(HarvestTrigger.PERIODIC) as HarvestResult.Success
+        assertEquals(start - 3 * HOUR - 5_000 - UsageStatsHarvester.OVERLAP_MS, next.fromMs)
+    }
+
+    @Test
+    fun `a cursor older than the backfill window never queries beyond it`() = runBlocking {
+        val h = harvester()
+        source.events += ev(start - 1000)
+        h.harvest(HarvestTrigger.MANUAL)
+        clock.now = start + 40 * DAY
+        source.events += ev(clock.now - 1000)
+        source.queries.clear()
+        val r = h.harvest(HarvestTrigger.APP_OPEN) as HarvestResult.Success
+        assertEquals(clock.now - UsageStatsHarvester.BACKFILL_MS, r.fromMs)
+        assertTrue(source.queries.all { (b, _) -> b >= clock.now - UsageStatsHarvester.BACKFILL_MS })
+    }
+
+    @Test
+    fun `a rescan requested mid-run is not swallowed by that run`() = runBlocking {
+        lateinit var h: UsageStatsHarvester
+        var requested = false
+        val slowSource = object : UsageEventSource by source {
+            override fun query(beginMs: Long, endMs: Long): Sequence<RawUsageEvent>? {
+                if (!requested && beginMs > start) {
+                    requested = true
+                    // The clock changed while this harvest was running.
+                    runBlocking { h.requestRescan() }
+                }
+                return source.query(beginMs, endMs)
+            }
+        }
+        h = UsageStatsHarvester(db, slowSource, Interner(db, FakeResolver()), clock.fn, HOUR, 1000)
+        source.events += ev(start - 1000)
+        h.harvest(HarvestTrigger.MANUAL)
+        clock.now = start + 3 * HOUR
+        source.events += ev(start + 2 * HOUR)
+        val during = h.harvest(HarvestTrigger.PERIODIC) as HarvestResult.Success
+        assertTrue(requested)
+        assertTrue("this run started before the request", during.fromMs > clock.now - UsageStatsHarvester.RESCAN_MS)
+        assertEquals(1L, db.ingestionStateDao().get(IngestionKeys.RESCAN_GENERATION))
+        assertNull(db.ingestionStateDao().get(IngestionKeys.RESCAN_DONE_GENERATION))
+
+        clock.now += 60_000
+        val followUp = h.harvest(HarvestTrigger.TIME_CHANGED) as HarvestResult.Success
+        assertTrue(followUp.fromMs <= clock.now - UsageStatsHarvester.RESCAN_MS)
+        assertEquals(1L, db.ingestionStateDao().get(IngestionKeys.RESCAN_DONE_GENERATION))
+    }
+
+    @Test
+    fun `nothing from before a reset is ever harvested again`() = runBlocking {
+        val cutoff = start - 30 * 60_000
+        db.ingestionStateDao().put(com.celestiallemon.lagrange.data.db.IngestionStateEntity(IngestionKeys.RESET_CUTOFF_MS, cutoff))
+        source.events += listOf(ev(start - 3 * DAY), ev(start - 2 * HOUR), ev(cutoff - 1), ev(cutoff + 1), ev(start - 10))
+        val r = harvester().harvest(HarvestTrigger.APP_OPEN) as HarvestResult.Success
+        assertEquals(cutoff, r.fromMs)
+        assertEquals(listOf(cutoff + 1, start - 10), db.rawUsageEventDao().allForTest().map { it.timestampUtcMs })
+        // A clock-change rescan doesn't reach behind the cutoff either.
+        clock.now += 60_000
+        harvester().requestRescan()
+        harvester().harvest(HarvestTrigger.TIME_CHANGED)
+        assertEquals(2L, count())
     }
 }

@@ -51,7 +51,7 @@ class InternerTest {
 
     @Test
     fun `catalog confirm and recategorize`() = runBlocking {
-        val catalog = AppCatalogRepository(db, interner, { listOf("com.a", "com.b") })
+        val catalog = AppCatalogRepository(db, interner, { listOf("com.a", "com.b") }, FakeResolver())
         catalog.syncLaunchable()
         catalog.setCategory("com.a", AppCategory.DISTRACTING)
         val a = db.packageDao().byName("com.a")!!

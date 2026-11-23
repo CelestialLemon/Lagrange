@@ -72,6 +72,12 @@ object PermissionHealthChecker {
     fun usageAccessIntent(context: Context): Intent =
         Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS, Uri.fromParts("package", context.packageName, null))
 
+    /** The plain Usage Access list, for settings apps that don't support the per-package page. */
+    fun usageAccessListIntent(): Intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)
+
+    /** The plain Notification Access list, for settings apps without the per-listener detail page. */
+    fun notificationAccessListIntent(): Intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)
+
     fun notificationAccessIntent(context: Context): Intent =
         Intent(Settings.ACTION_NOTIFICATION_LISTENER_DETAIL_SETTINGS).putExtra(
             Settings.EXTRA_NOTIFICATION_LISTENER_COMPONENT_NAME,

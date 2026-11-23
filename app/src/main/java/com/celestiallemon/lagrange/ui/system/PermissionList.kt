@@ -44,11 +44,17 @@ import com.celestiallemon.lagrange.ui.components.StatusPill
 import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
 import com.celestiallemon.lagrange.ui.theme.Space
 
-private fun Context.launch(intent: Intent) {
-    try {
-        startActivity(intent)
-    } catch (_: ActivityNotFoundException) {
-        startActivity(PermissionHealthChecker.appInfoIntent(this))
+/** Tries each intent in turn (OEM settings apps differ), ending at App info, which always exists. */
+private fun Context.launch(vararg intents: Intent) {
+    for (intent in intents.toList() + PermissionHealthChecker.appInfoIntent(this)) {
+        try {
+            startActivity(intent)
+            return
+        } catch (_: ActivityNotFoundException) {
+            // next
+        } catch (_: SecurityException) {
+            // next
+        }
     }
 }
 
@@ -65,14 +71,14 @@ fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> 
             title = "Usage Access",
             body = "Reads app, screen and unlock events so nothing is lost when Android purges its history.",
             state = if (health.usageAccess) "Granted" to status.good else "Required" to status.bad,
-            action = if (health.usageAccess) null else "Grant" to { context.launch(PermissionHealthChecker.usageAccessIntent(context)) },
+            action = if (health.usageAccess) null else "Grant" to { context.launch(PermissionHealthChecker.usageAccessIntent(context), PermissionHealthChecker.usageAccessListIntent()) },
         )
         PermissionRow(
             icon = Icons.Outlined.NotificationsActive,
             title = "Notification Access",
             body = "Records notification metadata only (app, channel, timing). Never titles, text or senders.",
             state = if (health.notificationAccess) "Granted" to status.good else "Recommended" to status.warn,
-            action = if (health.notificationAccess) null else "Grant" to { context.launch(PermissionHealthChecker.notificationAccessIntent(context)) },
+            action = if (health.notificationAccess) null else "Grant" to { context.launch(PermissionHealthChecker.notificationAccessIntent(context), PermissionHealthChecker.notificationAccessListIntent()) },
         )
         RestrictedSettingsHint { context.launch(PermissionHealthChecker.appInfoIntent(context)) }
         if (compact) return@Column

@@ -41,6 +41,11 @@ object BackupFormat {
     const val MAX_DB_BYTES = 4L * 1024 * 1024 * 1024
     const val MAX_JSON_BYTES = 1L * 1024 * 1024
 
+    const val MIME_ZIP = "application/zip"
+
+    /** What a document picker may label a ZIP as, depending on the provider. */
+    val ZIP_MIME_TYPES = arrayOf("application/zip", "application/x-zip-compressed", "application/octet-stream")
+
     const val FILE_PREFIX = "lagrange-backup-"
     const val FILE_SUFFIX = ".zip"
     private val FILE_STAMP = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneOffset.UTC)
@@ -91,33 +96,85 @@ object BackupFormat {
     }
 }
 
+/** One entry of `sqlite_master`: the schema objects a restored database must match exactly. */
+data class SchemaObject(val type: String, val name: String, val tableName: String, val sql: String?)
+
 /** Read-side checks run on a standalone SQLite file (a snapshot or a staged restore), never on the live database. */
 object SqliteFileChecks {
-    data class Report(val integrity: String, val userVersion: Int, val identityHash: String?)
+    data class Report(
+        val integrity: String,
+        val userVersion: Int,
+        val identityHash: String?,
+        val foreignKeyViolations: Int = 0,
+        val schema: List<SchemaObject> = emptyList(),
+    )
+
+    /** Schema objects SQLite or the Android framework add on their own; they never count as part of the app schema. */
+    fun isInternal(name: String): Boolean = name.startsWith("sqlite_") || name == "android_metadata"
+
+    const val SCHEMA_QUERY = "SELECT type, name, tbl_name, sql FROM sqlite_master ORDER BY type, name"
 
     /**
      * Opens [file] directly, optionally switches it to rollback-journal mode (so it is a single self-contained
-     * file), and runs `PRAGMA integrity_check`.
+     * file), and runs `PRAGMA integrity_check`. Used on snapshots the app itself just produced.
      */
     fun inspect(file: File, normalizeJournal: Boolean = false): Report {
         val db = try {
-            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE)
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS)
         } catch (e: Exception) {
             throw BackupException("The database file could not be opened.", e)
         }
         return db.use {
             if (normalizeJournal) it.rawQuery("PRAGMA journal_mode=DELETE", null).use { c -> c.moveToFirst() }
-            val integrity = it.rawQuery("PRAGMA integrity_check", null).use { c ->
-                buildList { while (c.moveToNext()) add(c.getString(0)) }.joinToString("; ")
-            }
-            val identity = try {
-                it.rawQuery("SELECT identity_hash FROM room_master_table WHERE id = 42 LIMIT 1", null).use { c ->
-                    if (c.moveToFirst()) c.getString(0) else null
-                }
-            } catch (_: Exception) {
-                null
-            }
-            Report(integrity, it.version, identity)
+            report(it)
         }
     }
+
+    /**
+     * Checks a database that came from outside (a backup being restored) without changing a single byte of it:
+     * the file must be a self-contained rollback-journal database (never WAL, which would need sidecars and a
+     * write to open), and it is opened read-only for integrity, foreign-key and schema checks.
+     */
+    fun inspectReadOnly(file: File): Report {
+        val header = ByteArray(100)
+        val read = file.inputStream().use { input -> input.readNBytes(header, 0, header.size) }
+        if (read < header.size || !header.copyOfRange(0, 16).contentEquals(SQLITE_MAGIC)) {
+            throw BackupException("The backup database is not an SQLite file.")
+        }
+        // Bytes 18/19 are the file format write/read versions: 1 = rollback journal, 2 = WAL.
+        if (header[18].toInt() != 1 || header[19].toInt() != 1) {
+            throw BackupException("The backup database is not a self-contained snapshot.")
+        }
+        val db = try {
+            SQLiteDatabase.openDatabase(file.path, null, SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS)
+        } catch (e: Exception) {
+            throw BackupException("The database file could not be opened.", e)
+        }
+        return db.use { report(it) }
+    }
+
+    private fun report(db: SQLiteDatabase): Report {
+        val integrity = db.rawQuery("PRAGMA integrity_check", null).use { c ->
+            buildList { while (c.moveToNext()) add(c.getString(0)) }.joinToString("; ")
+        }
+        val fkViolations = db.rawQuery("PRAGMA foreign_key_check", null).use { c -> c.count }
+        val identity = try {
+            db.rawQuery("SELECT identity_hash FROM room_master_table WHERE id = 42 LIMIT 1", null).use { c ->
+                if (c.moveToFirst()) c.getString(0) else null
+            }
+        } catch (_: Exception) {
+            null
+        }
+        val schema = db.rawQuery(SCHEMA_QUERY, null).use { c ->
+            buildList {
+                while (c.moveToNext()) {
+                    val obj = SchemaObject(c.getString(0), c.getString(1), c.getString(2), if (c.isNull(3)) null else c.getString(3))
+                    if (!isInternal(obj.name)) add(obj)
+                }
+            }
+        }
+        return Report(integrity, db.version, identity, fkViolations, schema)
+    }
+
+    private val SQLITE_MAGIC = "SQLite format 3\u0000".encodeToByteArray()
 }

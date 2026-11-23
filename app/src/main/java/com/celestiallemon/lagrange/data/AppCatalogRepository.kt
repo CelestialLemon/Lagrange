@@ -22,11 +22,29 @@ class AppCatalogRepository(
     private val db: LagrangeDatabase,
     private val interner: Interner,
     private val launchablePackages: () -> List<String>,
+    private val resolver: PackageMetaResolver,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
-    /** Makes sure every launchable app has a row (with a suggested category) so it can be reviewed. */
+    /**
+     * Makes sure every launchable app has a row (with a suggested category) so it can be reviewed, and refreshes
+     * the installed flag of apps seen before (uninstalled apps drop out of the review; reinstalled ones return).
+     * Calls PackageManager: run it off the main thread.
+     */
     suspend fun syncLaunchable() {
-        interner.packageIds(launchablePackages())
+        val launchable = launchablePackages().toSet()
+        interner.packageIds(launchable)
+        val now = clock()
+        val dao = db.packageDao()
+        val changed = dao.all().mapNotNull { row ->
+            if (row.packageName.isEmpty()) return@mapNotNull null
+            val installed = row.packageName in launchable || resolver.isInstalled(row.packageName)
+            when {
+                installed == row.isInstalled -> null
+                installed -> row.copy(isInstalled = true, uninstalledAtMs = null, updatedAtMs = now)
+                else -> row.copy(isInstalled = false, uninstalledAtMs = now, updatedAtMs = now)
+            }
+        }
+        if (changed.isNotEmpty()) db.withWriteTransaction { changed.forEach { dao.update(it) } }
     }
 
     fun observeReviewList(recentOpens: Flow<Map<Long, Long>> = flowOf(emptyMap())): Flow<List<CatalogApp>> =
