@@ -147,8 +147,10 @@ object NotificationCostAnalyzer {
         // Credit is resolved against every candidate the reconstructor could see (including ones posted before the
         // window or outside listener coverage) and only then narrowed to this cohort; open sessions can't be credited yet.
         val candidates = notifications.filter { it.postedAtMs < end && it.isCountable }
-        val attributions = attribute(candidates, episodes.filter { !it.inProgress && it.endMs <= dataEndMs }, apps, rules, reserved)
-        val likelyAppCancel = attributions.filter { it.evidence == TriggerEvidence.LIKELY_APP_CANCEL_CLICK }.map { it.notificationId }.toSet()
+        val matches = attribute(candidates, episodes.filter { !it.inProgress && it.endMs <= dataEndMs }, apps, rules, reserved)
+        // A tap that opened a launch-paused app was still a tap; only the downstream credit is withheld.
+        val likelyAppCancel = matches.filter { it.evidence == TriggerEvidence.LIKELY_APP_CANCEL_CLICK }.map { it.notificationId }.toSet()
+        val attributions = matches.filter { !it.blockedAttempt }
         fun clicked(n: LabNotification) = n.removalReason == RemovalReason.CLICK || (n.removalReason == RemovalReason.APP_CANCEL && n.id in likelyAppCancel)
 
         val idle = PickupBase.of(episodes, listener, fromMs, end, rules, usage)
@@ -197,8 +199,19 @@ object NotificationCostAnalyzer {
         )
     }
 
-    /** A notification credited with opening (or plausibly prompting) an episode or a hop within one. */
-    data class Attribution(val notificationId: Long, val episodeId: Long, val evidence: TriggerEvidence, val fromMs: Long, val downstreamMs: Long)
+    /**
+     * A notification credited with opening (or plausibly prompting) an episode or a hop within one. With
+     * [blockedAttempt] the hop was a launch-paused open: the reconstructor still consumed the notification for it, but
+     * nothing happened downstream, so it owns no time ([downstreamMs] is 0) and doesn't bound the stretch before it.
+     */
+    data class Attribution(
+        val notificationId: Long,
+        val episodeId: Long,
+        val evidence: TriggerEvidence,
+        val fromMs: Long,
+        val downstreamMs: Long,
+        val blockedAttempt: Boolean = false,
+    )
 
     /**
      * Session-level: the episode's own stored trigger notification (its entry segment mirrors that trigger, so it is
@@ -208,7 +221,8 @@ object NotificationCostAnalyzer {
      * most once overall. Within an episode every distracting segment has one owner: the latest credit at or before
      * it, so a notification that opened the episode owns the stretch up to the next notification-driven hop.
      * [reserved] holds notifications the reconstructor gave to episodes not passed here (lockscreen glances), so a
-     * switch can't take them either.
+     * switch can't take them either. A launch-paused (blocked) hop is matched too, as the reconstructor does, so it
+     * uses up its notification; it is returned flagged [Attribution.blockedAttempt] with no downstream time.
      */
     fun attribute(
         notifications: List<LabNotification>,
@@ -228,10 +242,9 @@ object NotificationCostAnalyzer {
         // circumstantial "recent alert" can't use up the notification a later switch was observed tapping.
         val segmentMatch = java.util.IdentityHashMap<LabSegment, Pair<Long, TriggerEvidence>>()
         for (direct in listOf(true, false)) for (e in sorted) {
-            val real = e.segments.filter { !it.isBlockedAttempt }
-            val entry = real.firstOrNull { it.pkgId == e.entryPkgId } ?: real.firstOrNull()
-            for (seg in e.segments) {
-                if (seg === entry || seg.isBlockedAttempt) continue
+            val entry = entryOf(e, apps)
+            for (seg in e.segments.sortedBy { it.seqIndex }) {
+                if (seg === entry) continue
                 val ev = seg.triggerEvidence ?: continue
                 if (ev !in ATTRIBUTING) continue
                 if ((ev != TriggerEvidence.RECENT_POSSIBLE_ALERT) != direct) continue
@@ -259,7 +272,10 @@ object NotificationCostAnalyzer {
             val credits = ArrayList<Triple<Long, TriggerEvidence, Long>>()
             val sessionNotif = e.triggerNotificationId
             if (sessionNotif != null && e.triggerEvidence in ATTRIBUTING && sessionNotif in byId) credits += Triple(sessionNotif, e.triggerEvidence, e.startMs)
-            for (seg in e.segments) segmentMatch[seg]?.let { (id, ev) -> credits += Triple(id, ev, seg.startMs) }
+            for (seg in e.segments) segmentMatch[seg]?.let { (id, ev) ->
+                if (seg.isBlockedAttempt) out += Attribution(id, e.id, ev, seg.startMs, 0L, blockedAttempt = true)
+                else credits += Triple(id, ev, seg.startMs)
+            }
             if (credits.isEmpty()) continue
             credits.sortBy { it.third }
             val segs = apps.realSegments(e).filter { apps.isDistracting(it.pkgId) }
@@ -270,6 +286,20 @@ object NotificationCostAnalyzer {
             }
         }
         return out.sortedWith(compareBy<Attribution> { it.fromMs }.thenBy { it.notificationId })
+    }
+
+    /**
+     * The segment that carries the episode's own trigger, chosen like the reconstructor's entry: the first real
+     * (unblocked, non-system) segment, else, when every open was launch-paused, the first non-system one. Every other
+     * segment with stored evidence was a switch the reconstructor matched on its own, blocked or not.
+     */
+    private fun entryOf(e: LabEpisode, apps: LabApps): LabSegment? {
+        val ordered = e.segments.sortedBy { it.seqIndex }
+        return ordered.firstOrNull { !it.isBlockedAttempt && it.pkgId == e.entryPkgId }
+            ?: ordered.firstOrNull { !it.isBlockedAttempt && !apps.isTransient(it.pkgId) }
+            ?: ordered.firstOrNull { it.pkgId == e.entryPkgId }
+            ?: ordered.firstOrNull { !apps.isTransient(it.pkgId) }
+            ?: ordered.firstOrNull()
     }
 
     /** Waking idle time between episodes, and whether a notification posted in it was followed by a pickup. */

@@ -215,6 +215,70 @@ class NotificationCostTest {
     }
 
     @Test
+    fun `an alert a launch-paused switch consumed is reserved but earns no minutes`() {
+        val h = HOUR_MS
+        val blockedAt = 4 * h // a launch-paused switch to Instagram
+        val retryAt = blockedAt + 20_000 // after a hop to TikTok, a successful switch back to Instagram
+        val open = blockedAt - 5 * MIN
+        val notifs = listOf(
+            n(1, INSTA, blockedAt - 30_000, channel = "older"), // within 60 s of both switches
+            n(2, INSTA, blockedAt - 10_000, channel = "newer"), // within 60 s of both switches; the newest
+            n(3, YOUTUBE, open - 10_000, channel = "yt"), // opened the session
+        )
+        val e = episode(open, YOUTUBE to 5, TIKTOK to 10, trigger = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerNotificationId = 3).let { ep ->
+            val yt = ep.segments[0].copy(triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerPkgId = YOUTUBE)
+            val blocked = LabSegment(INSTA, 1, blockedAt, blockedAt + 5_000, 0, isBlockedAttempt = true, triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerPkgId = INSTA)
+            val tiktok = ep.segments[1].copy(seqIndex = 2, startMs = blockedAt + 5_000, endMs = retryAt, durationMs = retryAt - blockedAt - 5_000)
+            val insta = LabSegment(INSTA, 3, retryAt, retryAt + 10 * MIN, 10 * MIN, triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerPkgId = INSTA)
+            ep.copy(endMs = insta.endMs, segments = listOf(yt, blocked, tiktok, insta))
+        }
+        // Like the reconstructor: the blocked switch takes the newest alert, so the successful one gets the older.
+        val a = NotificationCostAnalyzer.attribute(notifs, listOf(e), testApps)
+        assertEquals(listOf(Triple(3L, open, false), Triple(2L, blockedAt, true), Triple(1L, retryAt, false)), a.map { Triple(it.notificationId, it.fromMs, it.blockedAttempt) })
+        assertEquals(listOf(5 * MIN + 15_000, 0L, 10 * MIN), a.map { it.downstreamMs })
+
+        val r = NotificationCostAnalyzer.analyze(notifs, listener, listOf(e), 0, 10 * h, 10 * h, testApps)
+        val insta = r.rows.first { it.pkgId == INSTA }
+        val older = insta.channels.first { it.channelId == "older" }
+        val newer = insta.channels.first { it.channelId == "newer" }
+        assertEquals(10 * MIN, older.downstreamMs)
+        assertEquals(1, older.attributed)
+        assertEquals(0L, newer.downstreamMs) // reserved by the blocked attempt, which earns nothing
+        assertEquals(0, newer.attributed)
+        assertEquals(10 * MIN, insta.downstreamMs)
+        // The blocked attempt doesn't cut the session trigger's stretch short: the TikTok hop after it stays YouTube's.
+        assertEquals(5 * MIN + 15_000, r.rows.first { it.pkgId == YOUTUBE }.downstreamMs)
+    }
+
+    @Test
+    fun `a tap on a launch-paused open still counts as a tap`() {
+        val h = HOUR_MS
+        val blockedAt = 5 * h
+        val notifs = listOf(n(1, INSTA, blockedAt - MIN, removed = blockedAt + 2_000, reason = RemovalReason.APP_CANCEL))
+        val e = episode(blockedAt - 5 * MIN, KINDLE to 5).let { ep ->
+            val blocked = LabSegment(INSTA, 1, blockedAt, blockedAt + 5_000, 0, isBlockedAttempt = true, triggerEvidence = TriggerEvidence.LIKELY_APP_CANCEL_CLICK, triggerPkgId = INSTA)
+            ep.copy(endMs = blocked.endMs, segments = ep.segments + blocked)
+        }
+        val row = NotificationCostAnalyzer.analyze(notifs, listener, listOf(e), 0, 10 * h, 10 * h, testApps).rows.single()
+        assertEquals(1, row.clicks)
+        assertEquals(0L, row.downstreamMs)
+        assertEquals(0, row.attributed)
+    }
+
+    @Test
+    fun `when every open was launch-paused the first carries the episode trigger and is not matched again`() {
+        val h = HOUR_MS
+        val at = 6 * h
+        val notifs = listOf(n(1, INSTA, at - 20_000), n(2, INSTA, at - 10_000))
+        val e = episode(at, trigger = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerNotificationId = 2).copy(
+            entryPkgId = INSTA,
+            segments = listOf(LabSegment(INSTA, 0, at, at + 5_000, 0, isBlockedAttempt = true, triggerEvidence = TriggerEvidence.RECENT_POSSIBLE_ALERT, triggerPkgId = INSTA)),
+        )
+        val a = NotificationCostAnalyzer.attribute(notifs, listOf(e), testApps)
+        assertEquals(listOf(2L), a.map { it.notificationId }) // the session trigger only: notification 1 stays free
+    }
+
+    @Test
     fun `pseudonymized or missing channel ids fall back to the app's notification settings`() {
         val pkg = "com.example"
         assertEquals(NotificationSettingsTarget.Channel(pkg, "promotions"), ChannelSettings.target(pkg, "promotions"))
