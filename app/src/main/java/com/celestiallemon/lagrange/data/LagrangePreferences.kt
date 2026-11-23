@@ -69,27 +69,46 @@ class LagrangePreferences(
 
     suspend fun current(): UserPrefs = prefs.first()
 
+    // History rows are written before the preference: the history is what past days are rebuilt from, and a crash
+    // between the two writes is repaired at startup ([repairFromHistory]) instead of leaving them disagreeing.
+
     suspend fun setRolloverHour(hour: Int) {
         require(hour in 0..23) { "rollover hour must be 0..23" }
-        val before = current().rolloverHour
-        store.edit { it[ROLLOVER_HOUR] = hour }
-        if (before != hour) {
+        if (current().rolloverHour != hour) {
             db.settingsHistoryDao().insert(
                 SettingsHistoryEntity(timestampUtcMs = clock(), settingKey = ROLLOVER_HOUR.name, valueJson = hour.toString()),
             )
         }
+        store.edit { it[ROLLOVER_HOUR] = hour }
     }
 
     /** Changes the daily distracting budget; every change is kept in `settings_history` so past days keep their budget. */
     suspend fun setDailyBudgetMs(budgetMs: Long) {
         require(budgetMs in UserPrefs.BUDGET_RANGE_MS) { "budget must be within ${UserPrefs.BUDGET_RANGE_MS}" }
-        val before = current().dailyBudgetMs
-        store.edit { it[DAILY_BUDGET_MS] = budgetMs }
-        if (before != budgetMs) {
+        if (current().dailyBudgetMs != budgetMs) {
             db.settingsHistoryDao().insert(
                 SettingsHistoryEntity(timestampUtcMs = clock(), settingKey = DAILY_BUDGET_MS.name, valueJson = budgetMs.toString()),
             )
         }
+        store.edit { it[DAILY_BUDGET_MS] = budgetMs }
+    }
+
+    /**
+     * Brings the rollover hour and budget preferences in line with the latest `settings_history` row, finishing a
+     * change whose preference write was lost to a crash. Returns true if anything changed.
+     */
+    suspend fun repairFromHistory(): Boolean {
+        val history = db.settingsHistoryDao()
+        val rollover = history.byKey(HISTORY_ROLLOVER_HOUR).lastOrNull()?.valueJson?.trim()?.toIntOrNull()?.takeIf { it in 0..23 }
+        val budget = history.byKey(HISTORY_DAILY_BUDGET_MS).lastOrNull()?.valueJson?.trim()?.toLongOrNull()
+            ?.takeIf { it in UserPrefs.BUDGET_RANGE_MS }
+        val now = current()
+        if ((rollover == null || rollover == now.rolloverHour) && (budget == null || budget == now.dailyBudgetMs)) return false
+        store.edit {
+            if (rollover != null) it[ROLLOVER_HOUR] = rollover
+            if (budget != null) it[DAILY_BUDGET_MS] = budget
+        }
+        return true
     }
 
     suspend fun setOnboardingComplete(done: Boolean) = store.edit { it[ONBOARDING_COMPLETE] = done }

@@ -565,6 +565,31 @@ class SessionReconstructorTest {
     }
 
     @Test
+    fun `a switch never borrows the tap that opened a later switch`() {
+        val l = covered()
+        // Unlock at 1 s into Maps, Chrome from 4 s (nothing tapped), WhatsApp from 12 s, opened by a shade tap at 11 s.
+        l.notification(P.WHATSAPP, postedAt = -10 * MIN, removedAt = 11 * SEC, reason = RemovalReason.CLICK)
+        l.session(0, P.MAPS to 2 * SEC, P.CHROME to 8 * SEC, P.WHATSAPP to 2 * MIN)
+        val ep = l.reconstruct().single()
+        assertEquals(TriggerEvidence.OBSERVED_CLICK, ep.segments.single { it.pkgId == P.WHATSAPP }.triggerEvidence)
+        assertNull(ep.segments.single { it.pkgId == P.CHROME }.triggerEvidence)
+        assertEquals(TriggerEvidence.NO_OBSERVED_TRIGGER, ep.triggerEvidence)
+    }
+
+    @Test
+    fun `an alert counts only within a minute before the unlock, however long the lockscreen dwell`() {
+        fun evidence(postedAt: Long): TriggerEvidence {
+            val l = covered()
+            l.notification(P.WHATSAPP, postedAt = postedAt)
+            l.screenOn(0).unlock(2 * MIN).use(P.INSTAGRAM, 2 * MIN + SEC, 5 * MIN).lock(5 * MIN + SEC).screenOff(5 * MIN + SEC)
+            return l.reconstruct().single().triggerEvidence
+        }
+        // Lit the screen 10 s before it came on, but 2 min 10 s before the unlock.
+        assertEquals(TriggerEvidence.NO_OBSERVED_TRIGGER, evidence(-10 * SEC))
+        assertEquals(TriggerEvidence.RECENT_POSSIBLE_ALERT, evidence(90 * SEC))
+    }
+
+    @Test
     fun `a long lockscreen dwell does not widen the click window before the unlock`() {
         val l = covered()
         l.notification(P.WHATSAPP, postedAt = -10 * MIN, removedAt = 2 * SEC, reason = RemovalReason.CLICK)

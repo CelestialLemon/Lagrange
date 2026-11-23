@@ -18,11 +18,22 @@ import java.time.temporal.ChronoUnit
  */
 class ZoneTimeline(entries: List<Pair<Long, ZoneId>>, private val fallback: ZoneId) {
     private val sorted = entries.sortedBy { it.first }
+    private val starts = LongArray(sorted.size) { sorted[it].first }
+
+    /** Day starts are asked for over and over (every window, every [dateOf] probe); a timeline is immutable. */
+    private val dayStarts = java.util.concurrent.ConcurrentHashMap<Long, Long>()
 
     fun zoneAt(ms: Long): ZoneId {
-        var zone: ZoneId? = null
-        for ((from, z) in sorted) if (from <= ms) zone = z else break
-        return zone ?: sorted.firstOrNull()?.second ?: fallback
+        if (sorted.isEmpty()) return fallback
+        // Last entry with from <= ms (binary search); before the first entry the first zone applies.
+        var lo = 0
+        var hi = starts.size - 1
+        var found = -1
+        while (lo <= hi) {
+            val mid = (lo + hi) ushr 1
+            if (starts[mid] <= ms) { found = mid; lo = mid + 1 } else hi = mid - 1
+        }
+        return sorted[if (found < 0) 0 else found].second
     }
 
     /**
@@ -63,7 +74,10 @@ class ZoneTimeline(entries: List<Pair<Long, ZoneId>>, private val fallback: Zone
      * days. When a zone change skips the rollover entirely (flying east across it), the day begins at the change.
      * A rollover hour inside a DST gap resolves forward.
      */
-    fun dayStartMs(date: LocalDate, rolloverHour: Int): Long {
+    fun dayStartMs(date: LocalDate, rolloverHour: Int): Long =
+        dayStarts.getOrPut(date.toEpochDay() * 24 + rolloverHour) { computeDayStart(date, rolloverHour) }
+
+    private fun computeDayStart(date: LocalDate, rolloverHour: Int): Long {
         val local = date.atTime(rolloverHour, 0)
         val candidates = ArrayList<Long>()
         for (z in zones) {

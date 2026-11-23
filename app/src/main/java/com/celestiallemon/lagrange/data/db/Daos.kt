@@ -358,8 +358,12 @@ interface DerivedDao {
     @Query("SELECT * FROM sessions ORDER BY start_ms")
     suspend fun allSessions(): List<SessionEntity>
 
-    @Query("SELECT * FROM session_segments WHERE end_ms > :fromMs AND start_ms < :toMs ORDER BY start_ms")
-    suspend fun segmentsOverlapping(fromMs: Long, toMs: Long): List<SessionSegmentEntity>
+    /** Sessions running across [atMs] (started before it, still going after it). */
+    @Query("SELECT * FROM sessions WHERE start_ms < :atMs AND end_ms > :atMs ORDER BY start_ms")
+    suspend fun sessionsSpanning(atMs: Long): List<SessionEntity>
+
+    @Query("DELETE FROM daily_rollups WHERE logical_date = :date")
+    suspend fun deleteDailyRollup(date: String)
 
     @Query("UPDATE sessions SET worth_it_rating = :rating WHERE episode_key = :episodeKey AND is_glance_only = 0")
     suspend fun setRatingByKey(episodeKey: String, rating: Int?): Int

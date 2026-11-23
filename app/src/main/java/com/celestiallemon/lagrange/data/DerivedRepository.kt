@@ -15,6 +15,7 @@ import com.celestiallemon.lagrange.data.db.LagrangeDatabase
 import com.celestiallemon.lagrange.data.db.RawNotificationEntity
 import com.celestiallemon.lagrange.data.db.RemovalReason
 import com.celestiallemon.lagrange.data.db.ServiceKind
+import com.celestiallemon.lagrange.data.db.UsageEventTypes
 import com.celestiallemon.lagrange.data.db.SessionEntity
 import com.celestiallemon.lagrange.data.db.SessionSegmentEntity
 import com.celestiallemon.lagrange.domain.AppInfo
@@ -126,8 +127,9 @@ class DerivedRepository(
      */
     suspend fun reconcileSettings(): Boolean {
         val s = settings()
-        val packages = db.packageDao().all().sortedBy { it.id }
         return db.withWriteTransaction {
+            // Read inside the transaction: the fingerprint stored below must describe exactly the rows checked.
+            val packages = db.packageDao().all().sortedBy { it.id }
             var queued = false
             val rollover = state.get(IngestionKeys.DERIVED_ROLLOVER_HOUR)
             if (rollover != null && rollover != s.rolloverHour.toLong()) {
@@ -210,6 +212,7 @@ class DerivedRepository(
     // -- Rebuild ------------------------------------------------------------------------------------------------------
 
     private class Context(
+        val earliest: Long,
         val zones: ZoneTimeline,
         val rollover: Int,
         val dataEnd: Long,
@@ -223,6 +226,7 @@ class DerivedRepository(
     private suspend fun context(): Context? {
         val raw = db.rawUsageEventDao()
         val latest = raw.latest() ?: return null
+        val earliest = raw.earliest() ?: return null
         val dataEnd = maxOf(latest, state.get(IngestionKeys.LAST_HARVEST_AT_MS) ?: latest)
         val s = settings()
         val zones = zoneTimeline()
@@ -240,6 +244,7 @@ class DerivedRepository(
             }
         }
         return Context(
+            earliest = earliest,
             zones = zones,
             rollover = s.rolloverHour,
             dataEnd = dataEnd,
@@ -251,13 +256,13 @@ class DerivedRepository(
         )
     }
 
-    private suspend fun recompute(fromMs: Long, toMs: Long): Int {
-        val earliest = db.rawUsageEventDao().earliest()
+    private suspend fun recompute(fromMs: Long, toMs: Long, restarts: Int = 0): Int {
         val ctx = context()
-        if (earliest == null || ctx == null) {
+        if (ctx == null) {
             finishActive()
             return 0
         }
+        val earliest = ctx.earliest
         val firstDate = ctx.zones.dateOf(maxOf(fromMs, earliest), ctx.rollover)
         val lastDate = if (toMs >= ctx.dataEnd) ctx.today else minOf(ctx.today, ctx.zones.dateOf(maxOf(toMs, earliest), ctx.rollover))
         val baselineFromMs = state.get(IngestionKeys.DERIVED_BASELINE_FROM_MS) ?: fromMs
@@ -277,7 +282,19 @@ class DerivedRepository(
         while (d <= lastDate) {
             val chunkLast = minOf(d.plusDays(chunkDays - 1L), lastDate)
             val windows = generateSequence(d) { it.plusDays(1) }.takeWhile { it <= chunkLast }.map { ctx.zones.window(it, ctx.rollover) }.toList()
-            rebuildChunk(ctx, windows)
+            val checkSpill = d == firstDate && restarts < MAX_SPILL_RESTARTS
+            val restartFrom = rebuildChunk(ctx, windows, checkSpill)
+            if (restartFrom != null) {
+                // An episode crossing the range start changed (late events merged or split it): the day it starts in
+                // must be rebuilt too, before anything here is replaced, or its rating and totals would be lost.
+                db.withWriteTransaction {
+                    state.put(IngestionStateEntity(IngestionKeys.DERIVED_ACTIVE_FROM_MS, restartFrom))
+                    val bf = state.get(IngestionKeys.DERIVED_BASELINE_FROM_MS)
+                    state.put(IngestionStateEntity(IngestionKeys.DERIVED_BASELINE_FROM_MS, minOf(bf ?: restartFrom, restartFrom)))
+                }
+                Log.i(TAG, "episode crosses $firstDate start; widening rebuild")
+                return recompute(restartFrom, toMs, restarts + 1)
+            }
             done += windows.size
             _progress.value = RecomputeProgress(true, done, total)
             db.withWriteTransaction {
@@ -310,9 +327,15 @@ class DerivedRepository(
         }
     }
 
-    private suspend fun rebuildChunk(ctx: Context, windows: List<com.celestiallemon.lagrange.domain.DayWindow>) {
-        val cs = windows.first().startMs
-        val ce = windows.last().endMs
+    /** A chunk's ledger slice, read wide enough that every episode touching `[cs, ce)` reconstructs whole. */
+    private class Loaded(
+        val loadFrom: Long,
+        val loadTo: Long,
+        val input: ReconstructionInput,
+        val episodes: List<Episode>,
+    )
+
+    private suspend fun load(ctx: Context, cs: Long, ce: Long): Loaded {
         var back = lookbackMs
         var ahead = lookaheadMs
         var attempt = 0
@@ -322,28 +345,51 @@ class DerivedRepository(
             val events = db.rawUsageEventDao().between(loadFrom, loadTo).map { UsageEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) }
             val notifications = db.rawNotificationDao().eligibleAlive(loadFrom, loadTo).map { it.toMeta() }
             val friction = db.derivedDao().frictionBetween(loadFrom, loadTo).map { it.toMeta() }
-            val episodes = SessionReconstructor.reconstruct(
-                ReconstructionInput(events, ctx.apps, ctx.customTabs, notifications, friction, ctx.coverage, dataEndMs = minOf(ctx.dataEnd, loadTo)),
-                rules,
-            )
+            val input = ReconstructionInput(events, ctx.apps, ctx.customTabs, notifications, friction, ctx.coverage, dataEndMs = minOf(ctx.dataEnd, loadTo))
+            val episodes = SessionReconstructor.reconstruct(input, rules)
             // An episode cut off by the read margins (still "open" at loadTo, or already running when the read began)
             // would be stored or counted short: widen the read until every episode touching the chunk is whole.
             val cutAhead = loadTo <= ctx.dataEnd && episodes.any { it.inProgress && it.startMs < ce }
             val firstEvent = events.minOfOrNull { it.timestampMs }
-            val cutBehind = loadFrom > 0 && firstEvent != null &&
-                episodes.any { it.startMs - firstEvent < MARGIN_EDGE_MS && it.endMs > cs }
+            // The screen was already on when the read began and stayed on into the chunk: whatever opened that
+            // episode lies before the read, even if no event of it made it in.
+            val firstScreen = events.firstOrNull { it.type == UsageEventTypes.SCREEN_INTERACTIVE || it.type == UsageEventTypes.SCREEN_NON_INTERACTIVE }
+            val openAtRead = if (firstScreen == null) events.any { it.timestampMs >= cs && it.type in FOREGROUND_TYPES } else firstScreen.type == UsageEventTypes.SCREEN_NON_INTERACTIVE && firstScreen.timestampMs > cs
+            val cutBehind = loadFrom > ctx.earliest && firstEvent != null &&
+                (openAtRead || episodes.any { it.startMs - firstEvent < MARGIN_EDGE_MS && it.endMs > cs })
             if ((cutAhead || cutBehind) && attempt < MAX_MARGIN_DOUBLINGS) {
                 if (cutAhead) ahead *= 2
                 if (cutBehind) back *= 2
                 attempt++
                 continue
             }
-            val results = RollupEngine.compute(
-                RollupInput(windows, episodes, ctx.apps, ctx.coverage, notifications, ctx.rollover, ctx.dataEnd, ctx.budgetFor, ctx.zones),
-            )
-            writeChunk(ctx, cs, ce, windows.first().date, windows.last().date, episodes.filter { it.startMs >= cs }, results)
-            return
+            return Loaded(loadFrom, loadTo, input, episodes)
         }
+    }
+
+    /**
+     * Rebuilds one chunk. With [checkSpill] (the first chunk of a range) it first checks that the episodes crossing
+     * the chunk start still match the stored ones; if not, nothing is written and the start of the earliest such
+     * episode is returned so the caller can widen the range.
+     */
+    private suspend fun rebuildChunk(ctx: Context, windows: List<com.celestiallemon.lagrange.domain.DayWindow>, checkSpill: Boolean = false): Long? {
+        val cs = windows.first().startMs
+        val ce = windows.last().endMs
+        val loaded = load(ctx, cs, ce)
+        val episodes = loaded.episodes
+        if (checkSpill && cs > ctx.earliest) {
+            val fresh = episodes.filter { it.startMs < cs && it.endMs > cs }
+            val stored = db.derivedDao().sessionsSpanning(cs)
+            if (fresh.map { it.episodeKey to it.endMs }.toSet() != stored.map { it.episodeKey to it.endMs }.toSet()) {
+                val from = (fresh.map { it.startMs } + stored.map { it.startMs }).min()
+                if (from < cs) return from
+            }
+        }
+        val results = RollupEngine.compute(
+            RollupInput(windows, episodes, ctx.apps, ctx.coverage, loaded.input.notifications, ctx.rollover, ctx.dataEnd, ctx.budgetFor, ctx.zones),
+        )
+        writeChunk(ctx, cs, ce, windows.first().date, windows.last().date, episodes.filter { it.startMs >= cs }, results)
+        return null
     }
 
     /**
@@ -386,6 +432,10 @@ class DerivedRepository(
         }
         dao.deleteAppRollups(firstDate.toString(), lastDate.toString())
         dao.deleteHourly(firstDate.toString(), lastDate.toString())
+        // A day the engine no longer produces (e.g. now before the first data) must not keep its old totals.
+        val produced = results.map { it.rollup.logicalDate }.toSet()
+        generateSequence(firstDate) { it.plusDays(1) }.takeWhile { it <= lastDate }
+            .filter { it !in produced }.forEach { dao.deleteDailyRollup(it.toString()) }
         for (r in results) {
             val date = r.rollup.logicalDate.toString()
             dao.upsertDailyRollup(r.rollup.toEntity(dao.dailyRollup(date)))
@@ -445,16 +495,30 @@ class DerivedRepository(
             val zone = ctx.zones.zoneAt(ctx.zones.window(date, ctx.rollover).startMs)
             val cut = local.atZone(zone).toInstant().toEpochMilli()
             val hourStart = minOf(cut, local.truncatedTo(ChronoUnit.HOURS).atZone(zone).toInstant().toEpochMilli())
-            if (cut <= hourStart) 0L
-            else db.derivedDao().segmentsOverlapping(hourStart, cut).filter { it.pkgId in activePkgs }.sumOf { seg ->
-                val len = seg.endMs - seg.startMs
-                val overlap = minOf(seg.endMs, cut) - maxOf(seg.startMs, hourStart)
-                if (len <= 0 || overlap <= 0) 0L else (seg.durationMs.toDouble() * overlap / len).toLong()
-            }
+            if (cut <= hourStart) 0L else activeUseBetween(ctx, hourStart, cut, activePkgs)
         }
         // A matched day with no hourly rows was a confirmed zero-use day.
         val withZeros = base.matchedDays.associateWith { (prior[it] ?: 0L) + (partialHour[it] ?: 0L) }
         return PartialDayBaseline.compare(ctx.today, today.activeMs, cutoff, withZeros, points)
+    }
+
+    /**
+     * Active use in `[fromMs, toMs)` exactly as the day would have looked with the ledger ending at [toMs]: the
+     * stretch is reconstructed from raw events (stored segments only carry a total, not where inside them the
+     * launch pauses and merged screen-off gaps fell).
+     */
+    private suspend fun activeUseBetween(ctx: Context, fromMs: Long, toMs: Long, pkgs: Set<Long>): Long {
+        val loadFrom = fromMs - lookbackMs
+        val events = db.rawUsageEventDao().between(loadFrom, toMs).map { UsageEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) }
+        if (events.isEmpty()) return 0L
+        val friction = db.derivedDao().frictionBetween(loadFrom, toMs).map { it.toMeta() }
+        val episodes = SessionReconstructor.reconstruct(
+            ReconstructionInput(events, ctx.apps, ctx.customTabs, emptyList(), friction, ctx.coverage, dataEndMs = toMs),
+            rules,
+        )
+        return episodes.sumOf { ep ->
+            ep.segments.filter { it.pkgId in pkgs }.sumOf { seg -> seg.effectiveSpans().sumOf { it.overlapMs(fromMs, toMs) } }
+        }
     }
 
     /**
@@ -488,23 +552,25 @@ class DerivedRepository(
 
     suspend fun windowOf(date: LocalDate): com.celestiallemon.lagrange.domain.DayWindow = zoneTimeline().window(date, settings().rolloverHour)
 
-    /** One logical day as a replayable fixture: the ledger slice (with reconstruction margins) plus today's reconstruction. */
+    /**
+     * One logical day as a replayable fixture: the ledger slice the rebuild itself would read for that day (same
+     * adaptive margins) plus its reconstruction.
+     */
     suspend fun dayFixture(date: LocalDate): DayFixture = withContext(Dispatchers.IO) {
         val s = settings()
-        val zones = zoneTimeline()
+        val ctx = context()
+        val zones = ctx?.zones ?: zoneTimeline()
         val w = zones.window(date, s.rolloverHour)
-        val latest = db.rawUsageEventDao().latest() ?: w.startMs
-        val dataEnd = maxOf(latest, state.get(IngestionKeys.LAST_HARVEST_AT_MS) ?: latest)
-        val loadFrom = w.startMs - LOOKBACK_MS
-        val loadTo = minOf(w.endMs + LOOKAHEAD_MS, dataEnd + 1)
-        val events = db.rawUsageEventDao().between(loadFrom, loadTo)
-        val notifications = db.rawNotificationDao().eligibleAlive(loadFrom, loadTo)
-        val friction = db.derivedDao().frictionBetween(loadFrom, loadTo)
-        val apps = appInfos()
+        val loaded = ctx?.let { load(it, w.startMs, w.endMs) }
+        val input = loaded?.input
+        val events = input?.events.orEmpty()
+        val notifications = input?.notifications.orEmpty()
+        val friction = input?.friction.orEmpty()
         val usedPkgs = (events.map { it.pkgId } + notifications.map { it.pkgId } + friction.map { it.pkgId }).toSet()
         val clsIds = events.map { it.clsId }.toSet()
-        val customTabs = db.classDao().customTabIds().filter { it in clsIds }
-        val coverage = db.coverageDao().overlapping(loadFrom, loadTo).map { it.toSpan(dataEnd) }
+        val apps = ctx?.apps ?: appInfos()
+        val loadFrom = loaded?.loadFrom ?: w.startMs
+        val loadTo = loaded?.loadTo ?: w.startMs
         val fixture = DayFixture(
             algorithmVersion = DerivedAlgorithm.VERSION,
             logicalDate = date.toString(),
@@ -512,20 +578,21 @@ class DerivedRepository(
             rolloverHour = s.rolloverHour,
             windowStartMs = w.startMs,
             windowEndMs = w.endMs,
-            dataEndMs = minOf(dataEnd, loadTo),
+            dataEndMs = input?.dataEndMs ?: w.startMs,
             apps = apps.values.filter { it.pkgId in usedPkgs }.sortedBy { it.pkgId }
                 .map { FixtureApp(it.pkgId, it.packageName, it.category.name, it.isSystemSurface) },
             classes = db.classDao().namesOf(clsIds.toList()).map { FixtureClass(it.id, it.name) }.sortedBy { it.id },
-            customTabClassIds = customTabs.sorted(),
-            events = events.map { FixtureEvent(it.timestampUtcMs, it.eventType, it.pkgId, it.clsId, it.id) },
+            customTabClassIds = ctx?.customTabs.orEmpty().filter { it in clsIds }.sorted(),
+            events = events.map { FixtureEvent(it.timestampMs, it.type, it.pkgId, it.clsId, it.order) },
             notifications = notifications.map {
                 FixtureNotification(
-                    it.id, it.pkgId, it.postedAtMs, it.removedAtMs, it.removalReason, it.importance, it.isOngoing,
+                    it.id, it.pkgId, it.postedAtMs, it.removedAtMs, it.removalReason.name, it.importance, it.isOngoing,
                     it.isForegroundService, it.isGroupSummary, it.isAmbient, it.matchedInterruptionFilter, it.dndOrSilentAtPost,
                 )
             },
-            friction = friction.map { FixtureFriction(it.timestampUtcMs, it.pkgId, it.eventKind, it.pauseDurationSec, it.postCountdownReactionMs, it.outcome) },
-            coverage = coverage.map { FixtureCoverage(it.kind.name, it.status.name, it.startMs, it.endMs) },
+            friction = friction.map { FixtureFriction(it.timestampMs, it.pkgId, it.eventKind, it.pauseDurationSec, it.postCountdownReactionMs, it.outcome) },
+            coverage = ctx?.coverage.orEmpty().filter { it.endMs > loadFrom && it.startMs < loadTo }
+                .map { FixtureCoverage(it.kind.name, it.status.name, it.startMs, it.endMs) },
             expected = emptyList(),
         )
         fixture.copy(expected = fixture.replay(rules))
@@ -646,5 +713,8 @@ class DerivedRepository(
         /** An episode starting this close to the first event read may have begun before the read: widen it. */
         private const val MARGIN_EDGE_MS = 60_000L
         private const val MAX_MARGIN_DOUBLINGS = 5
+        /** A changed episode crossing a range start widens the range at most this many days back per run. */
+        private const val MAX_SPILL_RESTARTS = 16
+        private val FOREGROUND_TYPES = setOf(UsageEventTypes.ACTIVITY_RESUMED, UsageEventTypes.ACTIVITY_PAUSED, UsageEventTypes.ACTIVITY_STOPPED)
     }
 }

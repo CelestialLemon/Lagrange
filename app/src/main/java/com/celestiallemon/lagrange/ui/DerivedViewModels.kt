@@ -19,9 +19,7 @@ import com.celestiallemon.lagrange.data.db.SessionSegmentEntity
 import com.celestiallemon.lagrange.data.db.FrictionVocab
 import com.celestiallemon.lagrange.data.db.NamedUsageEvent
 import com.celestiallemon.lagrange.domain.DayWindow
-import com.celestiallemon.lagrange.domain.LogicalDay
 import java.time.LocalDate
-import java.time.ZoneId
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -75,8 +73,10 @@ class TodayViewModel(app: Application) : AndroidViewModel(app) {
 
     /** The current logical day; rolls over on its own while the screen is open. */
     private val today: Flow<LocalDate> = graph.afterReady {
-        combine(preferences.prefs.map { it.rolloverHour }.distinctUntilChanged(), minuteTickFlow()) { hour, now ->
-            LogicalDay.dateOf(now, hour, ZoneId.systemDefault())
+        // The same zone-history-aware resolver the rebuild uses: after flying west the device clock may already say
+        // "yesterday", but the logical day (and its rows) is still the one that began before the trip.
+        combine(preferences.prefs.map { it.rolloverHour }.distinctUntilChanged(), minuteTickFlow()) { _, now ->
+            withContext(Dispatchers.IO) { derived.dateOf(now) }
         }.distinctUntilChanged()
     }
 
@@ -89,7 +89,6 @@ class TodayViewModel(app: Application) : AndroidViewModel(app) {
             s.map { EpisodeUi(it, bySession[it.id].orEmpty()) }
         }
         val packages = graph.database.packageDao().observeAll().map { rows -> rows.associateBy { it.id } }
-        // Re-read the slice whenever the rollup changes (each rebuild) or the clock moves the cutoff.
         // Any rebuild of today's row (usage, baseline or status) or the clock moving the cutoff refreshes the slice.
         val comparison = combine(rollup, minuteTickFlow()) { r, now -> listOf(r?.activeUsageMs, r?.baselineMedianMs, r?.dayStatus, now / COMPARISON_REFRESH_MS) }
             .distinctUntilChanged()

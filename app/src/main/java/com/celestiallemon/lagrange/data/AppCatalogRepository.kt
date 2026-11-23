@@ -60,8 +60,14 @@ class AppCatalogRepository(
     suspend fun recentOpens(sinceMs: Long): Map<Long, Long> =
         db.rawUsageEventDao().resumeCountsSince(sinceMs).associate { it.pkgId to it.resumeCount }
 
-    suspend fun setCategory(packageName: String, category: AppCategory) {
-        db.packageDao().setCategory(packageName, category.name, clock())
+    /**
+     * Sets an app's category. A real change queues a full derived rebuild in the same transaction (categories apply
+     * retroactively), so the request can't be lost to a crash or a racing settings check.
+     */
+    suspend fun setCategory(packageName: String, category: AppCategory) = db.withWriteTransaction {
+        val before = db.packageDao().byName(packageName)?.category
+        val changed = db.packageDao().setCategory(packageName, category.name, clock()) > 0 && before != category.name
+        if (changed) DerivedDirty.mark(db.ingestionStateDao(), 0)
     }
 
     /** Accepts the current (suggested or edited) category of every listed app as the user's choice. */

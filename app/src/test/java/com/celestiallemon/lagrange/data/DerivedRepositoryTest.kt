@@ -425,6 +425,107 @@ class DerivedRepositoryTest {
         assertFalse(e.repo.reconcileSettings())
     }
 
+    @Test
+    fun `a late pickup merging across the start of a dirty range rebuilds the day it starts in`() = runBlocking {
+        val e = env()
+        e.history(2)
+        val boundary = at(today.minusDays(1), 4)
+        e.session(boundary + 5_000, INSTAGRAM, 5 * MINUTE_MS)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val rated = e.sessions().single { it.startMs == boundary + 6_000 }
+        assertTrue(e.repo.setWorthIt(rated.episodeKey, rated.startMs, 4))
+
+        // A late pickup just before 04:00 merges with the rated one, but the harvest's request starts after 04:00.
+        e.session(boundary - 12_000, WHATSAPP, 1_000)
+        e.repo.markDirty(boundary + MINUTE_MS)
+        e.repo.runPending()
+        val merged = e.sessions().single { it.startMs <= boundary + 6_000 && it.endMs >= boundary + 6_000 }
+        assertEquals(boundary - 11_000, merged.startMs)
+        assertEquals(today.minusDays(2).toString(), merged.logicalDate)
+        assertEquals(4, merged.worthItRating)
+        assertEquals(1, e.sessions().count { it.worthItRating != null })
+        assertNull(e.state(IngestionKeys.DERIVED_ACTIVE_FROM_MS))
+    }
+
+    @Test
+    fun `an episode whose opening events all fall before the read is still rebuilt whole`() = runBlocking {
+        suspend fun build(e: Env): Pair<List<SessionEntity>, List<com.celestiallemon.lagrange.data.db.HourlyAppUsageEntity>> {
+            e.history(4)
+            // 00:30 to 05:30: the 04:00 day's read starts at 03:00 and sees only the pause and the screen-off.
+            e.session(at(today.minusDays(2), 0, 30), INSTAGRAM, 5 * HOUR_MS)
+            e.repo.markAllDirty()
+            e.repo.runPending()
+            val days = (0..4L).map { today.minusDays(it).toString() }
+            return e.sessions().map { it.copy(id = 0) } to e.db.derivedDao().hourlyFor(days).sortedWith(compareBy({ it.logicalDate }, { it.hourSlot }, { it.pkgId }))
+        }
+        val tight = build(env(chunkDays = 1, lookbackMs = HOUR_MS, lookaheadMs = HOUR_MS))
+        val wide = build(env(chunkDays = 7))
+        assertEquals(wide.first, tight.first)
+        assertEquals(wide.second, tight.second)
+        assertTrue(tight.second.any { it.logicalDate == today.minusDays(2).toString() && it.hourSlot == 0 && it.durationMs == HOUR_MS })
+    }
+
+    @Test
+    fun `a rebuilt day that no longer produces a rollup loses its old row`() = runBlocking {
+        val e = env()
+        e.setup(at(today.minusDays(2), 0))
+        e.session(at(today.minusDays(1), 9), WHATSAPP, 10 * MINUTE_MS)
+        // The ledger ends exactly where today begins: today has no data at all.
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(today, 4)))
+        val yesterday = today.minusDays(1).toString()
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val stale = e.db.derivedDao().dailyRollup(yesterday)!!.copy(logicalDate = today.toString())
+        e.db.derivedDao().upsertDailyRollup(stale)
+        e.repo.markDirty(at(today.minusDays(1), 12))
+        e.repo.runPending()
+        assertNull(e.db.derivedDao().dailyRollup(today.toString()))
+        assertNotNull(e.db.derivedDao().dailyRollup(yesterday))
+    }
+
+    @Test
+    fun `recategorizing an app queues the rebuild in the same write`() = runBlocking {
+        val e = env()
+        e.history(1)
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val catalog = AppCatalogRepository(e.db, e.interner, { emptyList() }, FakeResolver(), { now })
+        catalog.setCategory(WHATSAPP, AppCategory.NEUTRAL) // unchanged
+        assertNull(e.state(IngestionKeys.DERIVED_PENDING_FROM_MS))
+        catalog.setCategory(WHATSAPP, AppCategory.DISTRACTING)
+        assertEquals(0L, e.state(IngestionKeys.DERIVED_PENDING_FROM_MS))
+        e.repo.runPending()
+        assertEquals(30 * MINUTE_MS, e.db.derivedDao().dailyRollup(today.toString())!!.distractingMs)
+    }
+
+    @Test
+    fun `the same-time slice leaves out launch-pause time inside the current hour`() = runBlocking {
+        val e = env()
+        e.setup(at(today.minusDays(10), 0))
+        val insta = e.interner.packageId(INSTAGRAM)
+        for (i in 10 downTo 1) {
+            val d = today.minusDays(i.toLong())
+            e.session(at(d, 12, 35), INSTAGRAM, 20 * MINUTE_MS)
+            e.db.derivedDao().insertFrictionEvent(
+                com.celestiallemon.lagrange.data.db.FrictionEventEntity(
+                    timestampUtcMs = at(d, 12, 35) + 2_000, logicalDate = d.toString(), pkgId = insta, eventKind = "LAUNCH_PAUSE",
+                    scheduleId = null, escalationTier = 0, pauseDurationSec = 60, postCountdownReactionMs = null, intentionTag = null,
+                    selectedTimerMin = null, redirectPkgId = null, outcome = "CLOSED_GO_HOME",
+                ),
+            )
+        }
+        e.session(at(today, 10), INSTAGRAM, 5 * MINUTE_MS)
+        e.db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.LAST_HARVEST_AT_MS, at(today, 12, 45)))
+        e.repo.markAllDirty()
+        e.repo.runPending()
+        val seg = e.db.derivedDao().segmentsFor(today.minusDays(1).toString()).single()
+        val blocked = 20 * MINUTE_MS - seg.durationMs
+        assertTrue(blocked > 0)
+        // 12:35:02 to 12:45 is 598 s of foreground, minus the launch pause at its start.
+        assertEquals(10 * MINUTE_MS - 2_000 - blocked, e.repo.todayComparison()!!.slice!!.medianMs)
+    }
+
     private companion object {
         const val INSTAGRAM = "com.instagram.android"
         const val WHATSAPP = "com.whatsapp"

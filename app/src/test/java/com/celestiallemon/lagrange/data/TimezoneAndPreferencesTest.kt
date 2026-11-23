@@ -5,6 +5,7 @@ import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.celestiallemon.lagrange.data.db.LagrangeDatabase
+import com.celestiallemon.lagrange.data.db.SettingsHistoryEntity
 import java.io.File
 import java.time.ZoneId
 import kotlinx.coroutines.CoroutineScope
@@ -57,6 +58,23 @@ class TimezoneAndPreferencesTest {
         // A zone change re-derives the days around it, in the same transaction as the tz_history row.
         assertEquals(now - 2 * 24 * 60 * 60 * 1000L, db.ingestionStateDao().get(IngestionKeys.DERIVED_PENDING_FROM_MS))
         assertEquals(3, db.tzHistoryDao().all().size)
+    }
+
+    @Test
+    fun `a settings change whose preference write was lost is finished from history at startup`() = runBlocking {
+        val p = prefs()
+        assertFalse(p.repairFromHistory())
+        val history = db.settingsHistoryDao()
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 1, settingKey = LagrangePreferences.HISTORY_DAILY_BUDGET_MS, valueJson = "${30 * 60_000L}"))
+        history.insert(SettingsHistoryEntity(timestampUtcMs = 2, settingKey = LagrangePreferences.HISTORY_ROLLOVER_HOUR, valueJson = "6"))
+        assertTrue(p.repairFromHistory())
+        assertEquals(30 * 60_000L, p.current().dailyBudgetMs)
+        assertEquals(6, p.current().rolloverHour)
+        assertFalse(p.repairFromHistory())
+        // A normal change writes history and preference together.
+        p.setDailyBudgetMs(45 * 60_000L)
+        assertEquals("${45 * 60_000L}", history.byKey(LagrangePreferences.HISTORY_DAILY_BUDGET_MS).last().valueJson)
+        assertFalse(p.repairFromHistory())
     }
 
     @Test

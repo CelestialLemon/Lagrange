@@ -314,6 +314,7 @@ object SessionReconstructor {
         ): Episode {
             this.alertsAllowed = alertsAllowed
             this.alertExcluded = alertExcluded
+            this.claimed = emptySet()
             val start = raw.activeSpans.first().startMs
             val end = raw.activeSpans.last().endMs
             val spanTotal = raw.activeSpans.sumOf { it.durationMs }
@@ -335,14 +336,18 @@ object SessionReconstructor {
             val entry = segments.firstOrNull { !it.isBlockedAttempt && !isTransient(it.pkgId) }
                 ?: segments.firstOrNull { !isTransient(it.pkgId) }
                 ?: segments.firstOrNull()
-            // A shade tap that opened a later app in this episode belongs to that switch, not to the pickup.
+            // A shade tap that opened an app in this episode (the entry or a later switch) belongs to the target it
+            // opened: a neighbouring target for another app may not borrow it, whichever is attributed first.
             val switches = segments.filterIndexed { i, seg -> i > 0 && seg !== entry && !isTransient(seg.pkgId) && seg.pkgId != segments[i - 1].pkgId }
-            val reserved = eligible.filter { n ->
+            val targets = switches.map { Triple(it.pkgId, it.startMs, it.endMs) } +
+                listOfNotNull(entry?.let { Triple(it.pkgId, start, end) })
+            val claimed = eligible.filter { n ->
                 val r = n.removedAtMs
-                n.removalReason == RemovalReason.CLICK && r != null && n.pkgId != entry?.pkgId &&
-                    switches.any { sw -> sw.pkgId == n.pkgId && r >= sw.startMs - rules.clickBeforeMs && r <= sw.startMs + rules.clickAfterMs }
+                n.removalReason == RemovalReason.CLICK && r != null &&
+                    targets.any { (pkg, at, until) -> pkg == n.pkgId && r >= at - rules.clickBeforeMs && r <= minOf(at + rules.clickAfterMs, until) }
             }.map { it.id }.toSet()
-            val trigger = attributeEpisode(raw.pickupAtMs, start, end, entry?.pkgId, entry?.startMs, consumed, reserved)
+            this.claimed = claimed
+            val trigger = attributeEpisode(raw.pickupAtMs, start, end, entry?.pkgId, entry?.startMs, consumed)
             segments = segments.mapIndexed { i, seg ->
                 when {
                     seg === entry || (i == 0 && entry == null) -> seg.copy(triggerEvidence = trigger.evidence, triggerPkgId = trigger.pkgId)
@@ -466,6 +471,9 @@ object SessionReconstructor {
         private var alertsAllowed = true
         private var alertExcluded: Set<Long> = emptySet()
 
+        /** Taps that some target in the current episode opened in their own app; only a target of that app may use them. */
+        private var claimed: Set<Long> = emptySet()
+
         /**
          * Positive evidence (an observed tap, an app self-cancel, a fresh alert, a waiting notification) is reported
          * whenever it was recorded. Only when nothing was seen does coverage decide between "nothing happened"
@@ -478,13 +486,12 @@ object SessionReconstructor {
             entryPkg: Long?,
             entryAtMs: Long?,
             consumed: MutableSet<Long>,
-            reserved: Set<Long> = emptySet(),
             clicksAllowed: Boolean = true,
         ): Trigger {
             // Spec §4.1: a tap removed within [-5 s, +15 s] of the episode start (the unlock, not the screen-on, so a
             // long lockscreen dwell can't widen the window), and never after the episode ended.
             val click = if (!clicksAllowed) null else eligible
-                .filter { it.id !in consumed && it.id !in reserved && it.removalReason == RemovalReason.CLICK }
+                .filter { it.id !in consumed && (it.id !in claimed || it.pkgId == entryPkg) && it.removalReason == RemovalReason.CLICK }
                 .filter { val r = it.removedAtMs ?: return@filter false; r >= unlockMs - rules.clickBeforeMs && r <= minOf(unlockMs + rules.clickAfterMs, endMs) }
                 .minWithOrNull(compareBy<NotificationMeta>({ if (it.pkgId == entryPkg) 0 else 1 }, { kotlin.math.abs(it.removedAtMs!! - unlockMs) }))
             if (click != null) {
@@ -495,7 +502,7 @@ object SessionReconstructor {
                 appCancel(entryPkg, entryAtMs, consumed)?.let { return it }
             }
             val alert = if (!alertsAllowed) null else eligible
-                .filter { it.id !in consumed && it.id !in alertExcluded && it.isAlerting && it.postedAtMs >= pickupAtMs - rules.alertBeforeMs && it.postedAtMs <= unlockMs }
+                .filter { it.id !in consumed && it.id !in alertExcluded && it.isAlerting && it.postedAtMs >= unlockMs - rules.alertBeforeMs && it.postedAtMs <= unlockMs }
                 .maxWithOrNull(compareBy<NotificationMeta>({ if (it.pkgId == entryPkg) 1 else 0 }, { it.postedAtMs }))
             if (alert != null) {
                 consumed += alert.id
@@ -508,7 +515,8 @@ object SessionReconstructor {
                     .maxByOrNull { it.postedAtMs }
                 if (pending != null) return Trigger(TriggerEvidence.PENDING_NOTIFICATION, entryPkg, pending.id)
             }
-            val from = pickupAtMs - rules.alertBeforeMs
+            // Spec §4.1: alerts count within [-60 s, 0] of the unlock, taps within [-5 s, +15 s]: that's what had to be seen.
+            val from = unlockMs - maxOf(rules.alertBeforeMs, rules.clickBeforeMs)
             val to = unlockMs + rules.clickAfterMs
             val covered = Spans.coveredMs(listenerSpans, from, to) >= to - from
             return when {
@@ -531,7 +539,7 @@ object SessionReconstructor {
         fun attributeSwitch(seg: Segment, consumed: MutableSet<Long>): Trigger? {
             val at = seg.startMs
             val click = eligible
-                .filter { it.id !in consumed && it.removalReason == RemovalReason.CLICK }
+                .filter { it.id !in consumed && (it.id !in claimed || it.pkgId == seg.pkgId) && it.removalReason == RemovalReason.CLICK }
                 .filter { val r = it.removedAtMs ?: return@filter false; r >= at - rules.clickBeforeMs && r <= minOf(at + rules.clickAfterMs, seg.endMs) }
                 .minWithOrNull(compareBy<NotificationMeta>({ if (it.pkgId == seg.pkgId) 0 else 1 }, { kotlin.math.abs(it.removedAtMs!! - at) }))
             if (click != null) {

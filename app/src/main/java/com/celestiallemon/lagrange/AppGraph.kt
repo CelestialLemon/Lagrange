@@ -147,6 +147,7 @@ class AppGraph(private val app: Application) {
 
     private suspend fun startDerivedPipeline() {
         try {
+            preferences.repairFromHistory()
             derived.ensureAlgorithmVersion()
         } catch (e: CancellationException) {
             throw e
