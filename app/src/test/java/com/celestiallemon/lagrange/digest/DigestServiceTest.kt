@@ -169,4 +169,25 @@ class DigestServiceTest {
         assertEquals(1, poster.posted.size)
         assertEquals("2026-11-24", claims[DigestKind.DAILY])
     }
+
+    @Test
+    fun `a run cancelled during compose neither claims nor posts`() = runBlocking {
+        val poster = Poster()
+        var outer: kotlinx.coroutines.Job? = null
+        val s = DigestService(
+            compose = { kind, _ ->
+                outer!!.cancel() // e.g. the digest was switched off while composing
+                digest?.copy(kind = kind)
+            },
+            claim = { kind, key -> claims[kind] = key; true },
+            poster = poster,
+            lastHarvestAtMs = { lastHarvest },
+            claimCoverageAlert = { true },
+            clock = { now },
+        )
+        outer = launch { s.runScheduled(DigestKind.DAILY) }
+        outer.join()
+        assertTrue(poster.posted.isEmpty())
+        assertTrue(claims.isEmpty())
+    }
 }

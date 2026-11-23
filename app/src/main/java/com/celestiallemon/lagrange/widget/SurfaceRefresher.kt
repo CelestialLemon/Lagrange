@@ -155,7 +155,7 @@ class SurfaceRefresher(private val app: Application, private val graph: AppGraph
                 lastEndedMs = lastEnded?.endMs,
                 longestFocusGapMs = rollup?.longestFocusGapMs ?: 0,
                 lastHarvestAtMs = graph.database.ingestionStateDao().get(IngestionKeys.LAST_HARVEST_AT_MS),
-                dataThroughMs = ctx.derivedThroughMs.takeIf { it != Long.MIN_VALUE },
+                dataThroughMs = ctx.derivedThroughMs.takeIf { it > 0L }, // 0 or MIN: a rebuild is pending, nothing to date
                 frictionEnabled = prefs.frictionEnabled,
                 accessibilityConnected = LagrangeAccessibilityService.readyState.value,
                 focusBoostUntilMs = wall(live.focusBoostUntilElapsedMs),

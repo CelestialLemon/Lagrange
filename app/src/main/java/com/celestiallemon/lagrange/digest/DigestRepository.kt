@@ -64,7 +64,8 @@ class DigestRepository(
                 biggestRabbitHole = biggestRabbitHole(ctx, window),
                 exits = exits(window),
                 currentBudgetMs = preferences.current().dailyBudgetMs,
-                recordedThrough = if (tail && ctx.derivedThroughMs != Long.MIN_VALUE) {
+                // A pending full rebuild reports 0 (nothing derived is trusted): no real instant to name then.
+                recordedThrough = if (tail && ctx.derivedThroughMs > 0L) {
                     Instant.ofEpochMilli(ctx.derivedThroughMs).atZone(ctx.zones.zoneAt(ctx.derivedThroughMs)).toLocalDateTime()
                 } else {
                     null

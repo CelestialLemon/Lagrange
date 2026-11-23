@@ -96,7 +96,9 @@ object WidgetStateCalculator {
             // Redraw when the data goes stale, so "On track" can't outlive the last rebuild unnoticed.
             dataThrough?.let { it + STALE_TAIL_MS + 1 }?.takeIf { it > input.nowMs },
         ).minOrNull()
-        val dayGap = input.dayCoverage == DayCoverage.PARTIAL_HARVEST || input.dayStatus == DayStatus.UNCERTAIN_COVERAGE
+        // Unknown coverage or status on an existing rollup (a newer writer) is never presented as a whole day.
+        val dayGap = input.dayCoverage == DayCoverage.PARTIAL_HARVEST || input.dayStatus == DayStatus.UNCERTAIN_COVERAGE ||
+            (input.hasRollup && (input.dayCoverage == null || input.dayStatus == null))
         val (streakLabel, streakText) = if (tailStale || dayGap) "Phone-free" to "—" else streak(input, clock)
         // A stretch measured across a collection gap could hide pickups, so a gap day shows no "longest".
         val longest = if (input.hasRollup && !dayGap && input.longestFocusGapMs > 0) DigestComposer.duration(input.longestFocusGapMs) else "—"

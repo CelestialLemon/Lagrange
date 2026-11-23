@@ -192,7 +192,10 @@ object DigestScheduler {
     suspend fun scheduleNext(context: Context, kind: DigestKind, settings: suspend () -> Settings) = lock.withLock {
         withContext(Dispatchers.IO + NonCancellable) {
             val current = settings()
-            if (current.enabled(kind)) enqueue(context, current, kind)?.result?.get()
+            val wm = WorkManager.getInstance(context)
+            // Either way the finishing run is retired before the lock is released, so ensureScheduled never sees it
+            // as RUNNING afterwards (an off-then-on toggle racing the end of a run can't be left with no successor).
+            if (current.enabled(kind)) enqueue(context, current, kind)?.result?.get() else wm.cancelUniqueWork(uniqueName(kind)).result.get()
         }
     }
 

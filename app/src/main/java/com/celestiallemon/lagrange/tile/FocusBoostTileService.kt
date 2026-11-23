@@ -52,6 +52,7 @@ class FocusBoostTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         listening?.cancel()
+        hydrated = false // a reused instance must not act on what it saw before the shade last closed
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
         listening = scope
         if (graph.startupState.value != StartupGate.State.Ready) renderUnready(failed = false)
@@ -87,6 +88,7 @@ class FocusBoostTileService : TileService() {
     override fun onStopListening() {
         listening?.cancel()
         listening = null
+        hydrated = false
         super.onStopListening()
     }
 

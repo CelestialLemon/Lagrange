@@ -63,8 +63,8 @@ class DigestSchedulerWorkTest {
         DigestScheduler.scheduleNext(context, DigestKind.DAILY) { on }
         DigestScheduler.scheduleNext(context, DigestKind.DAILY) { on }
         assertEquals(1, pending(DigestKind.DAILY).size)
-        // A run handed off while the digest was turned off schedules nothing.
-        DigestScheduler.ensureScheduled(context, on.copy(dailyEnabled = false), zone = zone)
+        // A run handed off while the digest was turned off retires the chain itself, so nothing is left RUNNING
+        // for ensureScheduled to "keep" after the lock is released.
         DigestScheduler.scheduleNext(context, DigestKind.DAILY) { on.copy(dailyEnabled = false) }
         assertTrue(pending(DigestKind.DAILY).isEmpty())
     }

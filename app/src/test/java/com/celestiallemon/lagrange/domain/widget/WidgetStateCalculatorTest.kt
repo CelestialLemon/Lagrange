@@ -120,4 +120,14 @@ class WidgetStateCalculatorTest {
         assertEquals("1h 35m", whole.longestText)
         assertEquals("T+-60", whole.streakText)
     }
+
+    @Test
+    fun `unknown coverage or status on a rollup is never a whole day`() {
+        val unknown = WidgetStateCalculator.compute(input(coverage = null, lastEnded = now - hour), clock)
+        assertEquals(WidgetStatus.COVERAGE_GAP, unknown.status)
+        assertEquals("≥ 30m", unknown.usedText)
+        assertEquals("—", unknown.longestText)
+        // A pending full rebuild (no trusted watermark) is a gap, never "As of 00:00".
+        assertEquals("Coverage gap", WidgetStateCalculator.compute(input(dataThrough = null), clock).statusLabel)
+    }
 }

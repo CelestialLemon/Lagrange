@@ -137,4 +137,15 @@ class DigestRepositoryTest {
         // The run was due Tuesday 20:00, but the wall clock now reads Monday 21:00.
         assertEquals("2026-W48", repo.composeWeekly(dueAtMs = at(tuesday, 20))!!.key)
     }
+
+    @Test
+    fun `a pending full rebuild never names 1970 as the last recording`() = runBlocking {
+        recordedThrough(now)
+        db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.DERIVED_PENDING_FROM_MS, 0L))
+        db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.DERIVED_PENDING_TO_MS, Long.MAX_VALUE))
+        rollup(today, 20)
+        val d = repo.composeDaily(dueAtMs = now)!!
+        assertTrue(d.title, d.title.contains("at least 20m"))
+        assertFalse(d.coverageNote, d.coverageNote!!.contains("Thu"))
+    }
 }

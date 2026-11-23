@@ -3,6 +3,8 @@ package com.celestiallemon.lagrange.digest
 import com.celestiallemon.lagrange.domain.digest.Digest
 import com.celestiallemon.lagrange.domain.digest.DigestKind
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 
 /** Where digests go: the system notification shade in the app, a recorder in tests. */
@@ -41,6 +43,8 @@ class DigestService(
     suspend fun runScheduled(kind: DigestKind, dueAtMs: Long? = null): Outcome {
         if (!poster.canPost()) return Outcome.NOTIFICATIONS_OFF
         val digest = compose(kind, dueAtMs) ?: return Outcome.NOTHING_TO_SAY
+        // NonCancellable doesn't check on entry: a run cancelled during compose (digest just switched off) stops here.
+        currentCoroutineContext().ensureActive()
         // Claim, post and give back as one non-cancellable step: a cancellation can't land between a committed
         // claim and the post (which would make the retry skip a digest that was never shown).
         return withContext(NonCancellable) {
@@ -91,6 +95,7 @@ class DigestService(
         val last = lastHarvestAtMs() ?: return false
         val silent = clock() - last
         if (silent <= gapAlertMs || !poster.canPost()) return false
+        currentCoroutineContext().ensureActive()
         return withContext(NonCancellable) {
             claimPostRelease(
                 claim = { claimCoverageAlert(last) },
