@@ -19,15 +19,15 @@ measurement carries visible coverage so incomplete days never masquerade as quie
 
 ## What's in v1
 
-### The five tabs
+### Four tabs and Settings
 
 | Tab | What it shows |
 | --- | --- |
 | **Today** | Distracting time against your daily budget and weekday/weekend baseline, current and longest phone-free stretch, a Spike Autopsy or Good Day card, a day note, the category bar, and the reconstructed session timeline (tap a session for its hop chain, trigger evidence and a *"Worth it?"* rating). |
 | **Trends** | 7D to All-Time (or custom) charts with weekday/weekend splits, the budget line and coverage-gap shading, plus a searchable app list leading to the per-app deep dive. |
 | **Lab** | Rabbit Hole Explorer, Spike History, Gateway Apps, Notification Cost (with one-tap *Mute channel*), the circadian heatmap and Honest Friction Effectiveness (sustained exits, substitution, habituation). |
-| **Friction** | App categories and per-app friction, daily budget, escalation tiers and a healthy redirect, contextual schedules, 1-hour Snooze and Focus Boost, and Reflection Digest settings. |
-| **System** | Permission Health (including Android 17 Advanced Protection and hibernation checks), collection stats, backups and exports, the logical-day rollover, and the Debug Timeline Inspector. |
+| **Friction** | The current mode with 1-hour Snooze and Focus Boost, the daily budget, escalation tiers, a healthy redirect, contextual schedules, and the Apps list (categories and per-app friction). |
+| **Settings** (gear) | Permission Health (including Android 17 Advanced Protection and hibernation checks), collection stats, backups and exports, Reflection Digest settings, the logical-day rollover, and the Debug Timeline Inspector. |
 
 ### Gentle Friction
 
@@ -126,4 +126,6 @@ with a tested migration: the database never falls back to destructive migration.
 ## Tech
 
 Kotlin, Jetpack Compose with Material 3, Jetpack Glance, Room, WorkManager, DataStore. `minSdk 33`, `targetSdk 37`.
-See [`docs/DESIGN_SPEC.md`](docs/DESIGN_SPEC.md) for the full design.
+See [`docs/DESIGN_SPEC.md`](docs/DESIGN_SPEC.md) for the full design and [`docs/DESIGN_SYSTEM.md`](docs/DESIGN_SYSTEM.md) for
+the UI design system (colour, type, motion, components). The display face, Fraunces, is bundled under the SIL Open
+Font License ([`docs/licenses/Fraunces-OFL.txt`](docs/licenses/Fraunces-OFL.txt)).

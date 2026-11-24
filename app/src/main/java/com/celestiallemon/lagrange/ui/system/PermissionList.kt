@@ -40,9 +40,15 @@ import androidx.compose.ui.unit.dp
 import com.celestiallemon.lagrange.system.Check
 import com.celestiallemon.lagrange.system.PermissionHealth
 import com.celestiallemon.lagrange.system.PermissionHealthChecker
-import com.celestiallemon.lagrange.ui.components.StatusPill
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
-import com.celestiallemon.lagrange.ui.theme.Space
+import androidx.compose.foundation.background
+import androidx.compose.material3.FilledTonalButton
+import com.celestiallemon.lagrange.ui.components.LeadingIcon
+import com.celestiallemon.lagrange.ui.components.ListRow
+import com.celestiallemon.lagrange.ui.components.RowGroup
+import com.celestiallemon.lagrange.ui.components.SwitchRow
+import com.celestiallemon.lagrange.ui.components.Tag
+import com.celestiallemon.lagrange.ui.theme.Spacing
+import com.celestiallemon.lagrange.ui.theme.Tone
 
 /** Tries each intent in turn (OEM settings apps differ), ending at App info, which always exists. */
 private fun Context.launch(vararg intents: Intent) {
@@ -62,10 +68,10 @@ private fun Context.launch(vararg intents: Intent) {
 @Composable
 fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> Unit) {
     val context = LocalContext.current
-    val status = LocalStatusColors.current
+    val status = PermissionTones
     val notifLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { onChanged() }
 
-    Column(verticalArrangement = Arrangement.spacedBy(Space.m)) {
+    RowGroup {
         PermissionRow(
             icon = Icons.Outlined.DataUsage,
             title = "Usage Access",
@@ -81,9 +87,7 @@ fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> 
             action = if (health.notificationAccess) null else "Grant" to { context.launch(PermissionHealthChecker.notificationAccessIntent(context), PermissionHealthChecker.notificationAccessListIntent()) },
         )
         RestrictedSettingsHint { context.launch(PermissionHealthChecker.appInfoIntent(context)) }
-        if (compact) return@Column
-
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+        if (compact) return@RowGroup
         PermissionRow(
             icon = Icons.Outlined.AccessibilityNew,
             title = "Accessibility (gentle friction)",
@@ -147,28 +151,40 @@ fun PermissionList(health: PermissionHealth, compact: Boolean, onChanged: () -> 
     }
 }
 
+/** Status tones for permission rows, named like the old status colours so the rules above read the same. */
+private object PermissionTones {
+    val good = Tone.Good
+    val warn = Tone.Caution
+    val bad = Tone.Critical
+    val neutral = Tone.Neutral
+}
+
+/** One permission: what it's for, whether it's on, and the one thing to do about it. */
 @Composable
 private fun PermissionRow(
     icon: ImageVector,
     title: String,
     body: String,
-    state: Pair<String, Color>,
+    state: Pair<String, Tone>,
     action: Pair<String, () -> Unit>?,
 ) {
-    Row(verticalAlignment = Alignment.Top, modifier = Modifier.fillMaxWidth()) {
-        Icon(icon, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 2.dp))
-        Spacer(Modifier.width(Space.m))
-        Column(Modifier.weight(1f)) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceContainerLow)
+            .padding(horizontal = Spacing.l, vertical = Spacing.m),
+        verticalAlignment = Alignment.Top,
+    ) {
+        LeadingIcon(icon, if (state.second == Tone.Neutral) Tone.Neutral else state.second)
+        Spacer(Modifier.width(Spacing.l))
+        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(title, style = MaterialTheme.typography.titleSmall, modifier = Modifier.weight(1f))
-                StatusPill(state.first, state.second)
+                Text(title, style = MaterialTheme.typography.bodyLarge, modifier = Modifier.weight(1f))
+                Tag(state.first, tone = state.second)
             }
-            Spacer(Modifier.height(Space.xs))
-            Text(body, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(body, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (action != null) {
-                TextButton(onClick = action.second, contentPadding = PaddingValues(0.dp)) {
-                    Text(action.first)
-                }
+                FilledTonalButton(onClick = action.second, modifier = Modifier.padding(top = Spacing.xs)) { Text(action.first) }
             }
         }
     }
@@ -176,36 +192,22 @@ private fun PermissionRow(
 
 @Composable
 private fun RestrictedSettingsHint(onOpen: () -> Unit) {
-    Row(verticalAlignment = Alignment.Top) {
-        Icon(Icons.Outlined.Info, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(top = 2.dp))
-        Spacer(Modifier.width(Space.m))
-        Column(Modifier.weight(1f)) {
-            Text(
-                "Toggle greyed out? Android blocks these for sideloaded apps until you open App info → ⋮ → Allow restricted settings.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            TextButton(onClick = onOpen, contentPadding = PaddingValues(0.dp)) { Text("Open App info") }
-        }
-    }
+    ListRow(
+        headline = "Switch greyed out?",
+        supporting = "Android blocks these for sideloaded apps until you open App info → ⋮ → Allow restricted settings.",
+        supportingLines = 4,
+        leading = { LeadingIcon(Icons.Outlined.Info, Tone.Brand) },
+        trailing = { TextButton(onClick = onOpen) { Text("App info") } },
+    )
 }
 
 @Composable
-private fun BatteryRow(unrestricted: Boolean, good: Color, neutral: Color, onToggle: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
-        Icon(Icons.Outlined.BatteryChargingFull, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
-        Spacer(Modifier.width(Space.m))
-        Column(Modifier.weight(1f)) {
-            Text("Unrestricted battery", style = MaterialTheme.typography.titleSmall)
-            Text(
-                "Troubleshooting only: turn on if harvests are missed while the phone dozes.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(Modifier.height(Space.xs))
-            StatusPill(if (unrestricted) "Unrestricted" else "Optimized (default)", if (unrestricted) good else neutral)
-        }
-        Spacer(Modifier.width(Space.s))
-        Switch(checked = unrestricted, onCheckedChange = onToggle)
-    }
+private fun BatteryRow(unrestricted: Boolean, @Suppress("UNUSED_PARAMETER") good: Tone, @Suppress("UNUSED_PARAMETER") neutral: Tone, onToggle: (Boolean) -> Unit) {
+    SwitchRow(
+        "Unrestricted battery",
+        checked = unrestricted,
+        onCheckedChange = onToggle,
+        supporting = "Troubleshooting only: turn on if recording falls behind while the phone sleeps.",
+        leading = { LeadingIcon(Icons.Outlined.BatteryChargingFull) },
+    )
 }

@@ -1,10 +1,8 @@
 package com.celestiallemon.lagrange.ui.trends
 
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
@@ -15,17 +13,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.TrendingDown
+import androidx.compose.material.icons.automirrored.outlined.TrendingFlat
+import androidx.compose.material.icons.automirrored.outlined.TrendingUp
 import androidx.compose.material.icons.outlined.DateRange
-import androidx.compose.material.icons.outlined.TrendingDown
-import androidx.compose.material.icons.outlined.TrendingFlat
-import androidx.compose.material.icons.outlined.TrendingUp
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.DateRangePicker
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
-import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SelectableDates
@@ -40,15 +36,17 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.domain.DateRange
 import com.celestiallemon.lagrange.domain.DayAverage
 import com.celestiallemon.lagrange.domain.DayQuality
@@ -58,12 +56,15 @@ import com.celestiallemon.lagrange.domain.TrendPoint
 import com.celestiallemon.lagrange.domain.TrendWindow
 import com.celestiallemon.lagrange.domain.WeekSplit
 import com.celestiallemon.lagrange.domain.WindowKind
-import com.celestiallemon.lagrange.ui.components.StatusPill
+import com.celestiallemon.lagrange.ui.components.Stat
+import com.celestiallemon.lagrange.ui.components.StatStrip
+import com.celestiallemon.lagrange.ui.components.Tag
 import com.celestiallemon.lagrange.ui.formatDay
 import com.celestiallemon.lagrange.ui.formatDurationShort
-import com.celestiallemon.lagrange.ui.theme.EyebrowStyle
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
-import com.celestiallemon.lagrange.ui.theme.Space
+import com.celestiallemon.lagrange.ui.theme.Lagrange
+import com.celestiallemon.lagrange.ui.theme.NumberStyles
+import com.celestiallemon.lagrange.ui.theme.Spacing
+import com.celestiallemon.lagrange.ui.theme.Tone
 import com.celestiallemon.lagrange.ui.today.dayStatusOf
 import java.time.DayOfWeek
 import java.time.Instant
@@ -113,31 +114,29 @@ val DayQuality.label: String
         DayQuality.NO_DATA -> "No data"
     }
 
-@Composable
-fun qualityColor(q: DayQuality): Color {
-    val status = LocalStatusColors.current
-    return when (q) {
-        DayQuality.COVERED -> status.good
-        DayQuality.BACKFILL -> MaterialTheme.colorScheme.secondary
-        DayQuality.PARTIAL -> status.warn
-        DayQuality.IN_PROGRESS -> MaterialTheme.colorScheme.primary
-        DayQuality.NO_DATA -> status.neutral
+val DayQuality.tone: Tone
+    get() = when (this) {
+        DayQuality.COVERED -> Tone.Good
+        DayQuality.BACKFILL -> Tone.Neutral
+        DayQuality.PARTIAL -> Tone.Caution
+        DayQuality.IN_PROGRESS -> Tone.Brand
+        DayQuality.NO_DATA -> Tone.Neutral
     }
-}
 
 private fun LocalDate.utcMillis(): Long = atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli()
 
 private fun Long.utcDate(): LocalDate = Instant.ofEpochMilli(this).atZone(ZoneOffset.UTC).toLocalDate()
+
 
 // -- Window selector -----------------------------------------------------------------------------------------------
 
 /** `7D · 30D · 90D · 1Y · All · Custom`; Custom opens a Material date-range picker limited to [today]. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun WindowChips(window: TrendWindow, today: LocalDate?, earliest: LocalDate?, onWindow: (TrendWindow) -> Unit, range: DateRange?) {
+fun WindowChips(window: TrendWindow, today: LocalDate?, earliest: LocalDate?, onWindow: (TrendWindow) -> Unit, range: DateRange?, modifier: Modifier = Modifier) {
     var picking by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Space.s)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
             WindowKind.entries.forEach { k ->
                 FilterChip(
                     selected = window.kind == k,
@@ -184,22 +183,25 @@ fun WindowChips(window: TrendWindow, today: LocalDate?, earliest: LocalDate?, on
 
 // -- Delta + coverage ----------------------------------------------------------------------------------------------
 
-/** "▼ 14% vs previous 30 days", coloured by whether that is good for this metric; or why there's no comparison. */
+/**
+ * The change against the previous period as one tag ("▼ 14% vs previous 30 days"), toned by whether that's good
+ * for this metric; or, in plain words, why there is no fair comparison.
+ */
 @Composable
-fun DeltaLine(delta: PeriodDelta, unit: MetricUnit, higherIsBetter: Boolean, allTime: Boolean) {
-    val status = LocalStatusColors.current
+fun DeltaLine(delta: PeriodDelta, unit: MetricUnit, higherIsBetter: Boolean, allTime: Boolean, modifier: Modifier = Modifier) {
     val prev = delta.previous
     when {
         allTime || prev == null -> Text(
-            "All-time has no earlier period to compare against.",
+            "All of history: nothing earlier to compare with.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier,
         )
         !delta.sufficient -> Text(
-            "Not enough covered days to compare yet: ${delta.current.coveredDays} now and ${prev.coveredDays} before; " +
-                "each side needs ${delta.minCoveredDays}.",
+            "Not compared yet: ${delta.current.coveredDays} covered days now, ${prev.coveredDays} before (each side needs ${delta.minCoveredDays}).",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = modifier,
         )
         else -> {
             val d = delta.deltaMean!!
@@ -207,134 +209,123 @@ fun DeltaLine(delta: PeriodDelta, unit: MetricUnit, higherIsBetter: Boolean, all
             val magnitude = if (pct != null) formatPct(pct) else formatMetric(abs(d), unit)
             val flat = abs(d) < 1e-9 || (pct != null && abs(pct) < 0.02) || (pct == null && (magnitude == "0" || magnitude == "0m"))
             val better = if (higherIsBetter) d > 0 else d < 0
-            val color = when {
-                flat -> status.neutral
-                better -> status.good
-                else -> status.warn
+            val tone = when {
+                flat -> Tone.Neutral
+                better -> Tone.Good
+                else -> Tone.Ember
             }
             val icon = when {
-                flat -> Icons.Outlined.TrendingFlat
-                d > 0 -> Icons.Outlined.TrendingUp
-                else -> Icons.Outlined.TrendingDown
+                flat -> Icons.AutoMirrored.Outlined.TrendingFlat
+                d > 0 -> Icons.AutoMirrored.Outlined.TrendingUp
+                else -> Icons.AutoMirrored.Outlined.TrendingDown
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, null, tint = color, modifier = Modifier.size(20.dp))
-                Spacer(Modifier.width(Space.s))
-                Text(
-                    when {
-                        flat -> "About the same as the previous ${prev.range.days} days"
-                        else -> "$magnitude ${if (d > 0) "higher" else "lower"} than the previous ${prev.range.days} days"
-                    },
-                    style = MaterialTheme.typography.titleSmall,
-                    color = color,
-                )
-            }
-            Text(
-                "Daily mean ${formatMetric(delta.current.mean, unit)} vs ${formatMetric(prev.mean, unit)} · median " +
-                    "${formatMetric(delta.current.median, unit)} vs ${formatMetric(prev.median, unit)} · " +
-                    "${delta.current.coveredDays} vs ${prev.coveredDays} covered days",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            Tag(
+                if (flat) "Same as previous ${prev.range.days} days" else "$magnitude ${if (d > 0) "higher" else "lower"} than previous ${prev.range.days} days",
+                tone = tone,
+                icon = icon,
+                modifier = modifier,
             )
         }
     }
 }
 
+/** The numbers behind a delta, for an info sheet. */
+fun deltaDetail(delta: PeriodDelta, unit: MetricUnit): String? {
+    val prev = delta.previous ?: return null
+    return "Daily mean ${formatMetric(delta.current.mean, unit)} vs ${formatMetric(prev.mean, unit)}; median " +
+        "${formatMetric(delta.current.median, unit)} vs ${formatMetric(prev.median, unit)}; " +
+        "${delta.current.coveredDays} vs ${prev.coveredDays} covered days."
+}
+
+/**
+ * How many days each bar style stands for, using the same marks as the chart: solid for covered, hatched for
+ * partial, faint for no data. Reading the legend teaches the chart.
+ */
 @Composable
-fun CoveragePills(covered: Int, partial: Int, noData: Int, inProgress: Int) {
-    val status = LocalStatusColors.current
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-        StatusPill("$covered covered", status.good)
-        if (partial > 0) StatusPill("$partial partial", status.warn)
-        if (noData > 0) StatusPill("$noData no data", status.neutral)
-        if (inProgress == 1) StatusPill("1 day in progress", MaterialTheme.colorScheme.primary)
-        if (inProgress > 1) StatusPill("$inProgress days in progress", MaterialTheme.colorScheme.primary)
+fun CoverageLegend(covered: Int, partial: Int, noData: Int, inProgress: Int, bar: Color, modifier: Modifier = Modifier) {
+    val hatch = Lagrange.colors.viz.hatch
+    FlowRow(modifier, horizontalArrangement = Arrangement.spacedBy(Spacing.l), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+        LegendItem("$covered covered") { drawRoundRect(bar, cornerRadius = CornerRadius(3.dp.toPx())) }
+        if (partial > 0) LegendItem("$partial partial") { hatchRect(Rect(Offset.Zero, size), hatch.copy(alpha = 0.8f), 3.dp.toPx()); drawRoundRect(hatch, style = Stroke(1.dp.toPx()), cornerRadius = CornerRadius(3.dp.toPx())) }
+        if (noData > 0) LegendItem("$noData no data") { hatchRect(Rect(Offset.Zero, size), hatch.copy(alpha = 0.3f), 3.dp.toPx()) }
+        if (inProgress > 0) LegendItem(if (inProgress == 1) "today so far" else "$inProgress in progress") { drawRoundRect(bar.copy(alpha = 0.38f), cornerRadius = CornerRadius(3.dp.toPx())) }
     }
 }
 
-/** Legend for the trend chart: the bars, the averages that are switched on, and the reference line. */
+@Composable
+private fun LegendItem(text: String, swatch: androidx.compose.ui.graphics.drawscope.DrawScope.() -> Unit) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Canvas(Modifier.size(width = 10.dp, height = 14.dp), onDraw = swatch)
+        Spacer(Modifier.width(6.dp))
+        Text(text, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+    }
+}
+
+/** Legend for the trend chart: the averages (tap to show or hide) and the reference line. */
 @Composable
 fun ChartLegend(ma7: Boolean, ma28: Boolean, reference: String?, colors: TrendColors, onToggle7: () -> Unit, onToggle28: () -> Unit, dayMarkers: Boolean = false) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-        FilterChip(
-            selected = ma7,
-            onClick = onToggle7,
-            label = { Text("7-day avg") },
-            leadingIcon = { LegendSwatch(colors.ma7) },
-            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = colors.ma7.copy(alpha = 0.16f)),
-        )
-        FilterChip(
-            selected = ma28,
-            onClick = onToggle28,
-            label = { Text("28-day avg") },
-            leadingIcon = { LegendSwatch(colors.ma28) },
-            colors = FilterChipDefaults.filterChipColors(selectedContainerColor = colors.ma28.copy(alpha = 0.16f)),
-        )
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.s), verticalArrangement = Arrangement.spacedBy(Spacing.xs), itemVerticalAlignment = Alignment.CenterVertically) {
+        FilterChip(selected = ma7, onClick = onToggle7, label = { Text("7-day avg") }, leadingIcon = { LineSwatch(colors.ma7, dashed = false) })
+        FilterChip(selected = ma28, onClick = onToggle28, label = { Text("28-day avg") }, leadingIcon = { LineSwatch(colors.ma28, dashed = true) })
         if (reference != null) {
-            Row(Modifier.padding(vertical = Space.s), verticalAlignment = Alignment.CenterVertically) {
-                LegendSwatch(colors.reference)
+            Row(Modifier.padding(start = Spacing.xs), verticalAlignment = Alignment.CenterVertically) {
+                LineSwatch(colors.reference, dashed = true)
                 Spacer(Modifier.width(6.dp))
                 Text(reference, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
         if (dayMarkers) {
-            listOf("Spike day" to colors.spike, "Good day" to colors.good).forEach { (label, c) ->
-                Row(Modifier.padding(vertical = Space.s), verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(8.dp).clip(CircleShape).background(c))
-                    Spacer(Modifier.width(6.dp))
-                    Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
+            Text("● spike  ● good day".let { it }, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(start = Spacing.xs))
         }
     }
 }
 
 @Composable
-private fun LegendSwatch(color: Color) {
-    Box(
-        Modifier
-            .size(width = 14.dp, height = 4.dp)
-            .clip(CircleShape)
-            .background(color),
-    )
+private fun LineSwatch(color: Color, dashed: Boolean) {
+    Canvas(Modifier.size(width = 16.dp, height = 4.dp)) {
+        if (dashed) {
+            drawLine(color, Offset(0f, size.height / 2), Offset(size.width * 0.4f, size.height / 2), strokeWidth = size.height)
+            drawLine(color, Offset(size.width * 0.6f, size.height / 2), Offset(size.width, size.height / 2), strokeWidth = size.height)
+        } else {
+            drawRoundRect(color, cornerRadius = CornerRadius(size.height / 2))
+        }
+    }
 }
 
-/** The tapped day: date, value, averages, coverage and day-status badges. */
+/** The tapped day, shown under the chart: date, value, averages and what kind of day it was. */
 @Composable
 fun DayCallout(p: TrendPoint, unit: MetricUnit, valueLabel: String, secondaryLabel: String?) {
     val s = p.sample
     Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+        Column(Modifier.padding(Spacing.l), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(formatDay(p.date), style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                StatusPill(s.quality.label, qualityColor(s.quality))
+                when (dayStatusOf(s.dayStatus?.name)) {
+                    DayStatus.SPIKE -> Tag("Spike", tone = Tone.Ember)
+                    DayStatus.GOOD_DAY -> Tag("Good day", tone = Tone.Good)
+                    else -> Unit
+                }
+                Spacer(Modifier.width(Spacing.xs))
+                Tag(s.quality.label, tone = s.quality.tone)
             }
             if (s.value != null) {
-                Text("$valueLabel ${formatMetric(s.value, unit)}" + (secondaryLabel?.let { l -> s.secondary?.let { " · $l ${formatMetric(it, unit)}" } } ?: ""), style = MaterialTheme.typography.bodyLarge)
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(formatMetric(s.value, unit), style = NumberStyles.stat)
+                    Spacer(Modifier.width(Spacing.s))
+                    Text(
+                        valueLabel.lowercase() + (secondaryLabel?.let { l -> s.secondary?.let { " · ${formatMetric(it, unit)} $l" } } ?: ""),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                }
             } else {
                 Text("Nothing was recorded this day, so it is left out rather than counted as zero.", style = MaterialTheme.typography.bodyMedium)
             }
             val avgs = listOfNotNull(p.ma7?.let { "7-day ${formatMetric(it, unit)}" }, p.ma28?.let { "28-day ${formatMetric(it, unit)}" }, p.reference?.let { "line ${formatMetric(it, unit)}" })
-            if (avgs.isNotEmpty()) {
-                Text(avgs.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            dayStatusOf(s.dayStatus?.name)?.let { st ->
-                val text = when (st) {
-                    com.celestiallemon.lagrange.data.db.DayStatus.SPIKE -> "Spike day vs its baseline"
-                    com.celestiallemon.lagrange.data.db.DayStatus.GOOD_DAY -> "Good day vs its baseline"
-                    else -> null
-                }
-                if (text != null) {
-                    val c = if (st == com.celestiallemon.lagrange.data.db.DayStatus.SPIKE) LocalStatusColors.current.bad else LocalStatusColors.current.good
-                    StatusPill(text, c)
-                }
-            }
+            if (avgs.isNotEmpty()) Text(avgs.joinToString(" · "), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (!s.quality.countsAsCovered && s.value != null) {
-                Text(
-                    "Shown as observed, but left out of averages and comparisons.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
+                Text("Shown as observed, but left out of averages and comparisons.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
     }
@@ -343,31 +334,26 @@ fun DayCallout(p: TrendPoint, unit: MetricUnit, valueLabel: String, secondaryLab
 // -- Weekday vs weekend --------------------------------------------------------------------------------------------
 
 @Composable
-fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
+fun WeekSplitContent(split: WeekSplit, unit: MetricUnit, bar: Color) {
     if (!split.visible) {
         Text(
-            "Weekday and weekend averages unlock after ${split.minCoveredDays} covered days in this window (${split.coveredDays} so far). " +
-                "Partial and missing days never count.",
+            "Unlocks after ${split.minCoveredDays} covered days in this window (${split.coveredDays} so far). Partial and missing days never count.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         return
     }
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Space.s)) {
-        SplitTile("Weekdays", split.weekday, unit, Modifier.weight(1f))
-        SplitTile("Weekends", split.weekend, unit, Modifier.weight(1f))
+    StatStrip {
+        Stat("Weekdays", formatMetric(split.weekday.mean, unit), Modifier.weight(1f), caption = "${split.weekday.days} covered days")
+        Stat("Weekends", formatMetric(split.weekend.mean, unit), Modifier.weight(1f), caption = "${split.weekend.days} covered days")
     }
     val means = split.byDayOfWeek.values.mapNotNull { it.mean }
     val maxAbs = means.maxOfOrNull { abs(it) }?.takeIf { it > 0 } ?: 1.0
     // Net metrics (valued minus regretted) can be negative: then bars grow both ways from a centre line.
     val diverging = means.any { it < 0 }
-    val primary = MaterialTheme.colorScheme.primary
-    val tertiary = MaterialTheme.colorScheme.tertiary
     val axis = MaterialTheme.colorScheme.outlineVariant
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(Space.s),
-    ) {
+    val track = MaterialTheme.colorScheme.surfaceContainerHighest
+    Row(Modifier.fillMaxWidth().padding(top = Spacing.s), horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {
         DayOfWeek.entries.forEach { dow ->
             val a = split.byDayOfWeek[dow] ?: DayAverage(null, 0)
             val weekend = dow == DayOfWeek.SATURDAY || dow == DayOfWeek.SUNDAY
@@ -376,50 +362,27 @@ fun WeekSplitContent(split: WeekSplit, unit: MetricUnit) {
                 Modifier
                     .weight(1f)
                     .clearAndSetSemantics {
-                        contentDescription = if (a.mean == null) "$name: no covered days"
-                        else "$name: ${formatMetric(a.mean, unit)} on average over ${a.days} covered days"
+                        contentDescription = if (a.mean == null) "$name: no covered days" else "$name: ${formatMetric(a.mean, unit)} on average over ${a.days} covered days"
                     },
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                Text(
-                    formatMetric(a.mean, unit),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Clip,
-                )
-                Spacer(Modifier.height(2.dp))
+                Text(formatMetric(a.mean, unit), style = NumberStyles.axis, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Clip)
+                Spacer(Modifier.height(4.dp))
                 val frac = ((a.mean ?: 0.0) / maxAbs).toFloat().coerceIn(-1f, 1f)
-                val color = if (weekend) tertiary.copy(alpha = if (a.days > 0) 1f else 0.2f) else primary.copy(alpha = if (a.days > 0) 0.75f else 0.2f)
-                Canvas(
-                    Modifier
-                        .fillMaxWidth(0.7f)
-                        .height(64.dp),
-                ) {
+                val color = bar.copy(alpha = if (a.days == 0) 0.2f else if (weekend) 1f else 0.7f)
+                Canvas(Modifier.fillMaxWidth(0.62f).height(72.dp)) {
+                    val r = CornerRadius(6.dp.toPx())
+                    if (!diverging) drawRoundRect(track, cornerRadius = r)
                     val base = if (diverging) size.height / 2f else size.height
                     val room = if (diverging) size.height / 2f else size.height
                     val h = (abs(frac) * room).coerceAtLeast(2.dp.toPx())
                     val top = if (frac >= 0f) base - h else base
-                    val r = 6.dp.toPx().coerceAtMost(h / 2f)
-                    drawRoundRect(color, topLeft = Offset(0f, top), size = Size(size.width, h), cornerRadius = CornerRadius(r, r))
+                    drawRoundRect(color, topLeft = Offset(0f, top), size = Size(size.width, h), cornerRadius = CornerRadius(minOf(r.x, h / 2f)))
                     if (diverging) drawLine(axis, Offset(-size.width * 0.3f, base), Offset(size.width * 1.3f, base), strokeWidth = 1.dp.toPx())
                 }
                 Spacer(Modifier.height(4.dp))
-                Text(dow.getDisplayName(TextStyle.NARROW, Locale.getDefault()), style = MaterialTheme.typography.labelMedium)
-                Text("n=${a.days}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(dow.getDisplayName(TextStyle.NARROW, Locale.getDefault()), style = MaterialTheme.typography.labelMedium, color = if (weekend) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
             }
-        }
-    }
-}
-
-@Composable
-private fun SplitTile(label: String, a: DayAverage, unit: MetricUnit, modifier: Modifier) {
-    Surface(modifier = modifier, shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-        Column(Modifier.padding(Space.m)) {
-            Text(label.uppercase(), style = EyebrowStyle, color = MaterialTheme.colorScheme.primary)
-            Spacer(Modifier.height(Space.xs))
-            Text(formatMetric(a.mean, unit), style = MaterialTheme.typography.headlineSmall)
-            Text("${a.days} covered days", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }
