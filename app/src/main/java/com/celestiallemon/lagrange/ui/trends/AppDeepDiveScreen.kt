@@ -186,7 +186,8 @@ fun AppDeepDiveScreen(
     if (editingCategory && category != null) {
         CategorySheet(category, onDismiss = { editingCategory = false }) {
             editingCategory = false
-            if (it != category) vm.setCategory(pkgId, it)
+            // Saved even when unchanged: saving is an explicit choice, and it confirms a suggested category.
+            vm.setCategory(pkgId, it)
         }
     }
     if (editingGoal) {

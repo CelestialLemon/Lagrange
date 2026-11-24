@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDropDown
+import androidx.compose.material.icons.outlined.Check
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -160,9 +161,11 @@ private fun CategoryMenu(category: AppCategory, onChange: (AppCategory) -> Unit)
                         }
                     },
                     leadingIcon = { Dot(categoryColor(c), size = 10.dp) },
+                    trailingIcon = if (c == category) ({ Icon(Icons.Outlined.Check, contentDescription = "Current") }) else null,
+                    // Always reported, even when unchanged: choosing a category is also how a suggestion is confirmed.
                     onClick = {
                         open = false
-                        if (c != category) onChange(c)
+                        onChange(c)
                     },
                 )
             }
