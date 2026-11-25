@@ -6,10 +6,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import com.celestiallemon.lagrange.ui.LagrangeRoot
 import com.celestiallemon.lagrange.ui.MainViewModel
+import com.celestiallemon.lagrange.ui.components.LocalAppIconLoader
 
 class MainActivity : ComponentActivity() {
     private val main: MainViewModel by viewModels()
@@ -24,7 +26,10 @@ class MainActivity : ComponentActivity() {
             override fun onStart(owner: LifecycleOwner) = main.onAppForeground()
             override fun onResume(owner: LifecycleOwner) = main.refreshHealth()
         })
-        setContent { LagrangeRoot(main) }
+        val appIcons = (application as LagrangeApplication).graph.appIcons
+        setContent {
+            CompositionLocalProvider(LocalAppIconLoader provides appIcons) { LagrangeRoot(main) }
+        }
     }
 
     /** singleTask: an open Lagrange brought forward by a widget, tile or digest tap is re-routed here. */

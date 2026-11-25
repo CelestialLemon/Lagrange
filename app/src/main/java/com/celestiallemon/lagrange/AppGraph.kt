@@ -1,7 +1,11 @@
 package com.celestiallemon.lagrange
 
 import android.app.Application
+import android.content.BroadcastReceiver
+import android.content.ComponentCallbacks2
+import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.provider.Settings
 import android.util.Log
@@ -39,6 +43,8 @@ import com.celestiallemon.lagrange.notifications.NotificationRecorder
 import com.celestiallemon.lagrange.harvest.WorkScheduler
 import com.celestiallemon.lagrange.notifications.LagrangeNotificationListenerService
 import com.celestiallemon.lagrange.system.DataReset
+import com.celestiallemon.lagrange.ui.icons.AppIconCache
+import com.celestiallemon.lagrange.ui.icons.PackageManagerIconSource
 import com.celestiallemon.lagrange.widget.SurfaceRefresher
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -165,6 +171,41 @@ class AppGraph(private val app: Application) {
     private val lastScreenOffHarvestElapsedMs = java.util.concurrent.atomic.AtomicLong(Long.MIN_VALUE)
 
     val catalog by lazy { AppCatalogRepository(database, interner, ::launchablePackages, packageResolver) }
+
+    /**
+     * Launcher icons for app rows, decoded off the main thread into a bounded memory cache. Touches no data, so the UI
+     * may use it before [awaitReady]. A package that is installed, updated or removed is dropped from it.
+     */
+    private val appIconsLazy = lazy(::createAppIcons)
+    val appIcons: AppIconCache by appIconsLazy
+
+    /**
+     * From [LagrangeApplication.onTrimMemory]: once backgrounded, give the decoded icons back. Rows still composed
+     * keep what they show without decoding again; anything else reloads on demand.
+     */
+    fun trimMemory(level: Int) {
+        if (level >= ComponentCallbacks2.TRIM_MEMORY_BACKGROUND && appIconsLazy.isInitialized()) appIcons.trimMemory()
+    }
+
+    private fun createAppIcons(): AppIconCache =
+        AppIconCache(PackageManagerIconSource(app)).also { cache ->
+            val packageChanges = IntentFilter().apply {
+                addAction(Intent.ACTION_PACKAGE_ADDED)
+                addAction(Intent.ACTION_PACKAGE_REPLACED)
+                addAction(Intent.ACTION_PACKAGE_CHANGED)
+                addAction(Intent.ACTION_PACKAGE_REMOVED)
+                addDataScheme("package")
+            }
+            app.registerReceiver(
+                object : BroadcastReceiver() {
+                    override fun onReceive(context: Context, intent: Intent) {
+                        intent.data?.schemeSpecificPart?.let(cache::invalidate)
+                    }
+                },
+                packageChanges,
+                Context.RECEIVER_NOT_EXPORTED,
+            )
+        }
 
     val backups by lazy {
         LagrangeBackups(app, database, preferences, restore, BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong())

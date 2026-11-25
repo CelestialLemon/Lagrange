@@ -156,21 +156,3 @@ fun LeadingIcon(icon: ImageVector, tone: Tone = Tone.Neutral, modifier: Modifier
         Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
     }
 }
-
-/** A leading letter avatar for an app, coloured by its category. */
-@Composable
-fun AppAvatar(name: String, color: Color, modifier: Modifier = Modifier) {
-    Box(
-        modifier
-            .size(40.dp)
-            .clip(MaterialTheme.shapes.small)
-            .background(color.copy(alpha = 0.16f)),
-        contentAlignment = Alignment.Center,
-    ) {
-        Text(
-            name.trim().firstOrNull()?.uppercase() ?: "?",
-            style = MaterialTheme.typography.titleMedium,
-            color = color,
-        )
-    }
-}
