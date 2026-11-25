@@ -69,7 +69,7 @@ import com.celestiallemon.lagrange.ui.EpisodeUi
 import com.celestiallemon.lagrange.ui.MainViewModel
 import com.celestiallemon.lagrange.ui.TodayState
 import com.celestiallemon.lagrange.ui.TodayViewModel
-import com.celestiallemon.lagrange.ui.components.AppAvatar
+import com.celestiallemon.lagrange.ui.components.AppIcon
 import com.celestiallemon.lagrange.ui.components.Banner
 import com.celestiallemon.lagrange.ui.components.BarRow
 import com.celestiallemon.lagrange.ui.components.Choice
@@ -484,7 +484,7 @@ private fun WhereItWent(s: TodayState, modifier: Modifier) {
                     value = "${formatDurationShort(a.totalMs)} · ${a.openCount}×",
                     fraction = a.totalMs.toFloat() / max,
                     color = color,
-                    leading = { AppAvatar(pkg?.displayName ?: "?", color) },
+                    leading = { AppIcon(pkg?.packageName, pkg?.displayName ?: "?", color) },
                 )
             }
         }

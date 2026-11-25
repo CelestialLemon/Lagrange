@@ -14,4 +14,9 @@ class LagrangeApplication : Application() {
         graph.start()
         WorkScheduler.schedulePeriodicHarvest(this)
     }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        if (::graph.isInitialized) graph.trimMemory(level)
+    }
 }

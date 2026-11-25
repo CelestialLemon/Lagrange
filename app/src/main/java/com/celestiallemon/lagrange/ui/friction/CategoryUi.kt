@@ -37,7 +37,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.celestiallemon.lagrange.data.CatalogApp
 import com.celestiallemon.lagrange.data.db.AppCategory
-import com.celestiallemon.lagrange.ui.components.AppAvatar
+import com.celestiallemon.lagrange.ui.components.AppIcon
 import com.celestiallemon.lagrange.ui.components.Dot
 import com.celestiallemon.lagrange.ui.theme.Lagrange
 import com.celestiallemon.lagrange.ui.theme.Spacing
@@ -95,7 +95,7 @@ fun AppCategoryRow(
             .padding(start = Spacing.l, end = Spacing.s, top = Spacing.m, bottom = Spacing.m),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            AppAvatar(app.displayName, color)
+            AppIcon(app.packageName, app.displayName, color)
             Spacer(Modifier.width(Spacing.l))
             Column(Modifier.weight(1f)) {
                 Text(app.displayName, style = MaterialTheme.typography.bodyLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)

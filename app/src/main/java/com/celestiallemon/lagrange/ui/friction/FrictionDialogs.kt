@@ -35,7 +35,7 @@ import com.celestiallemon.lagrange.data.db.FrictionScheduleEntity
 import com.celestiallemon.lagrange.domain.friction.AppFrictionOverride
 import com.celestiallemon.lagrange.domain.friction.FrictionSchedule
 import com.celestiallemon.lagrange.domain.friction.FrictionSettings
-import com.celestiallemon.lagrange.ui.components.AppAvatar
+import com.celestiallemon.lagrange.ui.components.AppIcon
 import com.celestiallemon.lagrange.ui.components.Choice
 import com.celestiallemon.lagrange.ui.components.EditSheet
 import com.celestiallemon.lagrange.ui.components.ListRow
@@ -232,7 +232,7 @@ fun RedirectAppPickerDialog(
                     app.displayName,
                     supporting = app.category.label,
                     tonal = false,
-                    leading = { AppAvatar(app.displayName, categoryColor(app.category)) },
+                    leading = { AppIcon(app.packageName, app.displayName, categoryColor(app.category)) },
                     onClick = { onSelect(app.packageName) },
                     trailing = { RadioButton(selected = currentPackage == app.packageName, onClick = null) },
                 )

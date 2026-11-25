@@ -132,6 +132,14 @@ data class VizColors(
     val selection: Color,
 )
 
+/**
+ * The light plate a legacy (non-adaptive) launcher icon sits on, as launchers set them: such icons are drawn for a
+ * light backing, so a dark glyph (a black logo) stays legible in dark theme too. Fixed, like the other meanings, so
+ * an app's icon looks the same on every phone. [edge] is a hairline that separates the plate from a light surface.
+ */
+@Immutable
+data class IconPlate(val fill: Color, val edge: Color)
+
 @Immutable
 data class Semantic(
     val neutral: ToneColors,
@@ -142,6 +150,7 @@ data class Semantic(
     val ember: ToneColors,
     val category: CategoryColors,
     val viz: VizColors,
+    val iconPlate: IconPlate,
 ) {
     fun tone(t: Tone): ToneColors = when (t) {
         Tone.Neutral -> neutral
@@ -178,6 +187,8 @@ internal fun semanticLight(scheme: ColorScheme) = Semantic(
         hatch = Color(0xFF8E8D99),
         selection = Color(0x0F1B1B21),
     ),
+    // White, edged with 12% ink so it doesn't melt into the near-white surfaces.
+    iconPlate = IconPlate(fill = Color(0xFFFFFFFF), edge = Color(0x1F1B1B21)),
 )
 
 internal fun semanticDark(scheme: ColorScheme) = Semantic(
@@ -202,4 +213,6 @@ internal fun semanticDark(scheme: ColorScheme) = Semantic(
         hatch = Color(0xFF9C9BA7),
         selection = Color(0x14F2EFF7),
     ),
+    // Orbit's soft off-white (dark onSurface), so the plate reads as light without glaring; no edge needed.
+    iconPlate = IconPlate(fill = Color(0xFFE4E1E9), edge = Color.Transparent),
 )

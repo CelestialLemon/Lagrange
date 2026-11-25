@@ -18,15 +18,20 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.test.junit4.createComposeRule
+import com.celestiallemon.lagrange.ui.components.AppIcon
 import com.celestiallemon.lagrange.ui.components.Banner
 import com.celestiallemon.lagrange.ui.components.BarRow
 import com.celestiallemon.lagrange.ui.components.Choice
 import com.celestiallemon.lagrange.ui.components.Dot
 import com.celestiallemon.lagrange.ui.components.LeadingIcon
 import com.celestiallemon.lagrange.ui.components.ListRow
+import com.celestiallemon.lagrange.ui.components.LocalAppIconLoader
 import com.celestiallemon.lagrange.ui.components.OrbitGauge
 import com.celestiallemon.lagrange.ui.components.OrbitMark
 import com.celestiallemon.lagrange.ui.components.Panel
@@ -40,10 +45,16 @@ import com.celestiallemon.lagrange.ui.components.SwitchRow
 import com.celestiallemon.lagrange.ui.components.Tag
 import com.celestiallemon.lagrange.ui.components.ValueRow
 import com.celestiallemon.lagrange.ui.components.WorthScale
+import com.celestiallemon.lagrange.ui.icons.AppIconLoader
+import com.celestiallemon.lagrange.ui.icons.AppIconResult
+import com.celestiallemon.lagrange.ui.icons.AppIconRevisions
+import com.celestiallemon.lagrange.ui.icons.PackageManagerIconSource
+import com.celestiallemon.lagrange.ui.icons.renderAppIcon
 import com.celestiallemon.lagrange.ui.theme.Lagrange
 import com.celestiallemon.lagrange.ui.theme.NumberStyles
 import com.celestiallemon.lagrange.ui.theme.Spacing
 import com.celestiallemon.lagrange.ui.theme.Tone
+import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -106,6 +117,7 @@ private fun Specimen() {
         }
         BarRow("Instagram", "52m", 0.9f, color = c.category.distracting)
         BarRow("Chrome", "31m", 0.55f, color = c.category.neutral)
+        AppIcons()
         SectionHeader("Rules", supporting = "How the pause behaves")
         RowGroup {
             ValueRow("Daily budget", "1h 30m", onClick = {}, leading = { LeadingIcon(Icons.Outlined.Timer) })
@@ -126,5 +138,48 @@ private fun Specimen() {
         }
     }
 }
+
+/**
+ * An adaptive icon (Lagrange's own, clipped to the tile), a light and a dark legacy round icon (the dark one checks
+ * that a transparent icon stays legible on the dark surface), and the letter fallback.
+ */
+@Composable
+private fun AppIcons() {
+    val c = Lagrange.colors
+    val context = LocalContext.current
+    val loader = remember {
+        val real = PackageManagerIconSource(context)
+        fun legacy(color: Int, sizePx: Int) = renderAppIcon(
+            android.graphics.drawable.GradientDrawable().apply {
+                shape = android.graphics.drawable.GradientDrawable.OVAL
+                setColor(color)
+                setSize(48, 48)
+            },
+            sizePx,
+        )
+        object : AppIconLoader {
+            override val revisions = MutableStateFlow(AppIconRevisions.Initial)
+
+            override fun cached(packageName: String, sizePx: Int): AppIconResult = when (packageName) {
+                LEGACY_PACKAGE -> legacy(android.graphics.Color.rgb(0x1E, 0x88, 0xE5), sizePx)
+                DARK_LEGACY_PACKAGE -> legacy(android.graphics.Color.rgb(0x21, 0x21, 0x21), sizePx)
+                else -> real.load(packageName, sizePx) ?: AppIconResult.Missing
+            }
+
+            override suspend fun load(packageName: String, sizePx: Int) = cached(packageName, sizePx)
+        }
+    }
+    CompositionLocalProvider(LocalAppIconLoader provides loader) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(Spacing.m)) {
+            AppIcon(context.packageName, "Lagrange", c.category.utility)
+            AppIcon(LEGACY_PACKAGE, "Legacy", c.category.neutral)
+            AppIcon(DARK_LEGACY_PACKAGE, "Dark legacy", c.category.neutral)
+            AppIcon("com.example.not.installed", "Instagram", c.category.distracting)
+        }
+    }
+}
+
+private const val LEGACY_PACKAGE = "com.example.legacy"
+private const val DARK_LEGACY_PACKAGE = "com.example.legacy.dark"
 
 private fun Int.androidx() = androidx.compose.ui.unit.Dp(this.toFloat())

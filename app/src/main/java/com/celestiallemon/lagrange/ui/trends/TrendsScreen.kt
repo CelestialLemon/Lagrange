@@ -57,7 +57,7 @@ import com.celestiallemon.lagrange.domain.AppSort
 import com.celestiallemon.lagrange.domain.TrendMetric
 import com.celestiallemon.lagrange.domain.TrendReport
 import com.celestiallemon.lagrange.domain.WindowKind
-import com.celestiallemon.lagrange.ui.components.AppAvatar
+import com.celestiallemon.lagrange.ui.components.AppIcon
 import com.celestiallemon.lagrange.ui.components.Banner
 import com.celestiallemon.lagrange.ui.components.Choice
 import com.celestiallemon.lagrange.ui.components.EmptyState
@@ -416,7 +416,7 @@ private fun AppsHeader(
     }
 }
 
-/** One app in the window: avatar in its category colour, time and opens, change vs before, and its goal if any. */
+/** One app in the window: its icon (or letter in its category colour), time and opens, change vs before, and its goal if any. */
 @Composable
 private fun AppRowItem(row: AppRow, onClick: () -> Unit) {
     val color = categoryColor(row.meta.category)
@@ -432,7 +432,7 @@ private fun AppRowItem(row: AppRow, onClick: () -> Unit) {
             headline = row.meta.displayName,
             supporting = "${formatDurationShort(row.totalMs)} · ${row.opens} opens" + (row.dailyAvgMs?.let { " · ${formatDurationShort(it.toLong())} a day" } ?: ""),
             supportingLines = 1,
-            leading = { AppAvatar(row.meta.displayName, color) },
+            leading = { AppIcon(row.meta.packageName, row.meta.displayName, color) },
             trailing = {
                 row.trendPct?.let { pct ->
                     val up = pct > 0.02

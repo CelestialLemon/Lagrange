@@ -122,7 +122,7 @@ Motion is physical and calm: things settle into place like a body arriving in or
 | `SectionHeader` (+ `Info`) | Titles of sections; ⓘ for measurement caveats; one text action |
 | `Panel` | A distinct object or a hero; optionally clickable with press feedback |
 | `RowGroup`, `ListRow`, `ValueRow`, `SwitchRow` | Settings and lists, in the segmented-list style |
-| `LeadingIcon`, `AppAvatar`, `Dot` | Row leading visuals; apps get a letter avatar in their category colour |
+| `LeadingIcon`, `AppIcon`, `Dot` | Row leading visuals. Apps get their real launcher icon (`AppIcon`): adaptive icons are clipped to the 40dp `shapes.small` tile; legacy icons keep their own shape, inset to 32dp on a light plate (`Lagrange.colors.iconPlate`: white with a 12%-ink hairline in light theme, Orbit off-white `#E4E1E9` in dark), as launchers set them, so a dark legacy logo stays legible in dark theme. While loading, or when an app is uninstalled or has no icon, `AppIcon` shows `AppAvatar`, a letter in its category colour, in the same tile |
 | `Tag` (`Tone`) | Status labels: triggers, day status, ratings. Not tappable |
 | `Stat`, `StatStrip` | Label + number + caption, divided by space, not boxes |
 | `Meter`, `SplitMeter`, `BarRow` | Proportions and rankings |
