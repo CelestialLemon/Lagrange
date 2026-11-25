@@ -9,6 +9,8 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.LazyListState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.BugReport
@@ -33,6 +35,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -82,18 +85,57 @@ import com.celestiallemon.lagrange.ui.theme.rise
  * preferences, then the tools for when something looks wrong.
  */
 @Composable
-fun SettingsScreen(main: MainViewModel, onBack: () -> Unit, padding: PaddingValues = PaddingValues(), data: DataViewModel = viewModel()) {
-    var inspecting by rememberSaveable { mutableStateOf(false) }
-    DrillIn(
-        top = if (inspecting) Unit else null,
-        onBack = { inspecting = false },
-        base = { SettingsContent(main, onBack, padding, data, onOpenInspector = { inspecting = true }) },
-        detail = { TimelineInspector(padding, onClose = { inspecting = false }) },
+fun SettingsScreen(
+    main: MainViewModel,
+    padding: PaddingValues = PaddingValues(),
+    inspecting: Boolean = false,
+    onInspectingChange: (Boolean) -> Unit = {},
+    scrollToTopToken: Int = 0,
+    data: DataViewModel = viewModel(),
+) {
+    SettingsHost(
+        inspecting = inspecting,
+        onInspectingChange = onInspectingChange,
+        scrollToTopToken = scrollToTopToken,
+        base = { listState ->
+            SettingsContent(main, padding, data, listState = listState, onOpenInspector = { onInspectingChange(true) })
+        },
+        inspector = { TimelineInspector(padding, onClose = { onInspectingChange(false) }) },
     )
 }
 
 @Composable
-private fun SettingsContent(main: MainViewModel, onBack: () -> Unit, padding: PaddingValues, data: DataViewModel, onOpenInspector: () -> Unit) {
+internal fun SettingsHost(
+    inspecting: Boolean,
+    onInspectingChange: (Boolean) -> Unit,
+    scrollToTopToken: Int,
+    base: @Composable (LazyListState) -> Unit,
+    inspector: @Composable () -> Unit,
+) {
+    val listState = rememberLazyListState()
+    var handledScrollToken by rememberSaveable { mutableIntStateOf(scrollToTopToken) }
+    LaunchedEffect(scrollToTopToken, inspecting) {
+        if (!inspecting && scrollToTopToken != handledScrollToken) {
+            listState.scrollToItem(0)
+            handledScrollToken = scrollToTopToken
+        }
+    }
+    DrillIn(
+        top = if (inspecting) Unit else null,
+        onBack = { onInspectingChange(false) },
+        base = { base(listState) },
+        detail = { inspector() },
+    )
+}
+
+@Composable
+private fun SettingsContent(
+    main: MainViewModel,
+    padding: PaddingValues,
+    data: DataViewModel,
+    listState: LazyListState,
+    onOpenInspector: () -> Unit,
+) {
     val health by main.health.collectAsStateWithLifecycle()
     val stats by main.stats.collectAsStateWithLifecycle()
     val prefs by main.prefs.collectAsStateWithLifecycle()
@@ -114,7 +156,7 @@ private fun SettingsContent(main: MainViewModel, onBack: () -> Unit, padding: Pa
     val createCsv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let(data::exportCsv) }
     val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(data::setBackupFolder) }
 
-    LagrangeScreen(title = "Settings", contentPadding = padding, onBack = onBack) {
+    LagrangeScreen(title = "Settings", contentPadding = padding, listState = listState) {
         // -- Health summary -------------------------------------------------------------------------------------------
         item("summary") {
             val issues = listOf(!health.usageAccess, !health.notificationAccess, stats.harvestOverdue(now)).count { it }

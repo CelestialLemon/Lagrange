@@ -34,7 +34,6 @@ import com.celestiallemon.lagrange.ui.components.ListRow
 import com.celestiallemon.lagrange.ui.components.LocalAppIconLoader
 import com.celestiallemon.lagrange.ui.components.OrbitGauge
 import com.celestiallemon.lagrange.ui.components.OrbitMark
-import com.celestiallemon.lagrange.ui.components.Panel
 import com.celestiallemon.lagrange.ui.components.RowGroup
 import com.celestiallemon.lagrange.ui.components.SectionHeader
 import com.celestiallemon.lagrange.ui.components.Segment
@@ -44,7 +43,6 @@ import com.celestiallemon.lagrange.ui.components.StatStrip
 import com.celestiallemon.lagrange.ui.components.SwitchRow
 import com.celestiallemon.lagrange.ui.components.Tag
 import com.celestiallemon.lagrange.ui.components.ValueRow
-import com.celestiallemon.lagrange.ui.components.WorthScale
 import com.celestiallemon.lagrange.ui.icons.AppIconLoader
 import com.celestiallemon.lagrange.ui.icons.AppIconResult
 import com.celestiallemon.lagrange.ui.icons.AppIconRevisions
@@ -125,10 +123,6 @@ private fun Specimen() {
             ListRow("Instagram", supporting = "Distracting · pause on")
         }
         Banner("Finish setting up", Tone.Caution, Icons.Outlined.WarningAmber, body = "Notification Access is off, so triggers can't be traced.", action = "Open Permission Health" to {})
-        Panel {
-            Text("Was that worth it?", style = MaterialTheme.typography.titleMedium)
-            WorthScale(current = 4, onRate = {})
-        }
         Choice(listOf("7D", "30D", "90D", "1Y", "All"), "30D", {}, { it }, forceChips = true)
         Choice(listOf("Off", "1m", "2m", "5m"), "2m", {}, { it })
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(Spacing.s)) {

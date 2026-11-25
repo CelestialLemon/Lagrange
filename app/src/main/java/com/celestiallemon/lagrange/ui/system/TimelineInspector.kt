@@ -1,6 +1,5 @@
 package com.celestiallemon.lagrange.ui.system
 
-import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
@@ -62,7 +61,6 @@ import com.celestiallemon.lagrange.ui.today.badge
  */
 @Composable
 fun TimelineInspector(padding: PaddingValues, onClose: () -> Unit, vm: InspectorViewModel = viewModel()) {
-    BackHandler(onBack = onClose)
     val state by vm.state.collectAsStateWithLifecycle()
     val op by vm.op.collectAsStateWithLifecycle()
     val allTypes by vm.allTypes.collectAsStateWithLifecycle()
@@ -145,7 +143,7 @@ private fun InspectorLine(row: InspectorRow, zone: java.time.ZoneId) {
                     Cell(
                         (archetypeOf(s.archetype)?.label ?: s.archetype).uppercase() + " · ${formatDuration(s.activeDurationMs)}",
                         "${triggerOf(s.triggerEvidence)?.badge ?: s.triggerEvidence} · ${s.physicalPickupCount}p · ${s.episodeKey}" +
-                            (s.contextFlags?.let { " · $it" } ?: "") + (s.worthItRating?.let { " · ★$it" } ?: ""),
+                            (s.contextFlags?.let { " · $it" } ?: ""),
                         if (s.isRabbitHole) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
                     )
                 }

@@ -30,6 +30,12 @@ class DestinationTest {
     fun `missing or unknown destinations open nothing in particular`() {
         assertNull(Destination.fromIntent(null))
         assertNull(Destination.fromIntent(Intent()))
+        assertNull(Destination.fromIntent(Intent().putExtra(Destination.EXTRA_DESTINATION, "LAB")))
         assertNull(Destination.fromIntent(Intent().putExtra(Destination.EXTRA_DESTINATION, "SETTINGS_OF_THE_FUTURE")))
+    }
+
+    @Test
+    fun `legacy SYSTEM alerts still open the Settings tab`() {
+        assertEquals(Destination.SETTINGS, Destination.fromIntent(Intent().putExtra(Destination.EXTRA_DESTINATION, "SYSTEM")))
     }
 }

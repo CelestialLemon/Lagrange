@@ -13,21 +13,19 @@ measurement carries visible coverage so incomplete days never masquerade as quie
 - **Raw events first, unlimited history.** Immutable raw ledgers, derived tables that can always be recomputed.
 - **Honest measurement.** Harvest gaps, listener downtime and backfilled days are tracked explicitly; a day with a gap is
   shown as a lower bound and never compared.
-- **Behavior plus subjective value.** Separate valued time from regretted time.
 - **Gentle friction over lockouts.** Mindful pauses, soft timers and nudges, measured by real outcomes.
 - **Strictly local.** No `INTERNET`, no `ACCESS_NETWORK_STATE`, no `SYSTEM_ALERT_WINDOW`, no cloud backup.
 
 ## What's in v1
 
-### Four tabs and Settings
+### Four tabs
 
 | Tab | What it shows |
 | --- | --- |
-| **Today** | Distracting time against your daily budget and weekday/weekend baseline, current and longest phone-free stretch, a Spike Autopsy or Good Day card, a day note, the category bar, and the reconstructed session timeline (tap a session for its hop chain, trigger evidence and a *"Worth it?"* rating). |
+| **Today** | Distracting time against your daily budget and weekday/weekend baseline, current and longest phone-free stretch, a day note, the category bar, and the reconstructed session timeline (tap a session for its hop chain and trigger evidence). |
 | **Trends** | 7D to All-Time (or custom) charts with weekday/weekend splits, the budget line and coverage-gap shading, plus a searchable app list leading to the per-app deep dive. |
-| **Lab** | Rabbit Hole Explorer, Spike History, Gateway Apps, Notification Cost (with one-tap *Mute channel*), the circadian heatmap and Honest Friction Effectiveness (sustained exits, substitution, habituation). |
 | **Friction** | The current mode with 1-hour Snooze and Focus Boost, the daily budget, escalation tiers, a healthy redirect, contextual schedules, and the Apps list (categories and per-app friction). |
-| **Settings** (gear) | Permission Health (including Android 17 Advanced Protection and hibernation checks), collection stats, backups and exports, Reflection Digest settings, the logical-day rollover, and the Debug Timeline Inspector. |
+| **Settings** | Permission Health (including Android 17 Advanced Protection and hibernation checks), collection stats, backups and exports, Reflection Digest settings, the logical-day rollover, and the Debug Timeline Inspector. |
 
 ### Gentle Friction
 
@@ -37,11 +35,6 @@ escalates with repeated opens, offers intention chips, an optional redirect and 
 time-blindness nudges. Contextual schedules (e.g. *Work Mon–Fri 09:00–17:30*, *Wind-Down 22:30–04:00*) raise the tier
 or tighten nudges. Snooze and Focus Boost last one hour on the monotonic clock, so changing the wall clock can't end
 them early.
-
-### Behavior Lab
-
-Every Lab section reads the same derived tables as Today and Trends and shows how many fully covered days it rests on.
-Gateway Apps use minimum-sample shrinkage; friction effectiveness counts an exit only when it was sustained.
 
 ### Home-screen widget and Quick Settings tile
 

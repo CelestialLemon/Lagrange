@@ -66,7 +66,7 @@ import kotlin.math.sin
 
 /**
  * A panel: the one container style for grouped content. Flat (no shadow), tonal, generously padded.
- * Use it for things that are a distinct object or need a boundary (a hero, a check-in, a chart). Plain sections of
+ * Use it for things that are a distinct object or need a boundary (a hero, a chart, a summary). Plain sections of
  * a screen don't need one: a [SectionHeader] and space separate them.
  */
 @Composable

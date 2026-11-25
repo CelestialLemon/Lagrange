@@ -32,8 +32,6 @@ import com.celestiallemon.lagrange.domain.TrendWindow
 import com.celestiallemon.lagrange.domain.UsageCoverage
 import com.celestiallemon.lagrange.domain.WindowKind
 import com.celestiallemon.lagrange.domain.lab.AutopsyInput
-import com.celestiallemon.lagrange.domain.lab.CheckInLog
-import com.celestiallemon.lagrange.domain.lab.CheckInRules
 import com.celestiallemon.lagrange.domain.lab.DayFacts
 import com.celestiallemon.lagrange.domain.lab.DayHighlight
 import com.celestiallemon.lagrange.domain.lab.FrictionAnalyzer
@@ -58,22 +56,11 @@ import com.celestiallemon.lagrange.domain.lab.SpikeAnalyzer
 import com.celestiallemon.lagrange.domain.lab.SpikeAutopsy
 import com.celestiallemon.lagrange.domain.lab.SpanSet
 import com.celestiallemon.lagrange.domain.lab.SubstitutionDay
-import com.celestiallemon.lagrange.domain.lab.WorthCheckInSampler
 import java.time.Instant
 import java.time.LocalDate
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-
-/** Where the check-in remembers what it offered (device-local preferences in the app, a variable in tests). */
-interface CheckInStore {
-    val changes: Flow<String?>
-
-    /** Atomically replaces the stored JSON with [transform] of it. */
-    suspend fun update(transform: (String?) -> String?)
-}
 
 /** The scope of one Lab read: the window's dates and instants, and which of its days can be counted. */
 data class LabScope(
@@ -113,14 +100,6 @@ data class RhythmData(val scope: LabScope, val report: RhythmReport)
 
 data class FrictionData(val scope: LabScope, val report: FrictionReport, val apps: LabApps)
 
-/** The check-in card: one unrated rabbit hole to ask about. */
-data class CheckInCard(
-    val episode: LabEpisode,
-    val apps: LabApps,
-    /** When this offer stops being eligible (it ended too long ago); Long.MAX_VALUE if unknown. */
-    val expiresAtMs: Long = Long.MAX_VALUE,
-)
-
 /**
  * Reads for the Behavior Lab (spec §4.2 C). Every section is one read transaction over the derived tables (plus raw
  * notifications and friction logs where the section needs them), so a rebuild landing midway can't mix generations.
@@ -129,10 +108,8 @@ data class CheckInCard(
 class LabRepository(
     private val db: LagrangeDatabase,
     private val derived: DerivedRepository,
-    private val checkInStore: CheckInStore? = null,
     private val clock: () -> Long = System::currentTimeMillis,
     private val transientPackages: Set<String> = ReconstructionRules().transientPackages,
-    private val checkInRules: CheckInRules = CheckInRules(),
     private val frictionRules: FrictionRules = FrictionRules(),
 ) {
     private val dao get() = db.analyticsDao()
@@ -388,37 +365,6 @@ class LabRepository(
         FrictionData(scope, FrictionAnalyzer.analyze(input, apps, frictionRules), apps)
     }
 
-    // -- Check-in -------------------------------------------------------------------------------------------------------
-
-    /**
-     * The rabbit hole to ask "Was that worth it?" about right now, if any. Recording that it was offered is part of
-     * asking, so the per-day cap holds across screens and restarts.
-     */
-    suspend fun checkIn(): CheckInCard? {
-        val store = checkInStore ?: return null
-        val now = clock()
-        val (ctx, candidates, apps) = io {
-            val ctx = derived.analyticsContext()
-            val since = now - checkInRules.recentMs
-            Triple(ctx, toLab(dao.rabbitHolesEndingSince(since), dao.rabbitHoleSegmentsEndingSince(since)), LabApps(metas()))
-        }
-        var picked: String? = null
-        store.update { raw ->
-            val log = decodeLog(raw)
-            val sel = WorthCheckInSampler.select(log, ctx.today, candidates, now, ctx.derivedThroughMs, checkInRules)
-            picked = sel.episodeKey
-            if (sel.log == log && raw != null) raw else encodeLog(sel.log)
-        }
-        val key = picked ?: return null
-        return candidates.firstOrNull { it.episodeKey == key }?.let { CheckInCard(it, apps, it.endMs + checkInRules.recentMs) }
-    }
-
-    /** "Not now": this episode is never offered again. */
-    suspend fun dismissCheckIn(episodeKey: String) {
-        val store = checkInStore ?: return
-        store.update { encodeLog(WorthCheckInSampler.dismiss(decodeLog(it), episodeKey, checkInRules)) }
-    }
-
     /** The session behind [episodeKey] with its segments, for the session sheet. */
     suspend fun session(episodeKey: String): Pair<SessionEntity, List<SessionSegmentEntity>>? = io {
         val s = dao.sessionByKey(episodeKey) ?: return@io null
@@ -484,13 +430,6 @@ class LabRepository(
         const val BASELINE_LOOKBACK_DAYS = 28L
         const val FRICTION_ENABLED_KEY = "friction_enabled"
         private val NIGHT_RULES = RollupRules()
-
-        private val json = Json { ignoreUnknownKeys = true }
-
-        fun decodeLog(raw: String?): CheckInLog =
-            raw?.let { runCatching { json.decodeFromString(CheckInLog.serializer(), it) }.getOrNull() } ?: CheckInLog()
-
-        fun encodeLog(log: CheckInLog): String = json.encodeToString(CheckInLog.serializer(), log)
 
         private fun evidenceOf(name: String?): TriggerEvidence? = name?.let { n -> TriggerEvidence.entries.firstOrNull { it.name == n } }
 

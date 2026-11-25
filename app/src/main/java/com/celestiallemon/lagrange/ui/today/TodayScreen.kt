@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -58,7 +57,6 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.celestiallemon.lagrange.data.CheckInCard
 import com.celestiallemon.lagrange.data.RecomputeProgress
 import com.celestiallemon.lagrange.data.db.AppCategory
 import com.celestiallemon.lagrange.data.db.DayStatus
@@ -99,16 +97,13 @@ import com.celestiallemon.lagrange.ui.theme.Spacing
 import com.celestiallemon.lagrange.ui.theme.Tone
 import com.celestiallemon.lagrange.ui.theme.rise
 
-internal enum class TimelineFilter(val label: String) { ALL("All"), RABBIT("Rabbit holes"), NOTIFIED("From notifications"), RATED("Rated") }
+internal enum class TimelineFilter(val label: String) { ALL("All"), RABBIT("Rabbit holes"), NOTIFIED("From notifications") }
 
 /** What Today can do; the screen itself holds no business logic. */
 class TodayActions(
     val onEditBudget: () -> Unit = {},
     val onEditNote: () -> Unit = {},
     val onOpenSession: (EpisodeUi) -> Unit = {},
-    val onRateCheckIn: (CheckInCard, Int) -> Unit = { _, _ -> },
-    val onDismissCheckIn: (CheckInCard) -> Unit = {},
-    val onOpenCheckIn: ((CheckInCard) -> Unit)? = null,
     val onOpenSettings: () -> Unit = {},
 )
 
@@ -116,7 +111,6 @@ class TodayActions(
 fun TodayScreen(
     main: MainViewModel,
     padding: PaddingValues,
-    actions: @Composable RowScope.() -> Unit,
     onOpenSettings: () -> Unit,
     today: TodayViewModel = viewModel(),
 ) {
@@ -125,7 +119,6 @@ fun TodayScreen(
     val state by today.state.collectAsStateWithLifecycle()
     val progress by today.progress.collectAsStateWithLifecycle()
     val detail by today.detail.collectAsStateWithLifecycle()
-    val checkIn by today.checkIn.collectAsStateWithLifecycle()
 
     // Keyed by episode key, not row id: a rebuild replaces rows (new ids) but keeps keys, so the sheet stays open.
     var openKey by rememberSaveable { mutableStateOf<String?>(null) }
@@ -142,18 +135,12 @@ fun TodayScreen(
         stats = stats,
         health = health,
         progress = progress,
-        checkIn = checkIn,
         now = System.currentTimeMillis(),
         padding = padding,
-        topActions = actions,
         actions = TodayActions(
             onEditBudget = { editingBudget = true },
             onEditNote = { editingNote = true },
             onOpenSession = { open(it.session.episodeKey) },
-            onRateCheckIn = { card, r -> today.rate(card.episode.episodeKey, card.episode.startMs, r) },
-            onDismissCheckIn = { today.dismissCheckIn(it.episode.episodeKey) },
-            // Today's sheet shows today's sessions; an earlier one is rated right on the card.
-            onOpenCheckIn = { card -> if (s?.episodes?.any { it.session.episodeKey == card.episode.episodeKey } == true) open(card.episode.episodeKey) },
             onOpenSettings = onOpenSettings,
         ),
     )
@@ -164,7 +151,6 @@ fun TodayScreen(
             episode = opened,
             packages = s.packages,
             detail = detail?.takeIf { it.episodeKey == opened.session.episodeKey },
-            onRate = { today.rate(opened.session.episodeKey, opened.session.startMs, it) },
             onDismiss = {
                 openKey = null
                 today.loadDetail(null)
@@ -191,10 +177,8 @@ fun TodayContent(
     stats: CollectorStats,
     health: PermissionHealth,
     progress: RecomputeProgress,
-    checkIn: CheckInCard?,
     now: Long,
     padding: PaddingValues,
-    topActions: @Composable RowScope.() -> Unit = {},
     actions: TodayActions = TodayActions(),
 ) {
     var filter by rememberSaveable { mutableStateOf(TimelineFilter.ALL) }
@@ -202,7 +186,7 @@ fun TodayContent(
     val s = state
     val dayStatus = dayStatusOf(s?.rollup?.dayStatus)
 
-    LagrangeScreen(title = "Today", contentPadding = padding, actions = topActions) {
+    LagrangeScreen(title = "Today", contentPadding = padding) {
         // One banner at most, the most important first.
         val banner = todayBanner(progress, health, stats, dayStatus, now)
         if (banner != null) item("banner") { TodayBannerView(banner, actions.onOpenSettings, Modifier.rise(0)) }
@@ -222,23 +206,12 @@ fun TodayContent(
 
         item("hero") { TodayHero(s, dayStatus, actions, Modifier.rise(1)) }
         item("glance") { GlanceStrip(s, dayStatus, now, Modifier.rise(2)) }
-        if (checkIn != null) {
-            item("checkin") {
-                WorthCheckInCard(
-                    checkIn,
-                    onRate = { actions.onRateCheckIn(checkIn, it) },
-                    onDismiss = { actions.onDismissCheckIn(checkIn) },
-                    onOpen = actions.onOpenCheckIn?.let { open -> { open(checkIn) } },
-                    modifier = Modifier.rise(3),
-                )
-            }
-        }
-        item("where") { WhereItWent(s, Modifier.rise(4)) }
+        item("where") { WhereItWent(s, Modifier.rise(3)) }
 
         val unlocked = s.episodes.filter { !it.session.isGlanceOnly }
         val visible = timelineRows(s.episodes, filter)
         item("timeline-header") {
-            Column(Modifier.rise(5)) {
+            Column(Modifier.rise(4)) {
                 SectionHeader(
                     "Sessions",
                     supporting = "${unlocked.size} sessions · ${s.episodes.size - unlocked.size} glances",
@@ -526,7 +499,6 @@ internal fun timelineRows(episodes: List<EpisodeUi>, filter: TimelineFilter): Li
             TimelineFilter.ALL -> true
             TimelineFilter.RABBIT -> s.isRabbitHole
             TimelineFilter.NOTIFIED -> triggerOf(s.triggerEvidence)?.isNotificationLed == true
-            TimelineFilter.RATED -> s.worthItRating != null
         }
         if (filter == TimelineFilter.ALL && glances > 0) rows += TimelineRow.Glances(glances, lastKey)
         glances = 0

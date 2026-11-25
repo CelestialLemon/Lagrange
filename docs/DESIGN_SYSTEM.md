@@ -28,7 +28,7 @@ Component specimen: [light](design-system/design-system-light.webp) · [dark](de
 | Caveat paragraphs inline everywhere, at the same weight as data. | Honesty stays, out of the way: caveats live behind an ⓘ (`Info` → `InfoSheet`). Only a caveat that changes the reading of a number (a coverage gap) is shown inline, as a `Banner`. |
 | Amber meant "distracting", "rabbit hole", "7-day average", "star rating" and "Focus Boost" at once; with wallpaper colours on, categories became random hues. | **One hue, one meaning**, and meaning colours never follow the wallpaper. |
 | Walls of stat tiles (9 on Today) and chip rows (4 category chips per app × 100 apps). | Show the 3 numbers that answer the question; fold the rest away (`Day details`). Long lists use one compact control per row (a category menu, a switch). |
-| Five tabs mixing daily use and settings. | Four tabs for the four questions; housekeeping behind a gear. |
+| Five tabs with cramped navigation and an empty top-bar row. | Four tabs in the bottom bar (`Today`, `Trends`, `Friction`, `Settings`); top-level tabs use a single-row serif `TopAppBar`. |
 | Motion bolted on: one 900ms tween, a crossfade, ad-hoc durations. | Motion tokens and patterns used by every component (section 5). |
 
 ## 2. Information architecture
@@ -37,13 +37,12 @@ Component specimen: [light](design-system/design-system-light.webp) · [dark](de
 | --- | --- | --- |
 | **Today** | How am I doing today? | Distracting time against budget, drawn as an orbit |
 | **Trends** | Am I improving? | Daily average for the chosen metric + change vs the previous period |
-| **Lab** | Why does it happen? | Each tab's own question as its heading |
 | **Friction** | What do I do about it? | The current mode (off / on / snoozed / boost) |
-| Settings (gear) | Is it working? Where is my data? | One-line health summary |
+| **Settings** | Is it working? Where is my data? | One-line health summary |
 
 Drill-ins (an app's deep dive, the Apps list, the timeline inspector) slide in on the shared X axis and support the
 predictive back gesture (`DrillIn`). Editing anything opens a bottom sheet (`EditSheet`), so you never leave the
-screen you were reading. The gear shows a dot when something in Settings needs attention.
+screen you were reading. The Settings tab icon shows a badge dot when something in Settings needs attention.
 
 ## 3. Colour
 
@@ -59,9 +58,9 @@ Two families, never mixed:
 | `category.neutral` | Neutral apps | Bars, avatars |
 | `category.utility` | Utility apps | Bars, avatars |
 | `category.excluded` | Excluded apps | Bars, avatars |
-| `good` | Better than usual, valued | Good days, "worth it", paused opens |
+| `good` | Better than usual | Good days, paused opens |
 | `caution` | Needs attention, incomplete | Coverage gaps, setup, snooze |
-| `critical` | Over a limit, failed, regret | Over budget, errors, "regret it" |
+| `critical` | Over a limit, failed | Over budget, errors |
 | `brand` | Informational | Notification-led triggers, info banners |
 | `viz.*` | Chart ink | Average lines (`trend`, `trendSlow`), budget line (`reference`), grid, axis, hatching |
 
@@ -105,8 +104,8 @@ Motion is physical and calm: things settle into place like a body arriving in or
 
 | Pattern | API | Where |
 | --- | --- | --- |
-| Entrance | `Modifier.rise(index)` | Every screen's first items; Lab tabs replay it via `arrivalKey` |
-| Press | `Modifier.pressScale()` (0.97, spatial-fast) | Panels, toggles, worth beads |
+| Entrance | `Modifier.rise(index)` | Every screen's first items |
+| Press | `Modifier.pressScale()` (0.97, spatial-fast) | Panels, toggles |
 | Tab switch | `Transitions.fadeThrough()` | Bottom navigation, root stages |
 | Drill in/out | `Transitions.sharedAxisX()` + predictive-back preview | `DrillIn` |
 | Swap region | `Transitions.swap()` | Breath words |
@@ -118,22 +117,21 @@ Motion is physical and calm: things settle into place like a body arriving in or
 
 | Component | Use it for |
 | --- | --- |
-| `LagrangeScreen` | Every screen: collapsing large title, actions, one lazy column |
+| `LagrangeScreen` | Every screen: single-row serif `TopAppBar` on top-level tabs, collapsing `LargeTopAppBar` on drill-ins, one lazy column |
 | `SectionHeader` (+ `Info`) | Titles of sections; ⓘ for measurement caveats; one text action |
 | `Panel` | A distinct object or a hero; optionally clickable with press feedback |
 | `RowGroup`, `ListRow`, `ValueRow`, `SwitchRow` | Settings and lists, in the segmented-list style |
 | `LeadingIcon`, `AppIcon`, `Dot` | Row leading visuals. Apps get their real launcher icon (`AppIcon`): adaptive icons are clipped to the 40dp `shapes.small` tile; legacy icons keep their own shape, inset to 32dp on a light plate (`Lagrange.colors.iconPlate`: white with a 12%-ink hairline in light theme, Orbit off-white `#E4E1E9` in dark), as launchers set them, so a dark legacy logo stays legible in dark theme. While loading, or when an app is uninstalled or has no icon, `AppIcon` shows `AppAvatar`, a letter in its category colour, in the same tile |
-| `Tag` (`Tone`) | Status labels: triggers, day status, ratings. Not tappable |
+| `Tag` (`Tone`) | Status labels: triggers, day status. Not tappable |
 | `Stat`, `StatStrip` | Label + number + caption, divided by space, not boxes |
 | `Meter`, `SplitMeter`, `BarRow` | Proportions and rankings |
 | `OrbitGauge` | The signature hero: a budget drawn as an orbit, with a body riding the arc and an inner lap when over |
-| `WorthScale` | "Was it worth it?" as a 5-bead regret ↔ worth-it scale (a judgement, not a star review) |
 | `Choice` | One of a few options: segmented when ≤4 short labels, chips otherwise |
 | `Stepper` | A big rolling value with − / + |
 | `EditSheet`, `DetailSheet` | Every editor and every detail view |
 | `Banner` | At most one per screen: setup, gaps, failures |
 | `EmptyState`, `OrbitMark` | Nothing yet (the mark orbits, meaning "working", not "broken") |
-| `DrillIn`, `SettingsAction` | Navigation |
+| `DrillIn` | Navigation |
 
 ## 7. Honest measurement, visually
 

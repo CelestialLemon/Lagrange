@@ -80,7 +80,7 @@ class DigestNotifier(private val context: Context) {
         }
     }
 
-    /** "Lagrange hasn't recorded for N hours": tapping opens System & Data's Permission Health. */
+    /** "Lagrange hasn't recorded for N hours": tapping opens the Settings tab's Permission Health. */
     fun postCoverageAlert(silentHours: Long): Boolean {
         if (!canPost()) return false
         ensureChannels()
@@ -96,7 +96,7 @@ class DigestNotifier(private val context: Context) {
                         "and check Permission Health (Usage Access, battery restrictions) before that history is gone.",
                 ),
             )
-            .setContentIntent(Destination.SYSTEM.pendingIntent(context))
+            .setContentIntent(Destination.SETTINGS.pendingIntent(context))
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setLocalOnly(true)

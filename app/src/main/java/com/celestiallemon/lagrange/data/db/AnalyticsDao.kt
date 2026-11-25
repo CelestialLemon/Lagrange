@@ -193,18 +193,6 @@ interface AnalyticsDao {
     )
     suspend fun rabbitHoleSegmentsBetween(fromDate: String, toDate: String): List<SessionSegmentEntity>
 
-    /** Rabbit holes that ended at or after [sinceMs]: candidates for the "Was that worth it?" check-in. */
-    @Query(
-        "SELECT * FROM sessions WHERE is_glance_only = 0 AND is_rabbit_hole = 1 AND end_ms >= :sinceMs ORDER BY end_ms DESC, id",
-    )
-    suspend fun rabbitHolesEndingSince(sinceMs: Long): List<SessionEntity>
-
-    @Query(
-        "SELECT g.* FROM session_segments g JOIN sessions s ON s.id = g.session_id " +
-            "WHERE s.is_glance_only = 0 AND s.is_rabbit_hole = 1 AND s.end_ms >= :sinceMs ORDER BY g.session_id, g.seq_index",
-    )
-    suspend fun rabbitHoleSegmentsEndingSince(sinceMs: Long): List<SessionSegmentEntity>
-
     @Query("SELECT * FROM sessions WHERE episode_key = :episodeKey AND is_glance_only = 0 ORDER BY id LIMIT 1")
     suspend fun sessionByKey(episodeKey: String): SessionEntity?
 

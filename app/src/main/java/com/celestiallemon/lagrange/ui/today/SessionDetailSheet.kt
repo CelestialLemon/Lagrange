@@ -26,12 +26,10 @@ import com.celestiallemon.lagrange.ui.components.DetailSheet
 import com.celestiallemon.lagrange.ui.components.Dot
 import com.celestiallemon.lagrange.ui.components.LeadingIcon
 import com.celestiallemon.lagrange.ui.components.ListRow
-import com.celestiallemon.lagrange.ui.components.Panel
 import com.celestiallemon.lagrange.ui.components.RowGroup
 import com.celestiallemon.lagrange.ui.components.Segment
 import com.celestiallemon.lagrange.ui.components.SplitMeter
 import com.celestiallemon.lagrange.ui.components.Tag
-import com.celestiallemon.lagrange.ui.components.WorthScale
 import com.celestiallemon.lagrange.ui.formatClock
 import com.celestiallemon.lagrange.ui.formatClockSeconds
 import com.celestiallemon.lagrange.ui.formatDuration
@@ -40,16 +38,12 @@ import com.celestiallemon.lagrange.ui.theme.NumberStyles
 import com.celestiallemon.lagrange.ui.theme.Spacing
 import com.celestiallemon.lagrange.ui.theme.Tone
 
-/**
- * One session, explained: when, what it was, what started it, which apps, and whether it was worth it.
- * The rating sits near the top because it's the one thing to do here; everything below is evidence.
- */
+/** One session, explained: when, what it was, what started it, and which apps. */
 @Composable
 fun SessionDetailSheet(
     episode: EpisodeUi,
     packages: Map<Long, PackageEntity>,
     detail: SessionDetail?,
-    onRate: (Int?) -> Unit,
     onDismiss: () -> Unit,
 ) {
     val s = episode.session
@@ -65,18 +59,6 @@ fun SessionDetailSheet(
             Text("${archetype?.label ?: s.archetype} · ${formatDuration(s.activeDurationMs)}", style = MaterialTheme.typography.headlineSmall)
             val chain = hopChain(episode, packages)
             if (chain.isNotEmpty()) Text(chain, style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        }
-
-        if (!s.isGlanceOnly) {
-            Panel(spacing = Spacing.s) {
-                Text("Was it worth it?", style = MaterialTheme.typography.titleMedium)
-                WorthScale(s.worthItRating, onRate)
-                Text(
-                    "Your answer stays with this session, even when history is rebuilt.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
         }
 
         if (s.isRabbitHole) {
