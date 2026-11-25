@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -69,8 +68,6 @@ import com.celestiallemon.lagrange.ui.components.Meter
 import com.celestiallemon.lagrange.ui.components.Panel
 import com.celestiallemon.lagrange.ui.components.RollingText
 import com.celestiallemon.lagrange.ui.components.SectionHeader
-import com.celestiallemon.lagrange.ui.components.Stat
-import com.celestiallemon.lagrange.ui.components.StatStrip
 import com.celestiallemon.lagrange.ui.components.Tag
 import com.celestiallemon.lagrange.ui.formatDurationShort
 import com.celestiallemon.lagrange.ui.friction.categoryColor
@@ -92,11 +89,10 @@ private enum class MetricChoice(val label: String, val metrics: List<TrendMetric
     PICKUPS("Pickups & sessions", listOf(TrendMetric.PHYSICAL_PICKUPS, TrendMetric.EPISODES)),
     GLANCES("Glances", listOf(TrendMetric.GLANCES)),
     RABBIT("Rabbit holes", listOf(TrendMetric.RABBIT_HOLES)),
-    WORTH("Valued vs regretted", listOf(TrendMetric.VALUED_VS_REGRETTED)),
     ;
 
     companion object {
-        fun of(m: TrendMetric) = entries.first { m in it.metrics }
+        fun of(m: TrendMetric) = entries.firstOrNull { m in it.metrics } ?: DISTRACTING
     }
 }
 
@@ -124,7 +120,7 @@ class TrendsActions(
 )
 
 @Composable
-fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsViewModel = viewModel(), actions: @Composable RowScope.() -> Unit = {}) {
+fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsViewModel = viewModel()) {
     val ui by vm.ui.collectAsStateWithLifecycle()
     val report by vm.report.collectAsStateWithLifecycle()
     val apps by vm.apps.collectAsStateWithLifecycle()
@@ -136,12 +132,11 @@ fun TrendsScreen(padding: PaddingValues, onOpenApp: (Long) -> Unit, vm: TrendsVi
         TrendsUiModel(ui, report, apps, metric, query, category, sort),
         padding,
         TrendsActions(vm::setWindow, vm::setMetric, vm::setQuery, vm::setCategory, vm::setSort, vm::retry, onOpenApp),
-        actions,
     )
 }
 
 @Composable
-fun TrendsContent(model: TrendsUiModel, padding: PaddingValues, actions: TrendsActions, topActions: @Composable RowScope.() -> Unit = {}) {
+fun TrendsContent(model: TrendsUiModel, padding: PaddingValues, actions: TrendsActions) {
     var selected by rememberSaveable { mutableStateOf<String?>(null) }
     var ma7 by rememberSaveable { mutableStateOf(true) }
     var ma28 by rememberSaveable { mutableStateOf(false) }
@@ -150,7 +145,7 @@ fun TrendsContent(model: TrendsUiModel, padding: PaddingValues, actions: TrendsA
     val loaded = ui.overview
     val r = model.report
 
-    LagrangeScreen(title = "Trends", contentPadding = padding, actions = topActions) {
+    LagrangeScreen(title = "Trends", contentPadding = padding) {
         item("window") {
             // The chips show the window asked for; the range line under them is the one the figures below are for.
             WindowChips(
@@ -202,7 +197,6 @@ fun TrendsContent(model: TrendsUiModel, padding: PaddingValues, actions: TrendsA
                 )
             }
         }
-        if (r.metric == TrendMetric.VALUED_VS_REGRETTED) item("worth") { WorthBreakdown(r) }
         item("split") {
             Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
                 SectionHeader("Weekdays and weekends", supporting = "${r.metric.label}, average per covered day")
@@ -246,7 +240,6 @@ fun TrendsContent(model: TrendsUiModel, padding: PaddingValues, actions: TrendsA
 @Composable
 private fun barColor(metric: TrendMetric): Color = when (metric) {
     TrendMetric.DISTRACTING -> categoryColor(AppCategory.DISTRACTING)
-    TrendMetric.VALUED_VS_REGRETTED -> Lagrange.colors.good.accent
     TrendMetric.RABBIT_HOLES -> Lagrange.colors.ember.accent
     else -> MaterialTheme.colorScheme.primary
 }
@@ -272,7 +265,7 @@ private fun TrendsHero(r: TrendReport, metric: TrendMetric, allTime: Boolean, on
             RollingText(r.coveredMean?.let { formatMetric(it, r.metric.unit) } ?: "–", NumberStyles.hero)
             Spacer(Modifier.width(Spacing.s))
             Text(
-                if (r.metric == TrendMetric.VALUED_VS_REGRETTED) "net valued a day" else "a day, on average",
+                "a day, on average",
                 style = MaterialTheme.typography.bodyLarge,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(bottom = 10.dp),
@@ -327,40 +320,16 @@ private fun ChartPanel(
             DayCallout(
                 point,
                 metric.unit,
-                valueLabel = if (metric == TrendMetric.VALUED_VS_REGRETTED) "Valued" else metric.label,
-                secondaryLabel = when (metric) {
-                    TrendMetric.PHYSICAL_PICKUPS -> "sessions"
-                    TrendMetric.VALUED_VS_REGRETTED -> "regretted"
-                    else -> null
-                },
+                valueLabel = metric.label,
+                secondaryLabel = if (metric == TrendMetric.PHYSICAL_PICKUPS) "sessions" else null,
             )
         } else {
             Text(
-                when (metric) {
-                    TrendMetric.VALUED_VS_REGRETTED -> "Valued time rises above the line, regretted time falls below. Tap a day for details."
-                    TrendMetric.PHYSICAL_PICKUPS -> "The inner bar is sessions (unlocks, quick locks merged). Tap a day for details."
-                    else -> "Tap a day for details."
+                if (metric == TrendMetric.PHYSICAL_PICKUPS) {
+                    "The inner bar is sessions (unlocks, quick locks merged). Tap a day for details."
+                } else {
+                    "Tap a day for details."
                 },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun WorthBreakdown(r: TrendReport) {
-    val w = r.worth
-    Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
-        SectionHeader("How time was judged", supporting = "${w.ratedCount} of ${w.ratedCount + w.unratedCount} sessions rated")
-        StatStrip {
-            Stat("Valued", formatDurationShort(w.valuedMs), Modifier.weight(1f), caption = "${w.valuedCount} sessions", captionTone = Tone.Good)
-            Stat("Neutral", formatDurationShort(w.neutralMs), Modifier.weight(1f), caption = "${w.neutralCount} sessions")
-            Stat("Regretted", formatDurationShort(w.regrettedMs), Modifier.weight(1f), caption = "${w.regrettedCount} sessions", captionTone = Tone.Critical)
-        }
-        if (w.unratedMs > 0) {
-            Text(
-                "${formatDurationShort(w.unratedMs)} of unrated time is left out rather than guessed.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )

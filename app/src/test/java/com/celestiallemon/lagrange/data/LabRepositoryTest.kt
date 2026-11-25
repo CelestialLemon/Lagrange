@@ -33,8 +33,6 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.LocalTime
 import java.time.ZoneId
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -57,25 +55,13 @@ class LabRepositoryTest {
     @After
     fun close() = dbs.forEach { it.close() }
 
-    private class MemoryStore : CheckInStore {
-        val state = MutableStateFlow<String?>(null)
-        var writes = 0
-        override val changes: Flow<String?> = state
-        override suspend fun update(transform: (String?) -> String?) {
-            val next = transform(state.value)
-            if (next != state.value) writes++
-            state.value = next
-        }
-    }
-
-    private class Env(val db: LagrangeDatabase, val repo: LabRepository, val interner: Interner, val store: MemoryStore)
+    private class Env(val db: LagrangeDatabase, val repo: LabRepository, val interner: Interner)
 
     private fun env(): Env = runBlocking {
         val db = LagrangeDatabase.inMemory(context).also { dbs += it }
         val derived = DerivedRepository(db, settings = { DerivedSettings(4, 60 * MINUTE_MS) }, clock = { now }, fallbackZone = { zone })
-        val store = MemoryStore()
         db.ingestionStateDao().put(IngestionStateEntity(IngestionKeys.DERIVED_DATA_END_MS, now))
-        Env(db, LabRepository(db, derived, store, clock = { now }), Interner(db, FakeResolver()), store)
+        Env(db, LabRepository(db, derived, clock = { now }), Interner(db, FakeResolver()))
     }
 
     private fun d(offset: Long) = today.plusDays(offset)
@@ -184,7 +170,7 @@ class LabRepositoryTest {
     }
 
     @Test
-    fun `rabbit holes load with their segments and the check-in round-trips through the store`() = runBlocking {
+    fun `rabbit holes load with their segments and sessions resolve by key`() = runBlocking {
         val e = env()
         val insta = e.pkg("com.instagram.android")
         e.rollup(d(-1))
@@ -200,23 +186,6 @@ class LabRepositoryTest {
         assertEquals(listOf(RabbitHoleReason.LONG_BINGE), one.rabbitHoleReasons) // unknown names are dropped
         assertEquals(25 * MINUTE_MS, one.segments.single().durationMs)
         assertTrue(holes.first { it.episodeKey == "k4" }.inProgress)
-
-        val card = e.repo.checkIn()!!
-        assertEquals(latest, card.episode.episodeKey)
-        // The card knows when it stops being offered, so the UI can re-sample right then instead of every minute.
-        assertEquals(card.episode.endMs + 36 * 60 * MINUTE_MS, card.expiresAtMs)
-        val log = LabRepository.decodeLog(e.store.state.value)
-        assertEquals(listOf(latest), log.shown)
-        assertEquals(today.toString(), log.date)
-        // Asking again offers the same one and doesn't rewrite the log.
-        val writes = e.store.writes
-        assertEquals(latest, e.repo.checkIn()!!.episode.episodeKey)
-        assertEquals(writes, e.store.writes)
-        // "Not now" → the next unrated one; that's the second of the day, so after it nothing more.
-        e.repo.dismissCheckIn(latest)
-        assertEquals(older, e.repo.checkIn()!!.episode.episodeKey)
-        e.db.derivedDao().setRatingByKey(older, 4)
-        assertNull(e.repo.checkIn())
 
         val (session, segments) = e.repo.session(latest)!!
         assertEquals(latest, session.episodeKey)
@@ -246,13 +215,6 @@ class LabRepositoryTest {
         assertEquals(5, top.entries)
         assertEquals(2, top.spirals)
         assertEquals(listOf(tiktok), r.lowSample.map { it.pkgId })
-    }
-
-    @Test
-    fun `a corrupt check-in log starts over instead of failing`() {
-        assertEquals(LabRepository.decodeLog(null), LabRepository.decodeLog("{not json"))
-        val log = LabRepository.decodeLog(null).copy(date = "2026-11-23", shown = listOf("a"), dismissed = listOf("b"))
-        assertEquals(log, LabRepository.decodeLog(LabRepository.encodeLog(log)))
     }
 
     @Test

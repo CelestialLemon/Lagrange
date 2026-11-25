@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -125,8 +124,6 @@ class FrictionUiModel(
 fun FrictionScreen(
     main: MainViewModel,
     padding: PaddingValues,
-    actions: @Composable RowScope.() -> Unit = {},
-    onOpenSettings: () -> Unit = {},
     catalog: CatalogViewModel = viewModel(),
     vm: FrictionViewModel = viewModel(),
 ) {
@@ -152,7 +149,7 @@ fun FrictionScreen(
     DrillIn(
         top = if (appsOpen) Unit else null,
         onBack = { appsOpen = false },
-        base = { FrictionContent(model, padding, vm, actions, onOpenApps = { appsOpen = true }) },
+        base = { FrictionContent(model, padding, vm, onOpenApps = { appsOpen = true }) },
         detail = { AppsScreen(apps, padding, catalog, onBack = { appsOpen = false }) },
     )
 }
@@ -162,7 +159,6 @@ fun FrictionContent(
     model: FrictionUiModel,
     padding: PaddingValues,
     vm: FrictionViewModel?,
-    topActions: @Composable RowScope.() -> Unit = {},
     onOpenApps: () -> Unit = {},
 ) {
     val context = LocalContext.current
@@ -172,7 +168,7 @@ fun FrictionContent(
     val p = model.prefs
     val appList = model.apps.orEmpty()
 
-    LagrangeScreen(title = "Friction", contentPadding = padding, actions = topActions) {
+    LagrangeScreen(title = "Friction", contentPadding = padding) {
         if (!model.health.accessibilityConnected) {
             item("setup") {
                 Banner(

@@ -379,20 +379,6 @@ class LagrangePreferences(
         }
     }
 
-    /** Device-local memory of the "Was that worth it?" check-in (JSON; never exported, it only paces a prompt). */
-    val worthCheckInLog: Flow<String?> = store.data.map { it[WORTH_CHECKIN_LOG] }
-
-    /** Atomically replaces the check-in memory with [transform] of the current value; returns what was stored. */
-    suspend fun updateWorthCheckInLog(transform: (String?) -> String?): String? {
-        var stored: String? = null
-        store.edit {
-            stored = transform(it[WORTH_CHECKIN_LOG])
-            val next = stored
-            if (next == null) it.remove(WORTH_CHECKIN_LOG) else it[WORTH_CHECKIN_LOG] = next
-        }
-        return stored
-    }
-
     private suspend fun recordSettingHistory(key: String, valueJson: String) {
         db.settingsHistoryDao().insert(
             SettingsHistoryEntity(timestampUtcMs = clock(), settingKey = key, valueJson = valueJson),
@@ -562,7 +548,6 @@ class LagrangePreferences(
         private val BACKUP_IN_PROGRESS = stringPreferencesKey("backup_in_progress")
         private val COMPLETED_BACKUPS = stringSetPreferencesKey("completed_backups")
         private val FRICTION_RUNTIME_STATE = stringPreferencesKey("friction_runtime_state")
-        private val WORTH_CHECKIN_LOG = stringPreferencesKey("worth_checkin_log")
 
         private val recordJson = Json { ignoreUnknownKeys = true }
 

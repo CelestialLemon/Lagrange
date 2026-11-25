@@ -5,12 +5,6 @@ import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material3.Badge
-import androidx.compose.material3.BadgedBox
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -21,7 +15,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.graphicsLayer
-import com.celestiallemon.lagrange.ui.theme.Lagrange
 import com.celestiallemon.lagrange.ui.theme.Transitions
 import kotlin.coroutines.cancellation.CancellationException
 
@@ -78,16 +71,6 @@ fun <T : Any> DrillIn(
                         clip = p > 0f
                     },
             ) { detail(current) }
-        }
-    }
-}
-
-/** The settings gear in every tab's top bar. A dot means something in Settings needs attention. */
-@Composable
-fun SettingsAction(attention: Boolean, onClick: () -> Unit) {
-    IconButton(onClick = onClick) {
-        BadgedBox(badge = { if (attention) Badge(containerColor = Lagrange.colors.caution.accent) }) {
-            Icon(Icons.Outlined.Settings, contentDescription = if (attention) "Settings, needs attention" else "Settings")
         }
     }
 }

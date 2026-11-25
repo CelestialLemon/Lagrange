@@ -53,7 +53,7 @@ fun BudgetSheet(current: Long, onDismiss: () -> Unit, onSave: (Long) -> Unit) {
     }
 }
 
-/** Day note: one line of context (travel, sick, deadline) shown next to the day in Trends and the Lab. */
+/** Day note: one line of context (travel, sick, deadline) shown on Today. */
 @Composable
 fun NoteSheet(initial: String, date: LocalDate, onDismiss: () -> Unit, onSave: (String) -> Unit) {
     var text by rememberSaveable { mutableStateOf(initial) }

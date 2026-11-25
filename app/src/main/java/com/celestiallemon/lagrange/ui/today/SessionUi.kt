@@ -2,27 +2,14 @@ package com.celestiallemon.lagrange.ui.today
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.text.style.TextOverflow
-import com.celestiallemon.lagrange.data.CheckInCard
 import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.data.db.PackageEntity
 import com.celestiallemon.lagrange.data.db.TriggerEvidence
 import com.celestiallemon.lagrange.ui.EpisodeUi
-import com.celestiallemon.lagrange.ui.components.Panel
 import com.celestiallemon.lagrange.ui.components.Tag
-import com.celestiallemon.lagrange.ui.components.WorthScale
-import com.celestiallemon.lagrange.ui.components.worthWords
-import com.celestiallemon.lagrange.ui.formatClock
-import com.celestiallemon.lagrange.ui.formatDay
-import com.celestiallemon.lagrange.ui.formatDuration
 import com.celestiallemon.lagrange.ui.theme.Spacing
 import com.celestiallemon.lagrange.ui.theme.Tone
 
@@ -55,49 +42,7 @@ val DayStatus.tone: Tone
         DayStatus.UNCERTAIN_COVERAGE -> Tone.Caution
     }
 
-fun worthTone(rating: Int): Tone = when {
-    rating >= 4 -> Tone.Good
-    rating <= 2 -> Tone.Critical
-    else -> Tone.Neutral
-}
-
-@Composable
-fun WorthTag(rating: Int) = Tag(worthWords[(rating - 1).coerceIn(0, 4)], tone = worthTone(rating))
-
-/**
- * The calm "Was that worth it?" check-in, on Today and in the Lab. Never more than a couple a day; "Not now" puts
- * that episode away for good. Rating it is one tap on the scale.
- */
-@Composable
-fun WorthCheckInCard(card: CheckInCard, onRate: (Int) -> Unit, onDismiss: () -> Unit, onOpen: (() -> Unit)?, modifier: Modifier = Modifier) {
-    val e = card.episode
-    val chain = card.apps.hopChain(e).joinToString(" → ") { card.apps.name(it) }
-    Panel(
-        modifier = modifier,
-        color = MaterialTheme.colorScheme.secondaryContainer,
-        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
-        onClick = onOpen,
-        onClickLabel = "Open this session",
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Was that worth it?", style = MaterialTheme.typography.headlineSmall, modifier = Modifier.weight(1f))
-            TextButton(onClick = onDismiss) { Text("Not now") }
-        }
-        Text(
-            buildString {
-                append(formatDay(e.logicalDate)).append(", ").append(formatClock(e.startMs))
-                append(" · ").append(formatDuration(e.activeDurationMs))
-                if (chain.isNotEmpty()) append("\n").append(chain)
-            },
-            style = MaterialTheme.typography.bodyMedium,
-            maxLines = 3,
-            overflow = TextOverflow.Ellipsis,
-        )
-        WorthScale(current = null, onRate = { it?.let(onRate) })
-    }
-}
-
-/** The tags under a session: what started it, how it was rated, anything uncertain. */
+/** The tags under a session: what started it, paused opens, and anything uncertain. */
 @Composable
 fun SessionTags(ep: EpisodeUi, modifier: Modifier = Modifier) {
     val s = ep.session
@@ -107,6 +52,5 @@ fun SessionTags(ep: EpisodeUi, modifier: Modifier = Modifier) {
         if (trigger != null && trigger != TriggerEvidence.NO_OBSERVED_TRIGGER) Tag(trigger.badge, tone = trigger.tone, icon = trigger.icon)
         if (s.blockedAttemptCount > 0) Tag("${s.blockedAttemptCount} paused", tone = Tone.Good)
         if (ep.hasUncertainTail) Tag("End uncertain", tone = Tone.Caution)
-        s.worthItRating?.let { WorthTag(it) }
     }
 }

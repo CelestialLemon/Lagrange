@@ -9,7 +9,7 @@ import android.content.Intent
  * Intent extra to [MainActivity]; unknown or missing values open nothing in particular.
  */
 enum class Destination {
-    TODAY, TRENDS, LAB, FRICTION, SYSTEM;
+    TODAY, TRENDS, FRICTION, SETTINGS;
 
     /** An explicit intent to [MainActivity] (singleTask: an open instance is brought forward and re-routed). */
     fun intent(context: Context): Intent = Intent(context, MainActivity::class.java)
@@ -31,6 +31,9 @@ enum class Destination {
         private const val REQUEST_CODE_BASE = 4_200
 
         fun fromIntent(intent: Intent?): Destination? =
-            intent?.getStringExtra(EXTRA_DESTINATION)?.let { name -> entries.firstOrNull { it.name == name } }
+            intent?.getStringExtra(EXTRA_DESTINATION)?.let { name ->
+                // Coverage alerts posted by earlier builds targeted SYSTEM, now the Settings tab.
+                if (name == "SYSTEM") SETTINGS else entries.firstOrNull { it.name == name }
+            }
     }
 }

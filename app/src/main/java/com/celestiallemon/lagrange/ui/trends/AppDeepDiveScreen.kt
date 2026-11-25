@@ -75,7 +75,6 @@ import com.celestiallemon.lagrange.ui.theme.rise
 import com.celestiallemon.lagrange.ui.today.badge
 import com.celestiallemon.lagrange.ui.today.isNotificationLed
 import java.time.LocalDate
-import java.util.Locale
 import kotlin.math.roundToInt
 
 /** Saves a [TrendWindow] as "KIND|start|end" (dates ISO, blank when unset). */
@@ -93,7 +92,7 @@ private val goalPresetsMin = listOf(15, 30, 45, 60, 90, 120)
 private val choosableCategories = listOf(AppCategory.DISTRACTING, AppCategory.NEUTRAL, AppCategory.UTILITY, AppCategory.EXCLUDED)
 
 /**
- * One app over time: how much, when, how it's used, what leads in and out, and whether it was worth it.
+ * One app over time: how much, when, how it's used, and what leads in and out.
  * Setting its category and daily goal sits at the top, because that's what you came to change.
  */
 @Composable
@@ -180,7 +179,7 @@ fun AppDeepDiveScreen(
         item("shape") { SessionShape(d) }
         item("flows") { Flows(d) }
         item("triggers") { Triggers(d) }
-        item("value") { FrictionAndValue(d) }
+        item("pauses") { LaunchPauses(d) }
     }
 
     if (editingCategory && category != null) {
@@ -453,29 +452,13 @@ private fun Triggers(d: AppDeepDive) {
     }
 }
 
-// -- Friction & value -------------------------------------------------------------------------------------------------
+// -- Launch pauses ----------------------------------------------------------------------------------------------------
 
 @Composable
-private fun FrictionAndValue(d: AppDeepDive) {
+private fun LaunchPauses(d: AppDeepDive) {
     val f = d.insights.friction
-    val v = d.insights.value
     Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
-        SectionHeader("Worth it?", supporting = "${v.rated} of ${v.episodes} sessions rated")
-        Panel(spacing = Spacing.s) {
-            Row(verticalAlignment = Alignment.Bottom) {
-                Text(v.averageRating?.let { String.format(Locale.getDefault(), "%.1f", it) } ?: "–", style = NumberStyles.stat)
-                Spacer(Modifier.width(Spacing.s))
-                Text("average, out of 5", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 4.dp))
-            }
-            if (v.rated > 0) {
-                StatStrip {
-                    Stat("Valued", "${v.worth.valuedCount}", Modifier.weight(1f), captionTone = Tone.Good, caption = "sessions")
-                    Stat("Neutral", "${v.worth.neutralCount}", Modifier.weight(1f), caption = "sessions")
-                    Stat("Regretted", "${v.worth.regrettedCount}", Modifier.weight(1f), captionTone = Tone.Critical, caption = "sessions")
-                }
-            }
-        }
-        SectionHeader("Launch pauses", topPadding = Spacing.l)
+        SectionHeader("Launch pauses")
         if (!f.hasData) {
             Text(
                 "No pauses or timers for this app yet. With gentle friction on, exits, quick returns and timer extensions show up here.",

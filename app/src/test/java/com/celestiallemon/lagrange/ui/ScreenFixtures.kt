@@ -1,6 +1,5 @@
 package com.celestiallemon.lagrange.ui
 
-import com.celestiallemon.lagrange.data.CheckInCard
 import com.celestiallemon.lagrange.data.TodayComparison
 import com.celestiallemon.lagrange.data.db.AppCategory
 import com.celestiallemon.lagrange.data.db.Archetype
@@ -48,7 +47,7 @@ object ScreenFixtures {
 
     private fun session(
         h: Int, m: Int, minutes: Double, apps: List<Pair<Long, Double>>, archetype: Archetype,
-        trigger: TriggerEvidence = TriggerEvidence.NO_OBSERVED_TRIGGER, rabbit: Boolean = false, rating: Int? = null,
+        trigger: TriggerEvidence = TriggerEvidence.NO_OBSERVED_TRIGGER, rabbit: Boolean = false,
         glance: Boolean = false, inProgress: Boolean = false, blocked: Int = 0,
     ): EpisodeUi {
         val id = nextId++
@@ -66,7 +65,7 @@ object ScreenFixtures {
                 activeDurationMs = dur, physicalPickupCount = 1, isGlanceOnly = glance, triggerEvidence = trigger.name, triggerPkgId = apps.firstOrNull()?.first,
                 triggerNotificationId = null, entryPkgId = apps.firstOrNull()?.first, totalDistractingMs = distracting, totalNeutralMs = 0, totalUtilityMs = 0,
                 totalExcludedMs = 0, blockedAttemptCount = blocked, distinctAppCount = apps.size, distinctDistractingCount = 0, archetype = archetype.name,
-                isRabbitHole = rabbit, rabbitHoleReasons = if (rabbit) "LONG_BINGE,MULTI_APP_SPIRAL" else null, worthItRating = rating,
+                isRabbitHole = rabbit, rabbitHoleReasons = if (rabbit) "LONG_BINGE,MULTI_APP_SPIRAL" else null, worthItRating = null,
                 contextFlags = if (inProgress) "IN_PROGRESS" else null,
             ),
             segs,
@@ -82,10 +81,10 @@ object ScreenFixtures {
             session(8, 41, 0.2, emptyList(), Archetype.GLANCE, glance = true),
             session(9, 5, 1.0, listOf(6L to 1.0), Archetype.UTILITY),
             session(10, 32, 0.8, listOf(4L to 0.8), Archetype.MICRO_CHECK, TriggerEvidence.OBSERVED_CLICK),
-            session(12, 48, 34.0, listOf(1L to 14.0, 3L to 12.0, 2L to 8.0), Archetype.RABBIT_HOLE, TriggerEvidence.RECENT_POSSIBLE_ALERT, rabbit = true, rating = 2),
+            session(12, 48, 34.0, listOf(1L to 14.0, 3L to 12.0, 2L to 8.0), Archetype.RABBIT_HOLE, TriggerEvidence.RECENT_POSSIBLE_ALERT, rabbit = true),
             session(14, 10, 0.1, emptyList(), Archetype.GLANCE, glance = true),
             session(14, 20, 12.0, listOf(5L to 9.0, 1L to 3.0), Archetype.MIXED, blocked = 1),
-            session(15, 55, 4.0, listOf(1L to 4.0), Archetype.MICRO_CHECK, rating = 4),
+            session(15, 55, 4.0, listOf(1L to 4.0), Archetype.MICRO_CHECK),
             session(16, 38, 4.0, listOf(5L to 4.0), Archetype.FOCUSED, inProgress = true),
         )
     }
@@ -120,9 +119,6 @@ object ScreenFixtures {
         usageAccess = true, notificationAccess = true, accessibilityEnabled = true, accessibilityConnected = true, postNotifications = true,
         hibernationExempt = Check.YES, advancedProtection = Check.NO, batteryUnrestricted = true,
     )
-
-    @Suppress("unused")
-    val noCheckIn: CheckInCard? = null
 
     fun catalog() = packages.values.map {
         com.celestiallemon.lagrange.data.CatalogApp(it.packageName, it.displayName, AppCategory.valueOf(it.category), confirmed = it.id != 3L, recentOpens = (40 - it.id * 4).coerceAtLeast(0))

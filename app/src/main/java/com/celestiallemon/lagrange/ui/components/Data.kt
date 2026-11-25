@@ -149,7 +149,7 @@ fun StripDivider() {
 // -- Tags -------------------------------------------------------------------------------------------------------------
 
 /**
- * A small label with a tone: a session's trigger, a day's status, a rating. Replaces every ad-hoc pill and badge.
+ * A small label with a tone: a session's trigger, a day's status. Replaces every ad-hoc pill and badge.
  * Tags are not buttons; anything tappable is a chip.
  */
 @Composable

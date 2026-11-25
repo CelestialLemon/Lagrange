@@ -26,7 +26,7 @@ class ScreensScreenshotTest {
     private val f = ScreenFixtures
 
     @Test fun todayLight() = compose.snapshot("today-light") {
-        TodayContent(f.today(), f.stats, f.health, RecomputeProgress(), null, f.now, PaddingValues())
+        TodayContent(f.today(), f.stats, f.health, RecomputeProgress(), f.now, PaddingValues())
     }
 
     @Test fun trendsLight() = compose.snapshot("trends-light") {
@@ -46,6 +46,6 @@ class ScreensScreenshotTest {
     }
 
     @Test fun todayDark() = compose.snapshot("today-dark", dark = true) {
-        TodayContent(f.today(status = DayStatus.SPIKE, distracting = 112 * 60_000L), f.stats, f.health, RecomputeProgress(), null, f.now, PaddingValues())
+        TodayContent(f.today(status = DayStatus.SPIKE, distracting = 112 * 60_000L), f.stats, f.health, RecomputeProgress(), f.now, PaddingValues())
     }
 }

@@ -2,12 +2,9 @@ package com.celestiallemon.lagrange.domain.lab
 
 import com.celestiallemon.lagrange.data.db.RabbitHoleReason
 import com.celestiallemon.lagrange.data.db.TriggerEvidence
-import com.celestiallemon.lagrange.domain.HOUR_MS
 import com.celestiallemon.lagrange.domain.WorthTotals
-import java.time.LocalDate
-import kotlinx.serialization.Serializable
 
-// Rabbit Hole Explorer and the occasional "Was that worth it?" check-in (spec §4.2 C, §5.4).
+// Rabbit Hole Explorer (spec §4.2 C).
 
 enum class RatingFilter(val label: String) {
     ALL("All"),
@@ -77,64 +74,4 @@ object RabbitHoleExplorer {
             (f.trigger == null || e.triggerEvidence == f.trigger) &&
             (f.reason == null || f.reason in e.rabbitHoleReasons) &&
             f.rating.matches(e.worthItRating)
-}
-
-/**
- * The check-in's memory, kept on the device only: which episodes were offered on [date] (the logical day), and which
- * the user chose to skip. Skipped episodes are never offered again.
- */
-@Serializable
-data class CheckInLog(
-    val date: String? = null,
-    val shown: List<String> = emptyList(),
-    val dismissed: List<String> = emptyList(),
-)
-
-data class CheckInRules(
-    /** At most this many different episodes are offered per logical day (rated, skipped or ignored alike). */
-    val maxPerDay: Int = 2,
-    /** Only rabbit holes that ended this recently are worth asking about: memory of how it felt fades. */
-    val recentMs: Long = 36 * HOUR_MS,
-    /** Skipped keys kept; older ones fall off (they are long past [recentMs] by then). */
-    val maxDismissed: Int = 200,
-)
-
-data class CheckInSelection(val episodeKey: String?, val log: CheckInLog) {
-    fun changed(previous: CheckInLog): Boolean = log != previous
-}
-
-/**
- * Samples at most [CheckInRules.maxPerDay] unrated, recently ended rabbit holes per logical day. Pure and
- * deterministic: given the same log and candidates it always offers the same episode, so the Today and Lab cards
- * agree, and an offer stays put until it is rated or skipped.
- */
-object WorthCheckInSampler {
-    fun select(log: CheckInLog, today: LocalDate, candidates: List<LabEpisode>, nowMs: Long, dataEndMs: Long, rules: CheckInRules = CheckInRules()): CheckInSelection {
-        val day = today.toString()
-        val current = if (log.date == day) log else log.copy(date = day, shown = emptyList())
-        val dismissed = current.dismissed.toHashSet()
-        val eligible = candidates.filter { e ->
-            e.isRabbitHole && e.worthItRating == null && !e.inProgress && e.endMs <= dataEndMs && e.endMs <= nowMs &&
-                nowMs - e.endMs <= rules.recentMs && e.episodeKey !in dismissed
-        }
-        val byKey = eligible.associateBy { it.episodeKey }
-        // Keep offering what is already on screen today until it is answered.
-        current.shown.lastOrNull { it in byKey }?.let { return CheckInSelection(it, current) }
-        // One already offered is only briefly out of reach (a rebuild pulled the derived cutoff back before its end):
-        // wait for it instead of spending today's second offer on another.
-        val held = candidates.any { e ->
-            e.episodeKey in current.shown && e.isRabbitHole && e.worthItRating == null && e.episodeKey !in dismissed &&
-                nowMs - e.endMs <= rules.recentMs && (e.endMs > dataEndMs || e.inProgress)
-        }
-        if (held) return CheckInSelection(null, current)
-        if (current.shown.size >= rules.maxPerDay) return CheckInSelection(null, current)
-        val pick = eligible.filter { it.episodeKey !in current.shown }
-            .maxWithOrNull(compareBy<LabEpisode> { it.endMs }.thenBy { it.episodeKey })
-            ?: return CheckInSelection(null, current)
-        return CheckInSelection(pick.episodeKey, current.copy(shown = current.shown + pick.episodeKey))
-    }
-
-    /** "Not now": never offered again; it still counts toward today's cap. */
-    fun dismiss(log: CheckInLog, episodeKey: String, rules: CheckInRules = CheckInRules()): CheckInLog =
-        log.copy(dismissed = (log.dismissed.filterNot { it == episodeKey } + episodeKey).takeLast(rules.maxDismissed))
 }

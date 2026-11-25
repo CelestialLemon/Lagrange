@@ -1,7 +1,6 @@
 package com.celestiallemon.lagrange.ui.trends
 
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.saveable.SaveableStateHolder
@@ -20,14 +19,13 @@ fun TrendsTab(
     deepDive: Long?,
     onDeepDive: (Long?) -> Unit,
     saveable: SaveableStateHolder = rememberSaveableStateHolder(),
-    actions: @Composable RowScope.() -> Unit = {},
 ) {
     val trends: TrendsViewModel = viewModel()
     val window by trends.window.collectAsStateWithLifecycle()
     DrillIn(
         top = deepDive,
         onBack = { onDeepDive(null) },
-        base = { saveable.SaveableStateProvider("overview") { TrendsScreen(padding, onOpenApp = { onDeepDive(it) }, vm = trends, actions = actions) } },
+        base = { saveable.SaveableStateProvider("overview") { TrendsScreen(padding, onOpenApp = { onDeepDive(it) }, vm = trends) } },
         detail = { pkgId -> saveable.SaveableStateProvider("app-$pkgId") { AppDeepDiveScreen(pkgId, window, padding, onBack = { onDeepDive(null) }) } },
     )
 }

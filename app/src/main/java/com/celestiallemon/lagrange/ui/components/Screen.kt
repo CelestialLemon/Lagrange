@@ -2,7 +2,6 @@ package com.celestiallemon.lagrange.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
@@ -18,9 +17,11 @@ import androidx.compose.material3.LargeTopAppBar
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberTopAppBarState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.style.TextOverflow
@@ -29,7 +30,10 @@ import com.celestiallemon.lagrange.ui.theme.ProvideScreenArrival
 import com.celestiallemon.lagrange.ui.theme.Spacing
 
 /**
- * Every screen in Lagrange: a large title that collapses as you scroll, then one scrolling column.
+ * Every screen in Lagrange: a serif title bar, then one scrolling column.
+ *
+ * Top-level tabs ([onBack] == null) use a single-row [TopAppBar] so no empty action row pushes content down;
+ * drill-in screens ([onBack] != null) use a collapsing [LargeTopAppBar] with the back arrow above the title.
  *
  * The title is a plain noun ("Today", "Trends"). What the screen *says* belongs in its hero, not its header.
  * [contentPadding] is the padding the shell reserves (the navigation bar); system bar insets are handled here.
@@ -41,7 +45,6 @@ fun LagrangeScreen(
     contentPadding: PaddingValues,
     modifier: Modifier = Modifier,
     onBack: (() -> Unit)? = null,
-    actions: @Composable RowScope.() -> Unit = {},
     listState: LazyListState = rememberLazyListState(),
     /** When this changes the content counts as newly arrived, so staggered entrances play again (e.g. a new tab). */
     arrivalKey: Any? = Unit,
@@ -49,7 +52,19 @@ fun LagrangeScreen(
     itemSpacing: androidx.compose.ui.unit.Dp = Spacing.s,
     content: LazyListScope.() -> Unit,
 ) {
-    val behavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior(rememberTopAppBarState())
+    val barState = rememberTopAppBarState()
+    val behavior = if (onBack != null) {
+        TopAppBarDefaults.exitUntilCollapsedScrollBehavior(barState)
+    } else {
+        TopAppBarDefaults.pinnedScrollBehavior(barState)
+    }
+    val barColors = TopAppBarDefaults.topAppBarColors(
+        containerColor = MaterialTheme.colorScheme.surface,
+        scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
+    )
+    LaunchedEffect(listState.canScrollBackward) {
+        if (!listState.canScrollBackward) barState.contentOffset = 0f
+    }
     ProvideScreenArrival(arrivalKey) {
         Scaffold(
             modifier = modifier
@@ -58,20 +73,22 @@ fun LagrangeScreen(
             containerColor = MaterialTheme.colorScheme.surface,
             contentWindowInsets = WindowInsets(0.dp),
             topBar = {
-                LargeTopAppBar(
-                    title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-                    navigationIcon = {
-                        if (onBack != null) {
+                if (onBack != null) {
+                    LargeTopAppBar(
+                        title = { Text(title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        navigationIcon = {
                             IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, contentDescription = "Back") }
-                        }
-                    },
-                    actions = actions,
-                    scrollBehavior = behavior,
-                    colors = TopAppBarDefaults.topAppBarColors(
-                        containerColor = MaterialTheme.colorScheme.surface,
-                        scrolledContainerColor = MaterialTheme.colorScheme.surfaceContainer,
-                    ),
-                )
+                        },
+                        scrollBehavior = behavior,
+                        colors = barColors,
+                    )
+                } else {
+                    TopAppBar(
+                        title = { Text(title, style = MaterialTheme.typography.headlineMedium, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                        scrollBehavior = behavior,
+                        colors = barColors,
+                    )
+                }
             },
         ) { inner ->
             LazyColumn(
