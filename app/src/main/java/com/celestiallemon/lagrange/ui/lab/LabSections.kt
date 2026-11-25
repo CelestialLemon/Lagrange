@@ -1,5 +1,21 @@
 package com.celestiallemon.lagrange.ui.lab
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.rotate
+import com.celestiallemon.lagrange.ui.components.Panel
+import com.celestiallemon.lagrange.ui.components.Stat
+import com.celestiallemon.lagrange.ui.components.StatStrip
+import com.celestiallemon.lagrange.ui.components.Tag
+import com.celestiallemon.lagrange.ui.theme.Lagrange
+import com.celestiallemon.lagrange.ui.theme.Motion
+import com.celestiallemon.lagrange.ui.theme.NumberStyles
+import com.celestiallemon.lagrange.ui.theme.Spacing
+import com.celestiallemon.lagrange.ui.theme.Tone
+import com.celestiallemon.lagrange.ui.today.tone
+
 import android.widget.Toast
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.clickable
@@ -73,16 +89,12 @@ import com.celestiallemon.lagrange.domain.lab.RatingFilter
 import com.celestiallemon.lagrange.domain.lab.RecentVsEarlier
 import com.celestiallemon.lagrange.domain.lab.SpikeAutopsy
 import com.celestiallemon.lagrange.system.NotificationSettingsIntents
-import com.celestiallemon.lagrange.ui.components.SectionCard
-import com.celestiallemon.lagrange.ui.components.StatRow
-import com.celestiallemon.lagrange.ui.components.StatTile
-import com.celestiallemon.lagrange.ui.components.StatusPill
 import com.celestiallemon.lagrange.ui.formatClock
 import com.celestiallemon.lagrange.ui.formatDay
 import com.celestiallemon.lagrange.ui.formatDuration
 import com.celestiallemon.lagrange.ui.formatDurationShort
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
-import com.celestiallemon.lagrange.ui.theme.Space
+import com.celestiallemon.lagrange.ui.components.BarRow
+import com.celestiallemon.lagrange.ui.today.WorthCheckInCard
 import com.celestiallemon.lagrange.ui.today.badge
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -102,7 +114,7 @@ fun LazyListScope.spikesSection(
 ) {
     if (report.baselineDays < report.baselineDaysNeeded && report.history.isEmpty()) {
         item("spikes-wait") {
-            SectionCard("Learning your usual", eyebrow = "Spikes & good days", icon = Icons.Outlined.Whatshot) {
+            LabBlock("Learning your usual") {
                 Text(
                     "Days are judged against comparable days (weekdays with weekdays, weekends with weekends). That needs " +
                         "${report.baselineDaysNeeded} fully recorded days; there are ${report.baselineDays} so far.",
@@ -121,7 +133,7 @@ fun LazyListScope.spikesSection(
     }
     if (report.history.isEmpty() && report.live == null) {
         item("spikes-none") {
-            SectionCard("Nothing unusual", eyebrow = "Spikes & good days", icon = Icons.Outlined.Whatshot) {
+            LabBlock("Nothing unusual") {
                 Text("No day in this window was far from your usual. ${scopeLine(report.scope)}.", style = MaterialTheme.typography.bodyMedium)
             }
         }
@@ -134,51 +146,47 @@ fun LazyListScope.spikesSection(
             "A spike is at least 40% and 30 minutes above the median of comparable days in the 28 before it. A good day is at " +
                 "least 25% and 20 minutes below it, or within your distracting budget with no more screen time than usual. " +
                 "Days with gaps in recording are never judged. ${scopeLine(report.scope)}.",
-            Modifier.padding(horizontal = Space.s),
+            Modifier.padding(horizontal = Spacing.s),
         )
     }
 }
 
 @Composable
 private fun HighlightCard(h: DayHighlight, autopsy: AutopsyState?, onToggle: () -> Unit, onOpenSession: (String) -> Unit) {
-    val colors = LocalStatusColors.current
     val spike = h.status == DayStatus.SPIKE
-    val color = if (spike) colors.warn else colors.good
     val title = when {
         h.live && spike -> "Today is running high"
         h.live -> "Today is running light"
         spike -> "Spike"
         else -> "Good day"
     }
-    SectionCard(
-        title = null,
-        modifier = Modifier.animateContentSize(),
+    Panel(
+        modifier = Modifier.animateContentSize(Motion.spatial()),
+        onClick = onToggle,
+        onClickLabel = if (autopsy != null) "Hide autopsy" else "Show autopsy",
+        color = if (spike) Lagrange.colors.ember.container.copy(alpha = 0.45f) else Lagrange.colors.good.container.copy(alpha = 0.45f),
     ) {
         Row(
-            Modifier
-                .fillMaxWidth()
-                .clip(MaterialTheme.shapes.medium)
-                .clickable(onClick = onToggle),
+            Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    StatusPill(title, color)
-                    Spacer(Modifier.width(Space.s))
+                    Tag(title, tone = if (spike) Tone.Ember else Tone.Good)
+                    Spacer(Modifier.width(Spacing.s))
                     Text(if (h.live) "so far" else formatDay(h.date), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Text(
-                    "${formatDurationShort(h.actualMs)} vs usual ${formatDurationShort(h.baselineMs)}",
-                    style = MaterialTheme.typography.titleMedium,
-                )
+                Row(verticalAlignment = Alignment.Bottom) {
+                    Text(formatDurationShort(h.actualMs), style = NumberStyles.stat)
+                    Spacer(Modifier.width(Spacing.s))
+                    Text("vs usual ${formatDurationShort(h.baselineMs)}", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(bottom = 4.dp))
+                }
                 Muted(
                     "${signedDuration(h.deltaMs)} against ${h.matchedDays.size} comparable ${if (h.live) "days at this time" else "days"}",
                 )
             }
-            Icon(
-                if (autopsy != null) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                contentDescription = if (autopsy != null) "Hide autopsy" else "Show autopsy",
-            )
+            val chevron by animateFloatAsState(if (autopsy != null) 180f else 0f, Motion.spatialFast(), label = "chevron")
+            Icon(Icons.Outlined.ExpandMore, contentDescription = null, modifier = Modifier.rotate(chevron))
         }
         if (autopsy != null) {
             when {
@@ -194,18 +202,17 @@ private fun HighlightCard(h: DayHighlight, autopsy: AutopsyState?, onToggle: () 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun AutopsyBody(a: SpikeAutopsy, onOpenSession: (String) -> Unit) {
-    val colors = LocalStatusColors.current
     val apps = LocalLabApps.current
-    Column(verticalArrangement = Arrangement.spacedBy(Space.m)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.l)) {
         if (a.longSessions.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 SubHeading("Longest sessions")
                 a.longSessions.forEach { s ->
-                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
+                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f), modifier = Modifier.fillMaxWidth()) {
                         Column(
                             Modifier
                                 .clickable { onOpenSession(s.episodeKey) }
-                                .padding(Space.m),
+                                .padding(Spacing.l),
                             verticalArrangement = Arrangement.spacedBy(2.dp),
                         ) {
                             Row {
@@ -220,7 +227,7 @@ private fun AutopsyBody(a: SpikeAutopsy, onOpenSession: (String) -> Unit) {
             }
         }
         if (a.appDeltas.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 SubHeading(if (a.highlight.status == DayStatus.SPIKE) "Apps above their usual" else "Apps that still ran above usual")
                 val maxDelta = a.appDeltas.maxOf { it.deltaMs }.coerceAtLeast(1)
                 a.appDeltas.forEach { d ->
@@ -228,14 +235,14 @@ private fun AutopsyBody(a: SpikeAutopsy, onOpenSession: (String) -> Unit) {
                         apps.name(d.pkgId),
                         signedDuration(d.deltaMs),
                         d.deltaMs.toFloat() / maxDelta,
-                        color = MaterialTheme.colorScheme.tertiary,
+                        color = Lagrange.colors.ember.accent,
                         caption = "${formatDuration(d.actualMs)} vs usual ${formatDuration(d.medianMs)}",
                     )
                 }
                 Muted("Each app is compared with its own usual, so these don't add up to the day's total difference.")
             }
         }
-        Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+        Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
             SubHeading("Time of day")
             val maxBlock = a.blocks.maxOfOrNull { maxOf(it.actualMs, it.medianMs ?: 0) }?.coerceAtLeast(1) ?: 1
             a.blocks.forEach { b ->
@@ -244,22 +251,22 @@ private fun AutopsyBody(a: SpikeAutopsy, onOpenSession: (String) -> Unit) {
                     "${b.block.label} ${"%02d".format(Locale.US, from)}–${"%02d".format(Locale.US, to)}" + if (!b.complete) " (so far)" else "",
                     b.deltaMs?.let { signedDuration(it) } ?: formatDuration(b.actualMs),
                     b.actualMs.toFloat() / maxBlock,
-                    color = if ((b.deltaMs ?: 0) > 0) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary,
+                    color = if ((b.deltaMs ?: 0) > 0) Lagrange.colors.ember.accent else MaterialTheme.colorScheme.outline,
                     caption = "${formatDuration(b.actualMs)}" + (b.medianMs?.let { " vs usual ${formatDuration(it)}" } ?: ""),
                 )
             }
         }
         if (a.triggers.isNotEmpty()) {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                 SubHeading("What started the ${a.episodeCount} sessions")
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    a.triggers.entries.sortedByDescending { it.value }.forEach { (t, n) -> StatusPill("${t.badge} · $n", colors.neutral) }
+                    a.triggers.entries.sortedByDescending { it.value }.forEach { (t, n) -> Tag("${t.badge} · $n", tone = t.tone) }
                 }
             }
         }
         a.note?.let { note ->
             Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f), modifier = Modifier.fillMaxWidth()) {
-                Column(Modifier.padding(Space.m)) {
+                Column(Modifier.padding(Spacing.l)) {
                     SubHeading("Your note that day")
                     Text(note, style = MaterialTheme.typography.bodyMedium)
                 }
@@ -286,12 +293,12 @@ fun LazyListScope.rabbitHolesSection(
         Muted(
             "${feed.episodes.size} of ${feed.total} rabbit holes · ${formatDuration(feed.distractingMs)} distracting" +
                 (if (w.ratedCount > 0) " · ${w.valuedCount} valued, ${w.regrettedCount} regretted" else "") + " · ${scopeLine(scope)}",
-            Modifier.padding(horizontal = Space.s),
+            Modifier.padding(horizontal = Spacing.s),
         )
     }
     if (feed.episodes.isEmpty()) {
         item("rh-empty") {
-            Muted(if (feed.total == 0) "No rabbit holes in this window." else "Nothing matches these filters.", Modifier.padding(horizontal = Space.s))
+            Muted(if (feed.total == 0) "No rabbit holes in this window." else "Nothing matches these filters.", Modifier.padding(horizontal = Spacing.s))
         }
     }
     items(feed.episodes, key = { "rh-${it.id}" }) { e ->
@@ -301,7 +308,7 @@ fun LazyListScope.rabbitHolesSection(
 
 @Composable
 private fun RabbitFilters(feed: RabbitHoleFeed?, apps: LabApps, f: RabbitFilter, onFilter: (RabbitFilter) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
         ChipRow {
             // A filter carried over from another window stays visible (and clearable) even when nothing there matches it.
             if (f != RabbitFilter()) {
@@ -355,7 +362,7 @@ fun ChipRow(content: @Composable () -> Unit) {
         Modifier
             .fillMaxWidth()
             .horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(Space.s),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.s),
     ) { content() }
 }
 
@@ -364,7 +371,7 @@ fun ChipRow(content: @Composable () -> Unit) {
 fun LazyListScope.gatewaysSection(data: GatewayData) {
     val r = data.report
     item("gw-head") {
-        SectionCard("Gateway apps", eyebrow = "Where spirals start", icon = Icons.Outlined.DoorFront) {
+        LabBlock("Gateway apps") {
             Text(
                 "How often opening an app first led to a rabbit hole, or to 15+ minutes in other distracting apps. Rates are pulled " +
                     "toward your overall ${pct(r.baseRate)} until an app has enough sessions to speak for itself.",
@@ -374,12 +381,12 @@ fun LazyListScope.gatewaysSection(data: GatewayData) {
         }
     }
     if (r.ranked.isEmpty()) {
-        item("gw-empty") { Muted("No app has started ${r.rules.minEntries} or more sessions in this window yet.", Modifier.padding(horizontal = Space.s)) }
+        item("gw-empty") { Muted("No app has started ${r.rules.minEntries} or more sessions in this window yet.", Modifier.padding(horizontal = Spacing.s)) }
     }
     items(r.ranked, key = { "gw-${it.pkgId}" }) { row -> GatewayCard(row, data.apps, low = false) }
     if (r.lowSample.isNotEmpty()) {
         item("gw-low-head") {
-            Muted("Too few sessions to rank (fewer than ${r.rules.minEntries}):", Modifier.padding(horizontal = Space.s, vertical = Space.xs))
+            Muted("Too few sessions to rank (fewer than ${r.rules.minEntries}):", Modifier.padding(horizontal = Spacing.s, vertical = Spacing.xs))
         }
         items(r.lowSample.take(LOW_SAMPLE_SHOWN), key = { "gwl-${it.pkgId}" }) { row -> GatewayCard(row, data.apps, low = true) }
     }
@@ -389,13 +396,13 @@ private const val LOW_SAMPLE_SHOWN = 10
 
 @Composable
 private fun GatewayCard(row: GatewayRow, apps: LabApps, low: Boolean) {
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(Space.m)) {
+    Panel(padding = PaddingValues(horizontal = Spacing.l, vertical = Spacing.m), shape = MaterialTheme.shapes.medium) {
+        Column {
             BarRow(
                 apps.name(row.pkgId),
                 if (low) "${row.spirals} of ${row.entries}" else pct(row.shrunkRate),
                 if (low) 0f else row.shrunkRate.toFloat(),
-                color = MaterialTheme.colorScheme.tertiary,
+                color = if (low) MaterialTheme.colorScheme.outline else Lagrange.colors.ember.accent,
                 caption = (if (low) "" else "${row.spirals} of ${row.entries} sessions spiralled (raw ${pct(row.rawRate)}) · ") +
                     "${formatDuration(row.avgDownstreamMs)} elsewhere per session",
             )
@@ -408,16 +415,16 @@ private fun GatewayCard(row: GatewayRow, apps: LabApps, low: Boolean) {
 fun LazyListScope.alertsSection(data: NotificationCostData, sort: NotificationSort, onSort: (NotificationSort) -> Unit) {
     val r = data.report
     item("al-head") {
-        SectionCard("Notification cost", eyebrow = "What alerts cost you", icon = Icons.Outlined.NotificationsActive) {
+        LabBlock("Notification cost") {
             Text(
                 if (r.coveredMs == 0L) "The notification listener wasn't recording in this window, so there's nothing to measure."
                 else "Measured only while the notification listener was recording: ${formatDurationShort(r.coveredMs)} of this window" +
                     (if (r.firstCoveredMs != null && r.lastCoveredMs != null) ", ${formatDay(data.scope.range.start)} – ${formatDay(data.scope.range.end)}" else "") + ".",
                 style = MaterialTheme.typography.bodyMedium,
             )
-            StatRow {
-                StatTile("Notifications", "${r.totalVolume}", Modifier.weight(1f))
-                StatTile("Pickup lift", liftText(r.overall), Modifier.weight(1f), caption = liftCaption(r.overall))
+            StatStrip {
+                Stat("Notifications", "${r.totalVolume}", Modifier.weight(1f))
+                Stat("Pickup lift", liftText(r.overall), Modifier.weight(1f), caption = liftCaption(r.overall))
             }
             Muted(
                 "Pickup lift compares how often you picked up within a minute of an alert with how often you pick up in any minute of " +
@@ -430,7 +437,7 @@ fun LazyListScope.alertsSection(data: NotificationCostData, sort: NotificationSo
             NotificationSort.entries.forEach { s -> FilterChip(selected = sort == s, onClick = { onSort(s) }, label = { Text(s.label) }) }
         }
     }
-    if (r.rows.isEmpty() && r.coveredMs > 0) item("al-empty") { Muted("No notifications recorded in this window.", Modifier.padding(horizontal = Space.s)) }
+    if (r.rows.isEmpty() && r.coveredMs > 0) item("al-empty") { Muted("No notifications recorded in this window.", Modifier.padding(horizontal = Spacing.s)) }
     items(r.rows, key = { "al-${it.pkgId}" }) { row -> NotificationAppCard(row, data.apps) }
 }
 
@@ -441,8 +448,8 @@ private fun liftCaption(l: PickupLift): String = if (l.lift == null) "Need more 
 @Composable
 private fun NotificationAppCard(row: NotificationCostRow, apps: LabApps) {
     var expanded by rememberSaveable(row.pkgId) { mutableStateOf(false) }
-    Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth().animateContentSize()) {
-        Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.s)) {
+    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerLow, modifier = Modifier.fillMaxWidth().animateContentSize(Motion.spatial())) {
+        Column(Modifier.padding(Spacing.l), verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
             Row(
                 Modifier
                     .fillMaxWidth()
@@ -451,21 +458,19 @@ private fun NotificationAppCard(row: NotificationCostRow, apps: LabApps) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(Modifier.weight(1f)) {
-                    Text(apps.name(row.pkgId), style = MaterialTheme.typography.titleMedium)
+                    Text(apps.name(row.pkgId), style = MaterialTheme.typography.bodyLarge)
                     Muted(costLine(row))
                 }
                 if (row.channels.isNotEmpty()) {
-                    Icon(
-                        if (expanded) Icons.Outlined.ExpandLess else Icons.Outlined.ExpandMore,
-                        contentDescription = if (expanded) "Hide channels" else "Show ${row.channels.size} channels",
-                    )
+                    val chevron by animateFloatAsState(if (expanded) 180f else 0f, Motion.spatialFast(), label = "chevron")
+                    Icon(Icons.Outlined.ExpandMore, contentDescription = if (expanded) "Hide channels" else "Show ${row.channels.size} channels", modifier = Modifier.rotate(chevron))
                 }
             }
             if (!expanded) row.target?.let { MuteButton(it, "Notification settings") }
             if (expanded) {
                 row.channels.forEach { ch ->
-                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
-                        Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+                    Surface(shape = MaterialTheme.shapes.small, color = MaterialTheme.colorScheme.surfaceContainerHigh, modifier = Modifier.fillMaxWidth()) {
+                        Column(Modifier.padding(Spacing.m), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                             Text(channelLabel(ch.channelId), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
                             Muted(costLine(ch))
                             ch.target?.let {
@@ -496,13 +501,13 @@ private fun costLine(r: NotificationCostRow): String = buildString {
 @Composable
 private fun MuteButton(target: NotificationSettingsTarget, label: String) {
     val context = LocalContext.current
-    OutlinedButton(onClick = {
+    FilledTonalButton(onClick = {
         if (!NotificationSettingsIntents.open(context, target)) {
             Toast.makeText(context, "Couldn't open notification settings on this device.", Toast.LENGTH_SHORT).show()
         }
     }) {
         Icon(Icons.Outlined.NotificationsOff, null)
-        Spacer(Modifier.width(Space.s))
+        Spacer(Modifier.width(Spacing.s))
         Text(label)
     }
 }
@@ -512,7 +517,7 @@ private fun MuteButton(target: NotificationSettingsTarget, label: String) {
 fun LazyListScope.rhythmSection(data: RhythmData, metric: HeatMetric, onMetric: (HeatMetric) -> Unit) {
     val r = data.report
     item("rh-map") {
-        SectionCard("Your week by hour", eyebrow = "Circadian heatmap", icon = Icons.Outlined.GridOn) {
+        LabBlock("Your week by hour") {
             ChipRow {
                 HeatMetric.entries.forEach { m -> FilterChip(selected = metric == m, onClick = { onMetric(m) }, label = { Text(m.label) }) }
             }
@@ -530,17 +535,17 @@ fun LazyListScope.rhythmSection(data: RhythmData, metric: HeatMetric, onMetric: 
     }
     item("rh-sleep") {
         val s = r.sleep
-        SectionCard("Nights", eyebrow = "Sleep proxy", icon = Icons.Outlined.Bedtime) {
-            StatRow {
-                StatTile("Phone-free night", s.overnightGap.overallMs?.let { formatDurationShort(it) } ?: "—", Modifier.weight(1f), caption = trendCaption(s.overnightGap, higherIsBetter = true))
-                StatTile(
+        LabBlock("Nights") {
+            StatStrip {
+                Stat("Phone-free night", s.overnightGap.overallMs?.let { formatDurationShort(it) } ?: "—", Modifier.weight(1f), caption = trendCaption(s.overnightGap, higherIsBetter = true))
+                Stat(
                     "First pickup",
                     s.firstPickupMinute?.let { "%02d:%02d".format(Locale.US, it / 60, it % 60) } ?: "—",
                     Modifier.weight(1f),
                     caption = "typical, ${s.firstPickupDays} days",
                 )
             }
-            StatTile(
+            Stat(
                 "Late night (23:00–04:00)",
                 s.lateNight.overallMs?.let { formatDurationShort(it) + " a day" } ?: "—",
                 Modifier.fillMaxWidth(),
@@ -551,7 +556,7 @@ fun LazyListScope.rhythmSection(data: RhythmData, metric: HeatMetric, onMetric: 
     }
     item("rh-gaps") {
         val g = r.gaps
-        SectionCard("Time between pickups", eyebrow = "Inter-pickup gaps", icon = Icons.Outlined.HourglassBottom) {
+        LabBlock("Time between pickups") {
             if (g.count == 0) {
                 Muted("Not enough pickups recorded yet.")
             } else {
@@ -580,7 +585,7 @@ fun LazyListScope.frictionSection(data: FrictionData) {
     val r = data.report
     item("fr-exits") {
         val e = r.exits
-        SectionCard("After a pause", eyebrow = "Immediate exits", icon = Icons.Outlined.Psychology) {
+        LabBlock("After a pause") {
             if (r.launchPauses == 0) {
                 Muted("No launch pauses in this window. Friction may be off, or no paused app was opened.")
             } else {
@@ -590,10 +595,10 @@ fun LazyListScope.frictionSection(data: FrictionData) {
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (e.exits > 0) {
-                    StatRow {
-                        StatTile("Stayed away", "${e.sustained}", Modifier.weight(1f), caption = "10+ min, recorded")
-                        StatTile("Back quickly", "${e.quickReopens}", Modifier.weight(1f), caption = "within 10 min")
-                        StatTile("Unknown", "${e.unresolved}", Modifier.weight(1f), caption = "not yet / gap")
+                    StatStrip {
+                        Stat("Stayed away", "${e.sustained}", Modifier.weight(1f), caption = "10+ min, recorded")
+                        Stat("Back quickly", "${e.quickReopens}", Modifier.weight(1f), caption = "within 10 min")
+                        Stat("Unknown", "${e.unresolved}", Modifier.weight(1f), caption = "not yet / gap")
                     }
                 }
                 Muted("\"Stayed away\" only counts when ten minutes were fully recorded with no distracting app, nor the paused app itself, reopened.")
@@ -602,14 +607,14 @@ fun LazyListScope.frictionSection(data: FrictionData) {
     }
     item("fr-timer") {
         val t = r.timer
-        SectionCard("Session timers", eyebrow = "Adherence", icon = Icons.Outlined.Timer) {
+        LabBlock("Session timers") {
             if (t.timersSet == 0 && t.expiries == 0) {
                 Muted("No timers set in this window.")
             } else {
-                StatRow {
-                    StatTile("Closed on time", "${t.closedOnExpiry}", Modifier.weight(1f), caption = "of ${t.expiries} expiries")
-                    StatTile("+5 min", "${t.extended}", Modifier.weight(1f))
-                    StatTile("Kept going", "${t.dismissed}", Modifier.weight(1f))
+                StatStrip {
+                    Stat("Closed on time", "${t.closedOnExpiry}", Modifier.weight(1f), caption = "of ${t.expiries} expiries")
+                    Stat("+5 min", "${t.extended}", Modifier.weight(1f))
+                    Stat("Kept going", "${t.dismissed}", Modifier.weight(1f))
                 }
                 Muted("${t.timersSet} timers chosen at launch.")
             }
@@ -617,7 +622,7 @@ fun LazyListScope.frictionSection(data: FrictionData) {
     }
     item("fr-habit") {
         val h = r.habituation
-        SectionCard("Habituation", eyebrow = "Is the pause still noticed?", icon = Icons.Outlined.HourglassBottom) {
+        LabBlock("Habituation") {
             if (h.recentMedianMs == null || h.earlierMedianMs == null) {
                 Muted("Need at least 10 continued pauses with a recorded reaction (${h.samples} so far).")
             } else {
@@ -632,7 +637,7 @@ fun LazyListScope.frictionSection(data: FrictionData) {
         }
     }
     item("fr-sub") {
-        SectionCard("Where the time went", eyebrow = "Substitution", icon = Icons.Outlined.SwapHoriz) {
+        LabBlock("Where the time went") {
             val s = r.substitution
             if (s == null) {
                 Muted("Needs at least 3 fully recorded days in both this period and the one before.")
@@ -646,7 +651,7 @@ fun LazyListScope.frictionSection(data: FrictionData) {
                     Text(
                         "Distracting time went down while neutral time went up, with friction on. Some of that time may have moved rather than gone.",
                         style = MaterialTheme.typography.bodyMedium,
-                        color = LocalStatusColors.current.warn,
+                        color = Lagrange.colors.caution.accent,
                     )
                 }
                 if (s.risingNeutral.isNotEmpty()) {
@@ -660,7 +665,7 @@ fun LazyListScope.frictionSection(data: FrictionData) {
         Muted(
             "${r.snoozes} one-hour snoozes" + (r.frictionCoverage?.let { " · friction service running ${pct(it)} of recorded days" } ?: "") +
                 " · ${scopeLine(data.scope)}",
-            Modifier.padding(horizontal = Space.s),
+            Modifier.padding(horizontal = Spacing.s),
         )
     }
 }

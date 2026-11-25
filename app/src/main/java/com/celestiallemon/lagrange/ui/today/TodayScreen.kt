@@ -1,10 +1,12 @@
 package com.celestiallemon.lagrange.ui.today
 
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,38 +14,27 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Star
-import androidx.compose.material.icons.outlined.AutoAwesome
 import androidx.compose.material.icons.outlined.EditNote
-import androidx.compose.material.icons.outlined.Insights
-import androidx.compose.material.icons.outlined.Nightlight
-import androidx.compose.material.icons.outlined.RadioButtonChecked
-import androidx.compose.material.icons.outlined.Spa
+import androidx.compose.material.icons.outlined.ExpandMore
+import androidx.compose.material.icons.outlined.HourglassEmpty
 import androidx.compose.material.icons.outlined.Sync
-import androidx.compose.material.icons.outlined.Timeline
-import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material.icons.outlined.WarningAmber
-import androidx.compose.material.icons.outlined.Whatshot
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -52,216 +43,128 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
+import androidx.compose.ui.composed
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.celestiallemon.lagrange.data.CheckInCard
+import com.celestiallemon.lagrange.data.RecomputeProgress
 import com.celestiallemon.lagrange.data.db.AppCategory
 import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.data.db.PackageEntity
+import com.celestiallemon.lagrange.system.PermissionHealth
+import com.celestiallemon.lagrange.ui.CollectorStats
 import com.celestiallemon.lagrange.ui.EpisodeUi
 import com.celestiallemon.lagrange.ui.MainViewModel
 import com.celestiallemon.lagrange.ui.TodayState
 import com.celestiallemon.lagrange.ui.TodayViewModel
+import com.celestiallemon.lagrange.ui.components.AppAvatar
+import com.celestiallemon.lagrange.ui.components.Banner
+import com.celestiallemon.lagrange.ui.components.BarRow
+import com.celestiallemon.lagrange.ui.components.Choice
+import com.celestiallemon.lagrange.ui.components.CountUpText
+import com.celestiallemon.lagrange.ui.components.Dot
+import com.celestiallemon.lagrange.ui.components.EmptyState
+import com.celestiallemon.lagrange.ui.components.Info
 import com.celestiallemon.lagrange.ui.components.LagrangeScreen
-import com.celestiallemon.lagrange.ui.lab.WorthCheckInCard
-import com.celestiallemon.lagrange.ui.components.SectionCard
-import com.celestiallemon.lagrange.ui.components.StatRow
-import com.celestiallemon.lagrange.ui.components.StatTile
-import com.celestiallemon.lagrange.ui.components.StatusPill
-import com.celestiallemon.lagrange.ui.formatAgo
+import com.celestiallemon.lagrange.ui.components.OrbitGauge
+import com.celestiallemon.lagrange.ui.components.Panel
+import com.celestiallemon.lagrange.ui.components.SectionHeader
+import com.celestiallemon.lagrange.ui.components.Segment
+import com.celestiallemon.lagrange.ui.components.SplitMeter
+import com.celestiallemon.lagrange.ui.components.Stat
+import com.celestiallemon.lagrange.ui.components.StatStrip
+import com.celestiallemon.lagrange.ui.components.Tag
 import com.celestiallemon.lagrange.ui.formatClock
-import com.celestiallemon.lagrange.ui.formatCount
 import com.celestiallemon.lagrange.ui.formatDay
 import com.celestiallemon.lagrange.ui.formatDuration
 import com.celestiallemon.lagrange.ui.formatDurationShort
 import com.celestiallemon.lagrange.ui.friction.categoryColor
 import com.celestiallemon.lagrange.ui.friction.label
-import com.celestiallemon.lagrange.ui.theme.EyebrowStyle
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
-import com.celestiallemon.lagrange.ui.theme.Space
-import kotlin.math.cos
-import kotlin.math.sin
+import com.celestiallemon.lagrange.ui.theme.Lagrange
+import com.celestiallemon.lagrange.ui.theme.Motion
+import com.celestiallemon.lagrange.ui.theme.NumberStyles
+import com.celestiallemon.lagrange.ui.theme.Spacing
+import com.celestiallemon.lagrange.ui.theme.Tone
+import com.celestiallemon.lagrange.ui.theme.rise
 
-private enum class TimelineFilter(val label: String) { ALL("All"), RABBIT("Rabbit holes"), NOTIFIED("Notification-led"), RATED("Rated") }
+internal enum class TimelineFilter(val label: String) { ALL("All"), RABBIT("Rabbit holes"), NOTIFIED("From notifications"), RATED("Rated") }
+
+/** What Today can do; the screen itself holds no business logic. */
+class TodayActions(
+    val onEditBudget: () -> Unit = {},
+    val onEditNote: () -> Unit = {},
+    val onOpenSession: (EpisodeUi) -> Unit = {},
+    val onRateCheckIn: (CheckInCard, Int) -> Unit = { _, _ -> },
+    val onDismissCheckIn: (CheckInCard) -> Unit = {},
+    val onOpenCheckIn: ((CheckInCard) -> Unit)? = null,
+    val onOpenSettings: () -> Unit = {},
+)
 
 @Composable
-fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () -> Unit, today: TodayViewModel = viewModel()) {
+fun TodayScreen(
+    main: MainViewModel,
+    padding: PaddingValues,
+    actions: @Composable RowScope.() -> Unit,
+    onOpenSettings: () -> Unit,
+    today: TodayViewModel = viewModel(),
+) {
     val stats by main.stats.collectAsStateWithLifecycle()
     val health by main.health.collectAsStateWithLifecycle()
     val state by today.state.collectAsStateWithLifecycle()
     val progress by today.progress.collectAsStateWithLifecycle()
     val detail by today.detail.collectAsStateWithLifecycle()
     val checkIn by today.checkIn.collectAsStateWithLifecycle()
-    val status = LocalStatusColors.current
-    val now = System.currentTimeMillis()
 
-    var filter by rememberSaveable { mutableStateOf(TimelineFilter.ALL) }
-    var showGlances by rememberSaveable { mutableStateOf(false) }
     // Keyed by episode key, not row id: a rebuild replaces rows (new ids) but keeps keys, so the sheet stays open.
     var openKey by rememberSaveable { mutableStateOf<String?>(null) }
     var editingBudget by remember { mutableStateOf(false) }
     var editingNote by remember { mutableStateOf(false) }
-
     val s = state
-    val rollup = s?.rollup
-    val dayStatus = dayStatusOf(rollup?.dayStatus)
-
-    LagrangeScreen(
-        eyebrow = "Today" + (s?.date?.let { " · ${formatDay(it)}" } ?: ""),
-        title = headline(s, dayStatus),
-        subtitle = subtitle(s, dayStatus),
-        contentPadding = padding,
-    ) {
-        if (progress.running) {
-            item("recompute") {
-                Surface(shape = CircleShape, color = MaterialTheme.colorScheme.secondaryContainer) {
-                    Row(Modifier.padding(horizontal = Space.m, vertical = Space.s), verticalAlignment = Alignment.CenterVertically) {
-                        Icon(Icons.Outlined.Sync, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSecondaryContainer)
-                        Spacer(Modifier.width(Space.s))
-                        Text(
-                            "Rebuilding timeline · ${progress.doneDays}/${progress.totalDays} days",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer,
-                        )
-                    }
-                }
-            }
-        }
-        if (!health.coreReady) {
-            item("setup") {
-                SectionCard(
-                    title = "Finish setting up",
-                    eyebrow = "Action needed",
-                    icon = Icons.Outlined.WarningAmber,
-                    container = MaterialTheme.colorScheme.tertiaryContainer,
-                ) {
-                    Text(
-                        "Usage Access and Notification Access let Lagrange collect. Until both are on, days are marked as partial coverage.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                    )
-                    FilledTonalButton(onClick = onOpenSystem) { Text("Open Permission Health") }
-                }
-            }
-        }
-
-        if (s != null) {
-            item("budget") { BudgetOrbitCard(s, onEdit = { editingBudget = true }) }
-            item("note") { DayNoteChip(s, onEdit = { editingNote = true }) }
-            checkIn?.let { card ->
-                item("checkin") {
-                    val key = card.episode.episodeKey
-                    WorthCheckInCard(
-                        card,
-                        onRate = { today.rate(key, card.episode.startMs, it) },
-                        onDismiss = { today.dismissCheckIn(key) },
-                        // Today's sheet shows today's sessions; an earlier one is rated right here on the card.
-                        onOpen = if (s.episodes.any { it.session.episodeKey == key }) {
-                            {
-                                openKey = key
-                                today.loadDetail(key)
-                            }
-                        } else {
-                            null
-                        },
-                    )
-                }
-            }
-            if (rollup != null) {
-                item("baseline") { BaselineCard(s, dayStatus) }
-                if (dayStatus == DayStatus.SPIKE || dayStatus == DayStatus.GOOD_DAY) {
-                    item("highlight") { HighlightCard(s, dayStatus) }
-                }
-                item("focus") { FocusCard(s, now) }
-                item("categories") { CategoryCard(s) }
-                item("metrics") { MetricsCard(s) }
-            } else {
-                item("empty") {
-                    SectionCard(title = "Your first timeline is on its way", eyebrow = "Reconstructing", icon = Icons.Outlined.AutoAwesome) {
-                        Text(
-                            "As soon as a harvest lands, Lagrange turns raw usage events into honest episodes: glances, micro-checks, focused stretches and rabbit holes.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            val visible = s.episodes.filter { ep ->
-                (showGlances || !ep.session.isGlanceOnly) && when (filter) {
-                    TimelineFilter.ALL -> true
-                    TimelineFilter.RABBIT -> ep.session.isRabbitHole
-                    TimelineFilter.NOTIFIED -> triggerOf(ep.session.triggerEvidence)?.isNotificationLed == true
-                    TimelineFilter.RATED -> ep.session.worthItRating != null
-                }
-            }.asReversed()
-            item("timeline-header") {
-                TimelineHeader(
-                    total = s.episodes.count { !it.session.isGlanceOnly },
-                    glances = s.episodes.count { it.session.isGlanceOnly },
-                    filter = filter,
-                    onFilter = { filter = it },
-                    showGlances = showGlances,
-                    onShowGlances = { showGlances = it },
-                )
-            }
-            if (visible.isEmpty()) {
-                item("timeline-empty") {
-                    Text(
-                        if (s.episodes.isEmpty()) "No sessions yet today." else "Nothing matches this filter.",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = Space.s),
-                    )
-                }
-            }
-            items(visible, key = { "ep-${it.id}" }) { ep ->
-                EpisodeCard(ep, s.packages, onClick = {
-                    openKey = ep.session.episodeKey
-                    today.loadDetail(ep.session.episodeKey)
-                })
-            }
-        }
-
-        item("collected") {
-            SectionCard(title = "Collection health", eyebrow = "Since your day began", icon = Icons.Outlined.RadioButtonChecked) {
-                StatRow {
-                    StatTile("Usage events", formatCount(stats.rawEventsToday), Modifier.weight(1f))
-                    StatTile("Notifications", formatCount(stats.notificationsToday), Modifier.weight(1f))
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                    CoverageLine(
-                        "Usage harvest",
-                        if (stats.lastHarvestAtMs == null) "Waiting for first harvest" else "Last harvest ${formatAgo(stats.lastHarvestAtMs, now)}",
-                        if (stats.harvestOverdue(now) || stats.lastHarvestAtMs == null) status.warn else status.good,
-                    )
-                    CoverageLine(
-                        "Notification listener",
-                        if (stats.listenerActive) "Recording metadata" else "Not connected",
-                        if (stats.listenerActive) status.good else status.warn,
-                    )
-                }
-            }
-        }
+    fun open(key: String) {
+        openKey = key
+        today.loadDetail(key)
     }
 
-    val open = openKey?.let { key -> s?.episodes?.firstOrNull { it.session.episodeKey == key } }
-    if (open != null && s != null) {
+    TodayContent(
+        state = s,
+        stats = stats,
+        health = health,
+        progress = progress,
+        checkIn = checkIn,
+        now = System.currentTimeMillis(),
+        padding = padding,
+        topActions = actions,
+        actions = TodayActions(
+            onEditBudget = { editingBudget = true },
+            onEditNote = { editingNote = true },
+            onOpenSession = { open(it.session.episodeKey) },
+            onRateCheckIn = { card, r -> today.rate(card.episode.episodeKey, card.episode.startMs, r) },
+            onDismissCheckIn = { today.dismissCheckIn(it.episode.episodeKey) },
+            // Today's sheet shows today's sessions; an earlier one is rated right on the card.
+            onOpenCheckIn = { card -> if (s?.episodes?.any { it.session.episodeKey == card.episode.episodeKey } == true) open(card.episode.episodeKey) },
+            onOpenSettings = onOpenSettings,
+        ),
+    )
+
+    val opened = openKey?.let { key -> s?.episodes?.firstOrNull { it.session.episodeKey == key } }
+    if (opened != null && s != null) {
         SessionDetailSheet(
-            episode = open,
+            episode = opened,
             packages = s.packages,
-            detail = detail?.takeIf { it.episodeKey == open.session.episodeKey },
-            onRate = { today.rate(open.session.episodeKey, open.session.startMs, it) },
+            detail = detail?.takeIf { it.episodeKey == opened.session.episodeKey },
+            onRate = { today.rate(opened.session.episodeKey, opened.session.startMs, it) },
             onDismiss = {
                 openKey = null
                 today.loadDetail(null)
@@ -269,238 +172,273 @@ fun TodayScreen(main: MainViewModel, padding: PaddingValues, onOpenSystem: () ->
         )
     }
     if (editingBudget && s != null) {
-        BudgetDialog(current = s.budgetMs, onDismiss = { editingBudget = false }, onSave = {
+        BudgetSheet(current = s.budgetMs, onDismiss = { editingBudget = false }, onSave = {
             today.setBudget(it)
             editingBudget = false
         })
     }
     if (editingNote && s != null) {
-        NoteDialog(initial = s.note?.noteText.orEmpty(), date = s.date, onDismiss = { editingNote = false }, onSave = {
+        NoteSheet(initial = s.note?.noteText.orEmpty(), date = s.date, onDismiss = { editingNote = false }, onSave = {
             today.saveNote(s.date, it)
             editingNote = false
         })
     }
 }
 
-private fun headline(s: TodayState?, status: DayStatus?): String = when {
-    s?.rollup == null -> "Building your baseline"
+@Composable
+fun TodayContent(
+    state: TodayState?,
+    stats: CollectorStats,
+    health: PermissionHealth,
+    progress: RecomputeProgress,
+    checkIn: CheckInCard?,
+    now: Long,
+    padding: PaddingValues,
+    topActions: @Composable RowScope.() -> Unit = {},
+    actions: TodayActions = TodayActions(),
+) {
+    var filter by rememberSaveable { mutableStateOf(TimelineFilter.ALL) }
+    var detailsOpen by rememberSaveable { mutableStateOf(false) }
+    val s = state
+    val dayStatus = dayStatusOf(s?.rollup?.dayStatus)
+
+    LagrangeScreen(title = "Today", contentPadding = padding, actions = topActions) {
+        // One banner at most, the most important first.
+        val banner = todayBanner(progress, health, stats, dayStatus, now)
+        if (banner != null) item("banner") { TodayBannerView(banner, actions.onOpenSettings, Modifier.rise(0)) }
+
+        if (s == null) return@LagrangeScreen
+        if (s.rollup == null) {
+            item("empty") {
+                EmptyState(
+                    title = "Your first timeline is on its way",
+                    body = "Lagrange is quietly recording. As soon as a harvest lands, raw events become honest sessions: " +
+                        "glances, quick checks, focused stretches and rabbit holes.",
+                    modifier = Modifier.rise(1),
+                )
+            }
+            return@LagrangeScreen
+        }
+
+        item("hero") { TodayHero(s, dayStatus, actions, Modifier.rise(1)) }
+        item("glance") { GlanceStrip(s, dayStatus, now, Modifier.rise(2)) }
+        if (checkIn != null) {
+            item("checkin") {
+                WorthCheckInCard(
+                    checkIn,
+                    onRate = { actions.onRateCheckIn(checkIn, it) },
+                    onDismiss = { actions.onDismissCheckIn(checkIn) },
+                    onOpen = actions.onOpenCheckIn?.let { open -> { open(checkIn) } },
+                    modifier = Modifier.rise(3),
+                )
+            }
+        }
+        item("where") { WhereItWent(s, Modifier.rise(4)) }
+
+        val unlocked = s.episodes.filter { !it.session.isGlanceOnly }
+        val visible = timelineRows(s.episodes, filter)
+        item("timeline-header") {
+            Column(Modifier.rise(5)) {
+                SectionHeader(
+                    "Sessions",
+                    supporting = "${unlocked.size} sessions · ${s.episodes.size - unlocked.size} glances",
+                    info = Info(
+                        "How sessions are rebuilt",
+                        "A session runs from unlocking the phone to locking it. Locks shorter than 15 seconds are merged in, " +
+                            "so a quick screen-off doesn't split one sitting into two.\n\nA glance is the screen coming on " +
+                            "without an unlock: a lock-screen check. Glances don't count toward active time.\n\nWhat started a " +
+                            "session is inferred from notification timing and is labelled modestly: \"after an alert\" means one " +
+                            "arrived in the minute before, not that it caused the pickup.",
+                    ),
+                )
+                Choice(TimelineFilter.entries, filter, { filter = it }, { it.label }, forceChips = true)
+            }
+        }
+        if (visible.isEmpty()) {
+            item("timeline-empty") {
+                Text(
+                    if (s.episodes.isEmpty()) "No sessions yet today." else "Nothing matches this filter.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(Spacing.l),
+                )
+            }
+        }
+        items(visible, key = { it.key }) { row ->
+            when (row) {
+                is TimelineRow.Session -> TimelineSession(row.ep, s.packages, first = row === visible.first(), onClick = { actions.onOpenSession(row.ep) })
+                is TimelineRow.Glances -> TimelineGlances(row.count)
+            }
+        }
+
+        item("details") {
+            DayDetails(s, expanded = detailsOpen, onToggle = { detailsOpen = !detailsOpen }, modifier = Modifier.padding(top = Spacing.xl))
+        }
+    }
+}
+
+// -- Banner -----------------------------------------------------------------------------------------------------------
+
+private enum class TodayBanner { Rebuilding, Setup, Overdue, Gap }
+
+private fun todayBanner(progress: RecomputeProgress, health: PermissionHealth, stats: CollectorStats, status: DayStatus?, now: Long): Pair<TodayBanner, RecomputeProgress>? = when {
+    progress.running -> TodayBanner.Rebuilding
+    !health.coreReady -> TodayBanner.Setup
+    stats.harvestOverdue(now) -> TodayBanner.Overdue
+    status == DayStatus.UNCERTAIN_COVERAGE -> TodayBanner.Gap
+    else -> null
+}?.let { it to progress }
+
+@Composable
+private fun TodayBannerView(b: Pair<TodayBanner, RecomputeProgress>, onOpenSettings: () -> Unit, modifier: Modifier) {
+    val (kind, p) = b
+    when (kind) {
+        TodayBanner.Rebuilding -> Banner(
+            "Rebuilding your timeline",
+            Tone.Brand,
+            Icons.Outlined.Sync,
+            body = "${p.doneDays} of ${p.totalDays} days done. Figures may shift a little until it finishes.",
+            modifier = modifier,
+        )
+        TodayBanner.Setup -> Banner(
+            "Finish setting up",
+            Tone.Caution,
+            Icons.Outlined.WarningAmber,
+            body = "Usage Access and Notification Access let Lagrange record. Until both are on, days count as partial.",
+            action = "Open permissions" to onOpenSettings,
+            modifier = modifier,
+        )
+        TodayBanner.Overdue -> Banner(
+            "Nothing recorded for over two days",
+            Tone.Caution,
+            Icons.Outlined.HourglassEmpty,
+            body = "Android keeps only about a week of usage history. Check battery settings so recording keeps up.",
+            action = "Check settings" to onOpenSettings,
+            modifier = modifier,
+        )
+        TodayBanner.Gap -> Banner(
+            "Recording had a gap today",
+            Tone.Caution,
+            Icons.Outlined.WarningAmber,
+            body = "Numbers are a lower bound, so today isn't compared with your usual.",
+            modifier = modifier,
+        )
+    }
+}
+
+// -- Hero -------------------------------------------------------------------------------------------------------------
+
+internal fun headline(s: TodayState, status: DayStatus?): String = when {
     status == DayStatus.SPIKE -> "A heavier day than usual"
     status == DayStatus.GOOD_DAY -> "A lighter day so far"
-    s.budgetMs > 0 && s.rollup.distractingMs > s.budgetMs -> "Past today's budget"
+    s.budgetMs > 0 && (s.rollup?.distractingMs ?: 0) > s.budgetMs -> "Past today's budget"
     status == DayStatus.NORMAL -> "A typical day so far"
-    else -> "Your day, reconstructed"
+    status == DayStatus.UNCERTAIN_COVERAGE -> "A partly recorded day"
+    else -> "Your day so far"
 }
 
-private fun subtitle(s: TodayState?, status: DayStatus?): String = when {
-    s?.rollup == null -> "Lagrange is quietly recording. Friction stays off for the first week or two so you get an honest before-and-after."
-    status == DayStatus.UNCERTAIN_COVERAGE -> "Collection had a gap today, so comparisons are paused rather than guessed."
-    status == DayStatus.INSUFFICIENT_BASELINE -> "Comparisons appear once a week of fully covered days exists."
-    else -> "Every pickup, reconstructed from what your phone actually logged."
-}
-
-// -- Budget orbit ---------------------------------------------------------------------------------------------------
-
+/**
+ * The answer to "how am I doing today?": distracting time against the budget, drawn as an orbit, and one sentence.
+ * Tapping the gauge edits the budget; the note lives right under it.
+ */
 @Composable
-private fun BudgetOrbitCard(s: TodayState, onEdit: () -> Unit) {
+private fun TodayHero(s: TodayState, status: DayStatus?, actions: TodayActions, modifier: Modifier) {
     val used = s.rollup?.distractingMs ?: 0L
     val budget = s.budgetMs.coerceAtLeast(1)
-    val ratio = used.toFloat() / budget
     val over = used > budget
-    val colors = LocalStatusColors.current
-    val arcColor = if (over) colors.bad else MaterialTheme.colorScheme.tertiary
-    val animated by animateFloatAsState(ratio.coerceAtMost(2f), animationSpec = tween(900), label = "budget")
-
-    SectionCard(title = null, container = MaterialTheme.colorScheme.surfaceContainerLow) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            OrbitRing(
-                fraction = animated,
-                color = arcColor,
-                modifier = Modifier
-                    .size(148.dp)
-                    .semantics { contentDescription = "${formatDurationShort(used)} of ${formatDurationShort(budget)} distracting budget used" },
-            ) {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(formatDurationShort(used), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                    Text("of ${formatDurationShort(budget)}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                }
-            }
-            Spacer(Modifier.width(Space.l))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-                Text("DISTRACTING TIME", style = EyebrowStyle, color = MaterialTheme.colorScheme.primary)
-                Text(
-                    if (over) "${formatDurationShort(used - budget)} over" else "${formatDurationShort(budget - used)} left",
-                    style = MaterialTheme.typography.titleLarge,
-                    color = if (over) colors.bad else MaterialTheme.colorScheme.onSurface,
-                )
-                Text(
-                    "Time in apps you marked distracting. Glances and blocked launch pauses don't count.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                TextButton(onClick = onEdit, contentPadding = PaddingValues(horizontal = 0.dp)) {
-                    Icon(Icons.Outlined.Tune, null, Modifier.size(18.dp))
-                    Spacer(Modifier.width(Space.s))
-                    Text("Edit budget")
-                }
-            }
-        }
-    }
-}
-
-/** A progress orbit: a faint track, the used arc, and a small body riding at its tip. Past 100% a second lap glows. */
-@Composable
-private fun OrbitRing(fraction: Float, color: Color, modifier: Modifier = Modifier, center: @Composable () -> Unit) {
-    val track = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f)
-    val glow = color.copy(alpha = 0.18f)
-    val body = MaterialTheme.colorScheme.primary
-    Box(modifier, contentAlignment = Alignment.Center) {
-        Canvas(Modifier.matchParentSize()) {
-            val stroke = size.minDimension * 0.075f
-            val r = size.minDimension / 2 - stroke
-            val c = this.center
-            drawCircle(Brush.radialGradient(listOf(glow, Color.Transparent), c, r * 1.1f), radius = r * 1.1f, center = c)
-            drawCircle(track, radius = r, center = c, style = Stroke(stroke))
-            val first = fraction.coerceIn(0f, 1f)
-            val topLeft = Offset(c.x - r, c.y - r)
-            val arcSize = androidx.compose.ui.geometry.Size(r * 2, r * 2)
-            if (first > 0f) drawArc(color, -90f, 360f * first, false, topLeft, arcSize, style = Stroke(stroke, cap = StrokeCap.Round))
-            if (fraction > 1f) {
-                drawArc(color.copy(alpha = 0.55f), -90f, 360f * (fraction - 1f).coerceAtMost(1f), false,
-                    Offset(c.x - r * 0.78f, c.y - r * 0.78f), androidx.compose.ui.geometry.Size(r * 1.56f, r * 1.56f),
-                    style = Stroke(stroke * 0.6f, cap = StrokeCap.Round))
-            }
-            val a = Math.toRadians((-90.0 + 360.0 * first))
-            drawCircle(body, radius = stroke * 0.55f, center = Offset(c.x + r * cos(a).toFloat(), c.y + r * sin(a).toFloat()))
-        }
-        center()
-    }
-}
-
-// -- Baseline --------------------------------------------------------------------------------------------------------
-
-@Composable
-private fun BaselineCard(s: TodayState, status: DayStatus?) {
-    val rollup = s.rollup ?: return
-    val cmp = s.comparison
-    val slice = cmp?.slice
-    val weekend = s.date.dayOfWeek.value >= 6
-    SectionCard(title = "Active phone time", eyebrow = "Against your usual", icon = Icons.Outlined.Insights) {
-        Row(verticalAlignment = Alignment.Bottom) {
-            Text(formatDurationShort(rollup.activeUsageMs), style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.SemiBold)
-            Spacer(Modifier.width(Space.m))
-            if (status != null) StatusPill(status.chip, dayStatusColor(status))
-        }
-        val line = when {
-            status == DayStatus.UNCERTAIN_COVERAGE ->
-                "A collection gap today means this number may be low. It won't be compared or used in baselines."
-            slice?.medianMs != null && cmp.dataEndMs > 0 ->
-                "Usually ${formatDurationShort(slice.medianMs)} by ${formatClock(cmp.dataEndMs)} on ${if (weekend) "weekends" else "weekdays"} (median of ${slice.days} covered days)."
-            cmp != null && cmp.coveredDays < cmp.coveredDaysNeeded ->
-                "Your baseline unlocks after ${cmp.coveredDaysNeeded} fully covered days. ${cmp.coveredDays} so far."
-            else -> "Not enough comparable ${if (weekend) "weekend" else "weekday"} history yet for a fair same-time comparison."
-        }
-        Text(line, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        if (cmp != null && cmp.coveredDays < cmp.coveredDaysNeeded && status != DayStatus.UNCERTAIN_COVERAGE) {
-            LinearProgressIndicator(
-                progress = { cmp.coveredDays.toFloat() / cmp.coveredDaysNeeded },
-                modifier = Modifier.fillMaxWidth().clip(CircleShape),
-            )
-        }
-        if (cmp?.fullDayMedianMs != null) {
-            Text(
-                "A full ${if (weekend) "weekend" else "weekday"} usually lands around ${formatDurationShort(cmp.fullDayMedianMs)}.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-    }
-}
-
-@Composable
-private fun HighlightCard(s: TodayState, status: DayStatus) {
-    val colors = LocalStatusColors.current
-    val spike = status == DayStatus.SPIKE
-    val accent = if (spike) colors.bad else colors.good
-    val top = s.apps.firstOrNull { s.packages[it.pkgId]?.category == AppCategory.DISTRACTING.name && it.totalMs > 0 }
-    val median = s.comparison?.slice?.medianMs
-    val active = s.rollup?.activeUsageMs ?: 0
-    SectionCard(
-        title = if (spike) "Spike" else "Good day",
-        eyebrow = "Highlight",
-        icon = if (spike) Icons.Outlined.Whatshot else Icons.Outlined.Spa,
-        container = accent.copy(alpha = 0.10f),
+    val colors = Lagrange.colors
+    val arc = if (over) colors.critical.accent else colors.category.distracting
+    val lowerBound = status == DayStatus.UNCERTAIN_COVERAGE
+    Column(
+        modifier
+            .fillMaxWidth()
+            .padding(top = Spacing.s, bottom = Spacing.l),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Spacing.m),
     ) {
-        val delta = median?.let { active - it }
-        val body = buildString {
-            if (delta != null) {
-                append(if (spike) "${formatDurationShort(delta)} above" else "${formatDurationShort(-delta)} below")
-                append(" what you usually reach by now.")
-            } else {
-                append(if (spike) "Well above your usual." else "Within budget and at or below your usual.")
-            }
-            if (top != null) {
-                val name = s.packages[top.pkgId]?.displayName ?: "One app"
-                append(if (spike) " Most of it: $name, ${formatDurationShort(top.totalMs)}." else " Top distracting app: $name, ${formatDurationShort(top.totalMs)}.")
+        Text(formatDay(s.date), style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        OrbitGauge(
+            fraction = used.toFloat() / budget,
+            color = arc,
+            modifier = Modifier
+                .clickable(onClickLabel = "Edit budget", onClick = actions.onEditBudget)
+                .semantics { contentDescription = "${formatDurationShort(used)} of ${formatDurationShort(budget)} distracting budget used" },
+        ) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (lowerBound) Text("≥", style = NumberStyles.stat, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    CountUpText(used, ::formatDurationShort, NumberStyles.hero.copy(fontSize = NumberStyles.hero.fontSize * 0.66f))
+                }
+                Text("of ${formatDurationShort(budget)}", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
         }
-        Text(body, style = MaterialTheme.typography.bodyLarge)
+        Text(headline(s, status), style = MaterialTheme.typography.headlineSmall, textAlign = TextAlign.Center)
+        Text(
+            when {
+                over -> "${formatDurationShort(used - budget)} over your distracting budget"
+                else -> "${formatDurationShort(budget - used)} left in your distracting budget"
+            },
+            style = MaterialTheme.typography.bodyLarge,
+            color = if (over) colors.critical.accent else MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.s, Alignment.CenterHorizontally), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+            if (status != null && status != DayStatus.NORMAL) Tag(status.chip, tone = status.tone, modifier = Modifier.align(Alignment.CenterVertically))
+            AssistChip(
+                onClick = actions.onEditNote,
+                label = { Text(s.note?.noteText ?: "Add a note", maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 200.dp)) },
+                leadingIcon = { Icon(Icons.Outlined.EditNote, null, Modifier.size(AssistChipDefaults.IconSize)) },
+            )
+        }
     }
 }
 
-// -- Focus ----------------------------------------------------------------------------------------------------------
+// -- Glance strip -----------------------------------------------------------------------------------------------------
 
 @Composable
-private fun FocusCard(s: TodayState, now: Long) {
-    val rollup = s.rollup ?: return
+private fun GlanceStrip(s: TodayState, status: DayStatus?, now: Long, modifier: Modifier) {
+    val r = s.rollup ?: return
+    val cmp = s.comparison
+    val median = cmp?.slice?.medianMs?.takeIf { status != DayStatus.UNCERTAIN_COVERAGE }
+    val activeCaption = when {
+        median != null -> "usually ${formatDurationShort(median)}"
+        cmp != null && cmp.coveredDays < cmp.coveredDaysNeeded -> "baseline ${cmp.coveredDays}/${cmp.coveredDaysNeeded} days"
+        else -> null
+    }
+    val activeTone = when {
+        median == null -> Tone.Neutral
+        r.activeUsageMs > median * 1.2 -> Tone.Ember
+        r.activeUsageMs < median * 0.8 -> Tone.Good
+        else -> Tone.Neutral
+    }
     val unlocked = s.episodes.filter { !it.session.isGlanceOnly }
     val inProgress = unlocked.lastOrNull()?.takeIf { it.isInProgress }
     val lastEnded = unlocked.lastOrNull { !it.isInProgress }
-    // While Lagrange itself is open there is always an in-progress episode; the honest "current" streak is the
-    // phone-free stretch that ended with this pickup.
+    // While Lagrange itself is open there is always an in-progress session; the honest "current" stretch is the one
+    // that ended with this pickup.
     val current = when {
         inProgress != null && lastEnded != null -> inProgress.session.startMs - lastEnded.session.endMs
         lastEnded != null -> now - lastEnded.session.endMs
         else -> null
     }
-    SectionCard(title = "Phone-free stretches", eyebrow = "Focus", icon = Icons.Outlined.Nightlight) {
-        StatRow {
-            StatTile(
-                if (inProgress != null) "Before this pickup" else "Current",
-                current?.let { formatDurationShort(it) } ?: "—",
+    Panel(modifier, spacing = Spacing.s) {
+        StatStrip {
+            Stat("Active", formatDurationShort(r.activeUsageMs), Modifier.weight(1f), caption = activeCaption, captionTone = activeTone)
+            Stat("Pickups", r.physicalPickupCount.toString(), Modifier.weight(1f), caption = "${r.episodeCount} sessions")
+            Stat(
+                "Phone-free",
+                if (r.longestFocusGapMs > 0) formatDurationShort(r.longestFocusGapMs) else "–",
                 Modifier.weight(1f),
+                caption = current?.let { (if (inProgress != null) "before this: " else "now: ") + formatDurationShort(it) } ?: "longest today",
             )
-            StatTile("Longest today", if (rollup.longestFocusGapMs > 0) formatDurationShort(rollup.longestFocusGapMs) else "—", Modifier.weight(1f))
-        }
-        StatRow {
-            StatTile("Overnight gap", rollup.overnightGapMs?.let { formatDurationShort(it) } ?: "—", Modifier.weight(1f), caption = "Sleep proxy")
-            StatTile("First pickup", rollup.firstPickupMs?.let { formatClock(it) } ?: "—", Modifier.weight(1f))
         }
     }
 }
 
-// -- Day note -------------------------------------------------------------------------------------------------------
+// -- Where it went ----------------------------------------------------------------------------------------------------
 
 @Composable
-private fun DayNoteChip(s: TodayState, onEdit: () -> Unit) {
-    val text = s.note?.noteText
-    AssistChip(
-        onClick = onEdit,
-        label = {
-            Text(
-                text ?: "Add a day note: travel, sick, deadline…",
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-        },
-        leadingIcon = { Icon(Icons.Outlined.EditNote, null, Modifier.size(AssistChipDefaults.IconSize)) },
-        shape = CircleShape,
-    )
-}
-
-// -- Categories & metrics -------------------------------------------------------------------------------------------
-
-@Composable
-private fun CategoryCard(s: TodayState) {
+private fun WhereItWent(s: TodayState, modifier: Modifier) {
     val r = s.rollup ?: return
     val parts = listOf(
         AppCategory.DISTRACTING to r.distractingMs,
@@ -508,210 +446,216 @@ private fun CategoryCard(s: TodayState) {
         AppCategory.UTILITY to r.utilityMs,
         AppCategory.EXCLUDED to r.excludedMs,
     ).filter { it.second > 0 }
-    val total = parts.sumOf { it.second }.coerceAtLeast(1)
-    SectionCard(title = "Where the time went", eyebrow = "Categories", icon = Icons.Outlined.Timeline) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+        SectionHeader(
+            "Where it went",
+            info = Info(
+                "Categories",
+                "Distracting apps count toward your budget and can have a launch pause. Neutral apps (messaging, the " +
+                    "browser) are tracked normally. Utility apps (maps, banking, 2FA) are never paused. Excluded apps are left " +
+                    "out of active time.\n\nChanging an app's category re-colours its whole history.",
+            ),
+        )
         if (parts.isEmpty()) {
             Text("No app time yet today.", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        } else {
-            Row(
-                Modifier
-                    .fillMaxWidth()
-                    .height(14.dp)
-                    .clip(CircleShape),
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-            ) {
-                parts.forEach { (cat, ms) ->
-                    Box(
-                        Modifier
-                            .weight((ms.toFloat() / total).coerceAtLeast(0.01f))
-                            .height(14.dp)
-                            .background(categoryColor(cat)),
-                    )
-                }
-            }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.m), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-                parts.forEach { (cat, ms) ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(10.dp).clip(CircleShape).background(categoryColor(cat)))
-                        Spacer(Modifier.width(6.dp))
-                        Text("${cat.label} ${formatDurationShort(ms)}", style = MaterialTheme.typography.labelLarge)
-                    }
+            return@Column
+        }
+        SplitMeter(parts.map { (c, ms) -> Segment(ms.toFloat(), categoryColor(c)) })
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.l), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
+            parts.forEach { (c, ms) ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Dot(categoryColor(c), size = 8.dp)
+                    Spacer(Modifier.width(6.dp))
+                    Text(c.label, style = MaterialTheme.typography.labelLarge)
+                    Spacer(Modifier.width(Spacing.xs))
+                    Text(formatDurationShort(ms), style = NumberStyles.inline, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
         }
         val top = s.apps.filter { it.totalMs > 0 }.take(5)
         if (top.isNotEmpty()) {
+            Spacer(Modifier.height(Spacing.xs))
             val max = top.first().totalMs.coerceAtLeast(1)
-            Column(verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                top.forEach { a ->
-                    val pkg = s.packages[a.pkgId]
-                    val cat = pkg?.category?.let { c -> AppCategory.entries.firstOrNull { it.name == c } } ?: AppCategory.NEUTRAL
-                    Column {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                            Text(pkg?.displayName ?: "Unknown app", style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-                            Text("${formatDurationShort(a.totalMs)} · ${a.openCount}×", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                        Spacer(Modifier.height(4.dp))
-                        Box(
-                            Modifier
-                                .fillMaxWidth((a.totalMs.toFloat() / max).coerceIn(0.02f, 1f))
-                                .height(6.dp)
-                                .clip(CircleShape)
-                                .background(categoryColor(cat).copy(alpha = 0.75f)),
-                        )
-                    }
-                }
+            top.forEach { a ->
+                val pkg = s.packages[a.pkgId]
+                val color = categoryColor(pkg.categoryOrNeutral())
+                BarRow(
+                    label = pkg?.displayName ?: "Unknown app",
+                    value = "${formatDurationShort(a.totalMs)} · ${a.openCount}×",
+                    fraction = a.totalMs.toFloat() / max,
+                    color = color,
+                    leading = { AppAvatar(pkg?.displayName ?: "?", color) },
+                )
             }
         }
     }
 }
 
-@Composable
-private fun MetricsCard(s: TodayState) {
-    val r = s.rollup ?: return
-    SectionCard(title = "Pickups & patterns", eyebrow = "Today's numbers", icon = Icons.Outlined.AutoAwesome) {
-        StatRow {
-            StatTile("Pickups", r.physicalPickupCount.toString(), Modifier.weight(1f))
-            StatTile("Sessions", r.episodeCount.toString(), Modifier.weight(1f))
-            StatTile("Glances", r.glanceCount.toString(), Modifier.weight(1f))
-        }
-        StatRow {
-            StatTile("Micro-checks", r.microCheckCount.toString(), Modifier.weight(1f))
-            StatTile("Rabbit holes", r.rabbitHoleCount.toString(), Modifier.weight(1f))
-            StatTile("Notifications", r.notificationCount.toString(), Modifier.weight(1f))
-        }
-        StatRow {
-            StatTile("Screen on", formatDurationShort(r.totalScreenMs), Modifier.weight(1f))
-            StatTile("Blocked", r.blockedAttemptCount.toString(), Modifier.weight(1f))
-            StatTile("Last active", r.lastActivityMs?.let { formatClock(it) } ?: "—", Modifier.weight(1f))
-        }
+internal fun PackageEntity?.categoryOrNeutral(): AppCategory =
+    this?.category?.let { c -> AppCategory.entries.firstOrNull { it.name == c } } ?: AppCategory.NEUTRAL
+
+// -- Timeline ---------------------------------------------------------------------------------------------------------
+
+internal sealed interface TimelineRow {
+    val key: String
+
+    data class Session(val ep: EpisodeUi) : TimelineRow {
+        override val key get() = "ep-${ep.session.episodeKey}"
+    }
+
+    data class Glances(val count: Int, val after: String) : TimelineRow {
+        override val key get() = "gl-$after"
     }
 }
 
-// -- Timeline -------------------------------------------------------------------------------------------------------
-
-@Composable
-private fun TimelineHeader(
-    total: Int,
-    glances: Int,
-    filter: TimelineFilter,
-    onFilter: (TimelineFilter) -> Unit,
-    showGlances: Boolean,
-    onShowGlances: (Boolean) -> Unit,
-) {
-    Column(Modifier.padding(top = Space.m), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-        Text("TIMELINE", style = EyebrowStyle, color = MaterialTheme.colorScheme.primary)
-        Text("$total sessions · $glances glances", style = MaterialTheme.typography.titleLarge)
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-            TimelineFilter.entries.forEach { f ->
-                FilterChip(selected = filter == f, onClick = { onFilter(f) }, label = { Text(f.label) })
-            }
-            FilterChip(selected = showGlances, onClick = { onShowGlances(!showGlances) }, label = { Text("Show glances") })
+/**
+ * Newest first. Glances are not hidden behind a toggle: in "All" each run of glances between two sessions shows as
+ * one quiet line on the rail, so the rhythm of the day stays visible without the noise.
+ */
+internal fun timelineRows(episodes: List<EpisodeUi>, filter: TimelineFilter): List<TimelineRow> {
+    val rows = ArrayList<TimelineRow>()
+    var glances = 0
+    var lastKey = "start"
+    for (ep in episodes) {
+        val s = ep.session
+        if (s.isGlanceOnly) {
+            glances++
+            continue
         }
+        val keep = when (filter) {
+            TimelineFilter.ALL -> true
+            TimelineFilter.RABBIT -> s.isRabbitHole
+            TimelineFilter.NOTIFIED -> triggerOf(s.triggerEvidence)?.isNotificationLed == true
+            TimelineFilter.RATED -> s.worthItRating != null
+        }
+        if (filter == TimelineFilter.ALL && glances > 0) rows += TimelineRow.Glances(glances, lastKey)
+        glances = 0
+        if (keep) rows += TimelineRow.Session(ep)
+        lastKey = s.episodeKey
     }
+    if (filter == TimelineFilter.ALL && glances > 0) rows += TimelineRow.Glances(glances, lastKey)
+    return rows.asReversed()
 }
 
+private val TimeColumn = 64.dp
+private val RailColumn = 24.dp
+
 @Composable
-fun EpisodeCard(ep: EpisodeUi, packages: Map<Long, PackageEntity>, onClick: () -> Unit) {
+private fun TimelineSession(ep: EpisodeUi, packages: Map<Long, PackageEntity>, first: Boolean, onClick: () -> Unit) {
     val s = ep.session
     val archetype = archetypeOf(s.archetype)
-    val trigger = triggerOf(s.triggerEvidence)
-    val rabbit = s.isRabbitHole
-    val colors = LocalStatusColors.current
-    val accent = if (rabbit) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
-    val shape = RoundedCornerShape(24.dp)
-    Surface(
-        shape = shape,
-        color = if (rabbit) MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.55f) else MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier
+    val c = Lagrange.colors
+    val node = when {
+        s.isRabbitHole -> c.ember.accent
+        s.totalDistractingMs > 0 -> c.category.distracting.copy(alpha = 0.55f)
+        else -> MaterialTheme.colorScheme.outline
+    }
+    Row(Modifier.fillMaxWidth().rail(node, filled = s.isRabbitHole || s.totalDistractingMs > 0, live = ep.isInProgress, first = first, nodeY = Spacing.l + 10.dp)) {
+        Column(Modifier.width(TimeColumn).padding(top = Spacing.l)) {
+            Text(formatClock(s.startMs), style = NumberStyles.inline, maxLines = 1, softWrap = false)
+        }
+        Spacer(Modifier.width(RailColumn))
+        Panel(
+            modifier = Modifier.weight(1f),
+            onClick = onClick,
+            onClickLabel = "Open session",
+            shape = MaterialTheme.shapes.medium,
+            color = if (s.isRabbitHole) c.ember.container.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceContainerLow,
+            padding = PaddingValues(Spacing.l),
+            spacing = Spacing.xs,
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(archetype?.label ?: s.archetype, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(
+                    formatDuration(s.activeDurationMs) + if (ep.isInProgress) " · now" else "",
+                    style = NumberStyles.inline,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            val chain = hopChain(ep, packages)
+            if (chain.isNotEmpty()) Text(chain, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            SessionTags(ep, Modifier.padding(top = Spacing.xs))
+        }
+    }
+}
+
+@Composable
+private fun TimelineGlances(count: Int) {
+    Row(
+        Modifier
             .fillMaxWidth()
-            .then(if (rabbit) Modifier.border(1.dp, MaterialTheme.colorScheme.tertiary.copy(alpha = 0.5f), shape) else Modifier)
-            .clip(shape)
-            .clickable(onClick = onClick),
+            .height(36.dp)
+            .rail(MaterialTheme.colorScheme.outlineVariant, filled = true, live = false, first = false, nodeY = 18.dp, small = true),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Row(Modifier.padding(Space.m), verticalAlignment = Alignment.Top) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.width(52.dp)) {
-                Text(formatClock(s.startMs), style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(Space.xs))
-                Box(
-                    Modifier
-                        .size(28.dp)
-                        .clip(CircleShape)
-                        .background(accent.copy(alpha = 0.16f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Icon(archetype?.icon ?: unknownIcon, null, Modifier.size(16.dp), tint = accent)
+        Spacer(Modifier.width(TimeColumn + RailColumn))
+        Text(
+            if (count == 1) "1 glance" else "$count glances",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * The vertical line the day hangs on, drawn behind a whole timeline row at the rail column. It extends past the row
+ * so rows separated by list spacing join into one continuous line. The live session's node breathes gently
+ * (unless motion is reduced).
+ */
+private fun Modifier.rail(color: Color, filled: Boolean, live: Boolean, first: Boolean, nodeY: Dp, small: Boolean = false): Modifier = composed {
+    val line = MaterialTheme.colorScheme.outlineVariant
+    val surface = MaterialTheme.colorScheme.surface
+    val pulse = if (live && !Lagrange.reducedMotion) {
+        rememberInfiniteTransition(label = "live").animateFloat(0f, 1f, infiniteRepeatable(tween(1600, easing = Motion.Emphasized), RepeatMode.Reverse), label = "live-pulse").value
+    } else {
+        0f
+    }
+    drawBehind {
+        val x = (TimeColumn + RailColumn / 2).toPx()
+        val y = nodeY.toPx()
+        val gap = Spacing.s.toPx()
+        drawLine(line, Offset(x, if (first) y else -gap), Offset(x, size.height + gap), strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+        val r = (if (small) 3.dp else 6.dp).toPx()
+        if (live) drawCircle(color.copy(alpha = 0.25f * (1f - pulse)), radius = r * (1.8f + 1.4f * pulse), center = Offset(x, y))
+        drawCircle(surface, radius = r + 3.dp.toPx(), center = Offset(x, y))
+        if (filled) drawCircle(color, radius = r, center = Offset(x, y)) else drawCircle(color, radius = r - 1.dp.toPx(), center = Offset(x, y), style = Stroke(2.dp.toPx()))
+    }
+}
+
+// -- Day details ------------------------------------------------------------------------------------------------------
+
+/** Everything else about the day, folded away: useful, but not what you open the app for. */
+@Composable
+private fun DayDetails(s: TodayState, expanded: Boolean, onToggle: () -> Unit, modifier: Modifier) {
+    val r = s.rollup ?: return
+    val chevron by animateFloatAsState(if (expanded) 180f else 0f, Motion.spatialFast(), label = "chevron")
+    Panel(modifier.animateContentSize(Motion.spatial()), onClick = onToggle, onClickLabel = if (expanded) "Hide day details" else "Show day details") {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Day details", style = MaterialTheme.typography.titleMedium)
+                if (!expanded) {
+                    Text("Glances, quick checks, notifications, screen time…", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
-            Spacer(Modifier.width(Space.m))
-            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        archetype?.label ?: s.archetype,
-                        style = MaterialTheme.typography.titleMedium,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(
-                        formatDuration(s.activeDurationMs) + if (ep.isInProgress) " · now" else "",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                val chain = hopChain(ep, packages)
-                if (chain.isNotEmpty()) {
-                    Text(chain, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
-                }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    if (trigger != null) MiniBadge(trigger.badge, if (trigger.isNotificationLed) MaterialTheme.colorScheme.secondary else colors.neutral)
-                    if (s.physicalPickupCount > 1) MiniBadge("${s.physicalPickupCount} pickups", colors.neutral)
-                    if (s.blockedAttemptCount > 0) MiniBadge("${s.blockedAttemptCount} blocked", colors.good)
-                    if (ep.hasUncertainTail) MiniBadge("End uncertain", colors.warn)
-                    s.worthItRating?.let { RatingBadge(it) }
+            Icon(Icons.Outlined.ExpandMore, contentDescription = null, modifier = Modifier.rotate(chevron))
+        }
+        if (expanded) {
+            val cells = listOf(
+                "Screen on" to formatDurationShort(r.totalScreenMs),
+                "Glances" to r.glanceCount.toString(),
+                "Quick checks" to r.microCheckCount.toString(),
+                "Rabbit holes" to r.rabbitHoleCount.toString(),
+                "Notifications" to r.notificationCount.toString(),
+                "Paused opens" to r.blockedAttemptCount.toString(),
+                "First pickup" to (r.firstPickupMs?.let { formatClock(it) } ?: "–"),
+                "Last active" to (r.lastActivityMs?.let { formatClock(it) } ?: "–"),
+                "Overnight" to (r.overnightGapMs?.let { formatDurationShort(it) } ?: "–"),
+            )
+            cells.chunked(3).forEach { row ->
+                StatStrip {
+                    row.forEach { (label, value) -> Stat(label, value, Modifier.weight(1f), valueStyle = NumberStyles.stat.copy(fontSize = NumberStyles.stat.fontSize * 0.8f)) }
                 }
             }
         }
-    }
-}
-
-/** "Instagram → Chrome → YouTube", collapsing repeats and leaving out system surfaces. */
-fun hopChain(ep: EpisodeUi, packages: Map<Long, PackageEntity>): String {
-    val names = ArrayList<String>()
-    for (seg in ep.segments) {
-        val p = packages[seg.pkgId]
-        if (p?.isLauncherOrSystemUi == true) continue
-        val name = p?.displayName ?: continue
-        if (names.lastOrNull() != name) names += name
-    }
-    return names.joinToString(" → ")
-}
-
-@Composable
-fun MiniBadge(text: String, color: Color) {
-    Surface(shape = CircleShape, color = color.copy(alpha = 0.13f)) {
-        Text(text, Modifier.padding(horizontal = 8.dp, vertical = 2.dp), style = MaterialTheme.typography.labelSmall, color = color)
-    }
-}
-
-@Composable
-fun RatingBadge(rating: Int) {
-    val color = when {
-        rating >= 4 -> LocalStatusColors.current.good
-        rating <= 2 -> LocalStatusColors.current.bad
-        else -> LocalStatusColors.current.neutral
-    }
-    Surface(shape = CircleShape, color = color.copy(alpha = 0.13f)) {
-        Row(Modifier.padding(horizontal = 8.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
-            Icon(Icons.Filled.Star, null, Modifier.size(12.dp), tint = color)
-            Spacer(Modifier.width(2.dp))
-            Text("$rating/5", style = MaterialTheme.typography.labelSmall, color = color)
-        }
-    }
-}
-
-@Composable
-private fun CoverageLine(label: String, detail: String, color: Color) {
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
-        Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-        StatusPill(detail, color)
     }
 }

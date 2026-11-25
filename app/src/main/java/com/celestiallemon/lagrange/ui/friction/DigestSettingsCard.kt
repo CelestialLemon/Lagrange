@@ -42,8 +42,15 @@ import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.celestiallemon.lagrange.data.UserPrefs
 import com.celestiallemon.lagrange.domain.digest.DigestKind
-import com.celestiallemon.lagrange.ui.components.SectionCard
-import com.celestiallemon.lagrange.ui.theme.Space
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import com.celestiallemon.lagrange.ui.components.Banner
+import com.celestiallemon.lagrange.ui.components.Choice
+import com.celestiallemon.lagrange.ui.components.ListRow
+import com.celestiallemon.lagrange.ui.components.RowGroup
+import com.celestiallemon.lagrange.ui.components.SwitchRow
+import com.celestiallemon.lagrange.ui.theme.Spacing
+import com.celestiallemon.lagrange.ui.theme.Tone
 
 private val isoDays = listOf(1 to "Mon", 2 to "Tue", 3 to "Wed", 4 to "Thu", 5 to "Fri", 6 to "Sat", 7 to "Sun")
 
@@ -110,99 +117,51 @@ internal fun DigestSettingsCard(prefs: UserPrefs, vm: FrictionViewModel) {
         }
     }
 
-    SectionCard(title = "Reflection digests", eyebrow = "Local summaries", icon = Icons.Outlined.NotificationsActive) {
-        Text(
-            "A quiet notification with your budget, biggest rabbit hole, longest phone-free stretch and launch-pause exits. Days with collection gaps are labelled as lower bounds, never compared.",
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-
+    Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         if (!allowed) {
-            Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.secondaryContainer) {
-                Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                    Text(
-                        "Digests need notification permission. Nothing leaves your phone: they are composed and shown on-device.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSecondaryContainer,
-                    )
-                    FilledTonalButton(onClick = { askPermission(0) }) { Text("Allow notifications") }
-                }
-            }
+            Banner(
+                "Digests need notification permission",
+                Tone.Brand,
+                Icons.Outlined.NotificationsActive,
+                body = "They're composed and shown on this phone. Nothing leaves it.",
+                action = "Allow notifications" to { askPermission(0) },
+            )
         }
-
-        // Daily
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Daily digest", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "After noon (logical day) it reports today so far; earlier, the day before.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
+        RowGroup {
+            SwitchRow(
+                "Daily digest",
                 checked = prefs.dailyDigestEnabled,
                 onCheckedChange = { on -> if (on && !allowed) askPermission(1) else vm.setDailyDigestEnabled(on) },
+                supporting = "Budget, biggest rabbit hole, longest phone-free stretch. After noon it covers today so far.",
             )
-        }
-        if (prefs.dailyDigestEnabled) {
-            TimeStepperRow("At", prefs.dailyDigestMinuteOfDay) { step ->
-                vm.setDailyDigestMinute((prefs.dailyDigestMinuteOfDay + step + 1440) % 1440)
-            }
-        }
-
-        HorizontalDivider()
-
-        // Weekly
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text("Weekly digest", style = MaterialTheme.typography.titleSmall)
-                Text(
-                    "The seven days before it runs, against the week before (only when both have enough fully covered days).",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Switch(
-                checked = prefs.weeklyDigestEnabled,
-                onCheckedChange = { on -> if (on && !allowed) askPermission(2) else vm.setWeeklyDigestEnabled(on) },
-            )
-        }
-        if (prefs.weeklyDigestEnabled) {
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.xs), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-                isoDays.forEach { (day, label) ->
-                    FilterChip(
-                        selected = prefs.weeklyDigestDayOfWeek == day,
-                        onClick = { vm.setWeeklyDigestDay(day) },
-                        label = { Text(label) },
-                    )
+            if (prefs.dailyDigestEnabled) {
+                Box(Modifier.background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = Spacing.l, vertical = Spacing.xs)) {
+                    TimeStepperRow("At", prefs.dailyDigestMinuteOfDay) { step -> vm.setDailyDigestMinute((prefs.dailyDigestMinuteOfDay + step + 1440) % 1440) }
                 }
             }
-            TimeStepperRow("At", prefs.weeklyDigestMinuteOfDay) { step ->
-                vm.setWeeklyDigestMinute((prefs.weeklyDigestMinuteOfDay + step + 1440) % 1440)
+            SwitchRow(
+                "Weekly digest",
+                checked = prefs.weeklyDigestEnabled,
+                onCheckedChange = { on -> if (on && !allowed) askPermission(2) else vm.setWeeklyDigestEnabled(on) },
+                supporting = "The past seven days against the week before, when both have enough recorded days.",
+            )
+            if (prefs.weeklyDigestEnabled) {
+                Column(
+                    Modifier.background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = Spacing.l, vertical = Spacing.s),
+                    verticalArrangement = Arrangement.spacedBy(Spacing.xs),
+                ) {
+                    Choice(isoDays.map { it.first }, prefs.weeklyDigestDayOfWeek, vm::setWeeklyDigestDay, { d -> isoDays.first { it.first == d }.second }, forceChips = true)
+                    TimeStepperRow("At", prefs.weeklyDigestMinuteOfDay) { step -> vm.setWeeklyDigestMinute((prefs.weeklyDigestMinuteOfDay + step + 1440) % 1440) }
+                }
             }
-        }
-
-        HorizontalDivider()
-
-        FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-            OutlinedButton(onClick = { if (allowed) vm.sendPreviewDigest(DigestKind.DAILY) else askPermission(0) }) {
-                Text("Send preview digest")
-            }
-            TextButton(onClick = { if (allowed) vm.sendPreviewDigest(DigestKind.WEEKLY) else askPermission(0) }) {
-                Text("Preview weekly")
-            }
-        }
-        message?.let { msg ->
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    msg,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.weight(1f),
-                )
-                TextButton(onClick = vm::clearDigestMessage) { Text("Dismiss") }
-            }
+            ListRow(
+                "Preview",
+                supporting = message ?: "See what tonight's digest would say",
+                onClick = { if (allowed) vm.sendPreviewDigest(DigestKind.DAILY) else askPermission(0) },
+                trailing = {
+                    TextButton(onClick = { if (allowed) vm.sendPreviewDigest(DigestKind.WEEKLY) else askPermission(0) }) { Text("Weekly") }
+                },
+            )
         }
     }
 }

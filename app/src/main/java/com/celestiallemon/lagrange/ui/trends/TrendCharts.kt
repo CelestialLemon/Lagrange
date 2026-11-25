@@ -36,7 +36,11 @@ import com.celestiallemon.lagrange.domain.DayQuality
 import com.celestiallemon.lagrange.domain.HourBin
 import com.celestiallemon.lagrange.domain.MetricUnit
 import com.celestiallemon.lagrange.domain.TrendPoint
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
+import androidx.compose.animation.core.Animatable
+import androidx.compose.runtime.LaunchedEffect
+import com.celestiallemon.lagrange.ui.theme.Lagrange
+import com.celestiallemon.lagrange.ui.theme.Motion
+import com.celestiallemon.lagrange.ui.theme.NumberStyles
 import java.time.LocalDate
 import java.time.format.DateTimeFormatter
 import java.util.Locale
@@ -64,21 +68,21 @@ data class TrendColors(
 
 @Composable
 fun rememberTrendColors(bar: Color = MaterialTheme.colorScheme.primary): TrendColors {
-    val scheme = MaterialTheme.colorScheme
-    val status = LocalStatusColors.current
+    // Bars carry the meaning (a category colour); every other mark is neutral ink so it reads over any bar.
+    val c = Lagrange.colors
     return TrendColors(
         bar = bar,
-        secondary = scheme.secondary,
-        negative = status.bad,
-        muted = scheme.outline,
-        ma7 = scheme.tertiary,
-        ma28 = scheme.secondary,
-        reference = status.warn,
-        grid = scheme.outlineVariant.copy(alpha = 0.6f),
-        label = scheme.onSurfaceVariant,
-        highlight = scheme.onSurface.copy(alpha = 0.07f),
-        spike = status.bad,
-        good = status.good,
+        secondary = c.viz.trend.copy(alpha = 0.55f),
+        negative = c.critical.accent,
+        muted = c.viz.hatch,
+        ma7 = c.viz.trend,
+        ma28 = c.viz.trendSlow,
+        reference = c.viz.reference,
+        grid = c.viz.grid,
+        label = c.viz.axis,
+        highlight = c.viz.selection,
+        spike = c.ember.accent,
+        good = c.good.accent,
     )
 }
 
@@ -106,12 +110,16 @@ fun TrendChart(
     colors: TrendColors = rememberTrendColors(),
 ) {
     val measurer = rememberTextMeasurer()
-    val labelStyle = MaterialTheme.typography.labelSmall.copy(color = colors.label, fontSize = 10.sp)
+    val labelStyle = NumberStyles.axis.copy(color = colors.label, fontSize = 10.sp)
     val refStyle = labelStyle.copy(color = colors.reference)
     val geometry = remember(points, diverging, showMa7, showMa28) { ChartScale.of(points, diverging, showMa7, showMa28, unit) }
     // The tap handler outlives recompositions (keyed on the data only), so it reads the latest selection.
     val currentSelected by rememberUpdatedState(selected)
     val currentOnSelect by rememberUpdatedState(onSelect)
+    // Bars grow out of the baseline whenever the data changes (new window or metric), so a change reads as a change.
+    val reduced = Lagrange.reducedMotion
+    val grow = remember(points) { Animatable(if (reduced) 1f else 0f) }
+    LaunchedEffect(points) { if (!reduced) grow.animateTo(1f, Motion.spatial()) }
     Canvas(
         modifier
             .fillMaxWidth()
@@ -129,6 +137,7 @@ fun TrendChart(
             },
     ) {
         if (points.isEmpty()) return@Canvas
+        val g0 = grow.value
         val axis = AXIS_WIDTH.toPx()
         val bottomPad = 18.dp.toPx()
         val topPad = 8.dp.toPx()
@@ -187,7 +196,7 @@ fun TrendChart(
                 DayQuality.IN_PROGRESS -> colors.bar.copy(alpha = 0.38f)
                 DayQuality.NO_DATA -> colors.muted
             }
-            val top = y(value)
+            val top = zeroY + (y(value) - zeroY) * g0
             if (abs(zeroY - top) >= 0.5f) {
                 val r = Rect(left, minOf(top, zeroY), left + barW, maxOf(top, zeroY))
                 drawRoundRect(fill, r.topLeft, r.size, radius)
@@ -199,7 +208,7 @@ fun TrendChart(
             val second = s.secondary
             if (second != null && second > 0) {
                 if (diverging) {
-                    val by = y(-second)
+                    val by = zeroY + (y(-second) - zeroY) * g0
                     val color = if (s.quality.countsAsCovered) colors.negative else colors.negative.copy(alpha = 0.4f)
                     val r = Rect(left, zeroY, left + barW, by)
                     drawRoundRect(color, r.topLeft, r.size, radius)
@@ -209,7 +218,7 @@ fun TrendChart(
                     }
                 } else {
                     val w = barW * 0.45f
-                    val sy = y(second)
+                    val sy = zeroY + (y(second) - zeroY) * g0
                     drawRoundRect(colors.secondary.copy(alpha = if (s.quality.countsAsCovered) 0.9f else 0.45f), Offset(cx - w / 2, sy), Size(w, zeroY - sy), CornerRadius(w / 2))
                 }
             }
@@ -254,8 +263,9 @@ fun TrendChart(
             }
         }
 
-        if (showMa28) smoothLine(points.map { it.ma28 }, plot, slot, ::y, colors.ma28, 2.dp.toPx())
-        if (showMa7) smoothLine(points.map { it.ma7 }, plot, slot, ::y, colors.ma7, 2.5.dp.toPx())
+        val lineAlpha = ((g0 - 0.4f) / 0.6f).coerceIn(0f, 1f)
+        if (showMa28) smoothLine(points.map { it.ma28 }, plot, slot, ::y, colors.ma28.copy(alpha = colors.ma28.alpha * lineAlpha), 1.5.dp.toPx(), PathEffect.dashPathEffect(floatArrayOf(6.dp.toPx(), 4.dp.toPx())))
+        if (showMa7) smoothLine(points.map { it.ma7 }, plot, slot, ::y, colors.ma7.copy(alpha = colors.ma7.alpha * lineAlpha), 2.dp.toPx())
 
         // X labels: first, middle and last day.
         val idx = listOf(0, points.size / 2, points.lastIndex).distinct()
@@ -278,13 +288,13 @@ fun TrendChart(
  * 24 bars along the logical day (the rollover hour first). The busiest hour is drawn in the accent colour.
  */
 @Composable
-fun HourProfileChart(bins: List<HourBin>, peakSlot: Int?, description: String, modifier: Modifier = Modifier, height: Dp = 150.dp) {
+fun HourProfileChart(bins: List<HourBin>, peakSlot: Int?, description: String, modifier: Modifier = Modifier, height: Dp = 150.dp, barColor: Color = MaterialTheme.colorScheme.primary) {
     val measurer = rememberTextMeasurer()
     val scheme = MaterialTheme.colorScheme
     val labelStyle = MaterialTheme.typography.labelSmall.copy(color = scheme.onSurfaceVariant, fontSize = 10.sp)
-    val bar = scheme.primary.copy(alpha = 0.55f)
-    val peak = scheme.tertiary
-    val grid = scheme.outlineVariant.copy(alpha = 0.6f)
+    val bar = barColor.copy(alpha = 0.45f)
+    val peak = barColor
+    val grid = Lagrange.colors.viz.grid
     Canvas(
         modifier
             .fillMaxWidth()
@@ -382,7 +392,9 @@ private fun DrawScope.drawLabel(measurer: TextMeasurer, text: String, at: Offset
     drawText(layout, topLeft = Offset((alignRight - layout.size.width).coerceAtLeast(0f), (at.y - layout.size.height / 2f).coerceAtLeast(0f)))
 }
 
-/** Diagonal hatching clipped to [r]. */
+/** Diagonal hatching clipped to [r]: the mark for "not fully recorded" everywhere in the app. */
+internal fun DrawScope.hatchRect(r: Rect, color: Color, spacing: Float) = hatch(r, color, spacing)
+
 private fun DrawScope.hatch(r: Rect, color: Color, spacing: Float) {
     clipRect(r.left, r.top, r.right, r.bottom) {
         var x = r.left - r.height
@@ -394,7 +406,7 @@ private fun DrawScope.hatch(r: Rect, color: Color, spacing: Float) {
 }
 
 /** A smooth (monotone-ish cubic) line through the non-null values; gaps break the line. */
-private fun DrawScope.smoothLine(values: List<Double?>, plot: Rect, slot: Float, y: (Double) -> Float, color: Color, width: Float) {
+private fun DrawScope.smoothLine(values: List<Double?>, plot: Rect, slot: Float, y: (Double) -> Float, color: Color, width: Float, effect: PathEffect? = null) {
     var run = ArrayList<Offset>()
     fun flush() {
         if (run.size >= 2) {
@@ -407,7 +419,7 @@ private fun DrawScope.smoothLine(values: List<Double?>, plot: Rect, slot: Float,
                     cubicTo(mx, p0.y, mx, p1.y, p1.x, p1.y)
                 }
             }
-            drawPath(path, color, style = Stroke(width = width, cap = StrokeCap.Round))
+            drawPath(path, color, style = Stroke(width = width, cap = StrokeCap.Round, pathEffect = effect))
         } else if (run.size == 1) {
             drawCircle(color, width, run[0])
         }

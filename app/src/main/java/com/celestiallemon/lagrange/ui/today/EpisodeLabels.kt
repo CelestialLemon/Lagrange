@@ -22,7 +22,6 @@ import com.celestiallemon.lagrange.data.db.Archetype
 import com.celestiallemon.lagrange.data.db.DayStatus
 import com.celestiallemon.lagrange.data.db.RabbitHoleReason
 import com.celestiallemon.lagrange.data.db.TriggerEvidence
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
 
 fun triggerOf(name: String?): TriggerEvidence? = name?.let { n -> TriggerEvidence.entries.firstOrNull { it.name == n } }
 
@@ -102,18 +101,6 @@ fun rabbitReasonsOf(csv: String?): List<RabbitHoleReason> =
     csv?.split(',')?.mapNotNull { n -> RabbitHoleReason.entries.firstOrNull { it.name == n.trim() } }.orEmpty()
 
 val unknownIcon: ImageVector get() = Icons.Outlined.HelpOutline
-
-@Composable
-fun dayStatusColor(status: DayStatus?): Color {
-    val s = LocalStatusColors.current
-    return when (status) {
-        DayStatus.SPIKE -> s.bad
-        DayStatus.GOOD_DAY -> s.good
-        DayStatus.NORMAL -> MaterialTheme.colorScheme.primary
-        DayStatus.UNCERTAIN_COVERAGE -> s.warn
-        DayStatus.INSUFFICIENT_BASELINE, null -> s.neutral
-    }
-}
 
 val DayStatus.chip: String
     get() = when (this) {

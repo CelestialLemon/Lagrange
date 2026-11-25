@@ -47,9 +47,9 @@ import com.celestiallemon.lagrange.ui.InspectorViewModel
 import com.celestiallemon.lagrange.ui.formatClockSeconds
 import com.celestiallemon.lagrange.ui.formatDay
 import com.celestiallemon.lagrange.ui.formatDuration
-import com.celestiallemon.lagrange.ui.theme.EyebrowStyle
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
-import com.celestiallemon.lagrange.ui.theme.Space
+import com.celestiallemon.lagrange.ui.components.LagrangeScreen
+import com.celestiallemon.lagrange.ui.theme.Lagrange
+import com.celestiallemon.lagrange.ui.theme.Spacing
 import com.celestiallemon.lagrange.ui.today.archetypeOf
 import com.celestiallemon.lagrange.ui.today.label
 import com.celestiallemon.lagrange.ui.today.triggerOf
@@ -71,25 +71,9 @@ fun TimelineInspector(padding: PaddingValues, onClose: () -> Unit, vm: Inspector
         uri?.let(vm::exportFixture)
     }
 
-    LazyColumn(
-        Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(
-            start = Space.m,
-            end = Space.m,
-            top = padding.calculateTopPadding() + Space.m,
-            bottom = padding.calculateBottomPadding() + Space.xl,
-        ),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
+    LagrangeScreen(title = "Timeline inspector", contentPadding = padding, onBack = onClose, itemSpacing = 2.dp) {
         item("header") {
-            Column(verticalArrangement = Arrangement.spacedBy(Space.s), modifier = Modifier.padding(bottom = Space.m)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onClose) { Icon(Icons.AutoMirrored.Outlined.ArrowBack, "Back to System & Data") }
-                    Column(Modifier.weight(1f)) {
-                        Text("DEBUG", style = EyebrowStyle, color = MaterialTheme.colorScheme.primary)
-                        Text("Timeline Inspector", style = MaterialTheme.typography.headlineSmall)
-                    }
-                }
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.s), modifier = Modifier.padding(bottom = Spacing.l)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(onClick = { vm.shiftDay(-1) }) { Icon(Icons.Outlined.ChevronLeft, "Previous day") }
                     Text(
@@ -104,13 +88,13 @@ fun TimelineInspector(padding: PaddingValues, onClose: () -> Unit, vm: Inspector
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(Spacing.s), verticalArrangement = Arrangement.spacedBy(Spacing.xs)) {
                     FilledTonalButton(
                         onClick = { export.launch(vm.suggestedFileName()) },
                         enabled = !op.busy && state.window != null,
                     ) {
                         Icon(Icons.Outlined.FileDownload, null, Modifier.size(18.dp))
-                        Spacer(Modifier.width(Space.s))
+                        Spacer(Modifier.width(Spacing.s))
                         Text("Export Day JSON")
                     }
                     FilterChip(selected = allTypes, onClick = { vm.setAllTypes(!allTypes) }, label = { Text("All event types") })
@@ -119,9 +103,9 @@ fun TimelineInspector(padding: PaddingValues, onClose: () -> Unit, vm: Inspector
                     Text(it, style = MaterialTheme.typography.bodySmall, color = if (op.isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 if (state.loading || op.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                Row(Modifier.fillMaxWidth().padding(top = Space.s)) {
-                    Text("RAW LEDGER", style = EyebrowStyle, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f).padding(start = 64.dp))
-                    Text("RECONSTRUCTED", style = EyebrowStyle, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
+                Row(Modifier.fillMaxWidth().padding(top = Spacing.s)) {
+                    Text("Raw ledger", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f).padding(start = 64.dp))
+                    Text("Rebuilt", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.weight(1f))
                 }
             }
         }
@@ -209,13 +193,13 @@ private fun eventLabel(type: Int): String = when (type) {
 
 @Composable
 private fun eventColor(type: Int): Color {
-    val s = LocalStatusColors.current
+    val s = Lagrange.colors
     return when (type) {
-        1 -> s.good
-        2, 23 -> s.neutral
+        1 -> s.good.accent
+        2, 23 -> s.neutral.accent
         15, 18 -> MaterialTheme.colorScheme.primary
-        16, 17 -> s.warn
-        26, 27 -> s.bad
-        else -> s.neutral
+        16, 17 -> s.caution.accent
+        26, 27 -> s.critical.accent
+        else -> s.neutral.accent
     }
 }

@@ -34,7 +34,7 @@ import androidx.compose.ui.unit.dp
 import com.celestiallemon.lagrange.domain.lab.CircadianHeatmap
 import com.celestiallemon.lagrange.ui.formatDuration
 import com.celestiallemon.lagrange.ui.formatHour
-import com.celestiallemon.lagrange.ui.theme.Space
+import com.celestiallemon.lagrange.ui.theme.Spacing
 import java.time.DayOfWeek
 import java.time.format.TextStyle
 import java.util.Locale
@@ -73,12 +73,12 @@ private fun summary(map: CircadianHeatmap, metric: HeatMetric): String {
 @Composable
 fun CircadianHeatmapView(map: CircadianHeatmap, metric: HeatMetric, modifier: Modifier = Modifier) {
     var selected by remember(map, metric) { mutableStateOf<Pair<Int, Int>?>(null) }
-    val base = if (metric == HeatMetric.DISTRACTING) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.primary
+    val base = if (metric == HeatMetric.DISTRACTING) com.celestiallemon.lagrange.ui.theme.Lagrange.colors.category.distracting else MaterialTheme.colorScheme.primary
     val empty = MaterialTheme.colorScheme.surfaceContainerHighest
     val outline = MaterialTheme.colorScheme.onSurface
     val labelColor = MaterialTheme.colorScheme.onSurfaceVariant
     val max = if (metric == HeatMetric.DISTRACTING) map.maxDistractingMs.toDouble() else map.maxPickups
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(Space.s)) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
         Row {
             Column(Modifier.width(36.dp)) {
                 (0 until 7).forEach { r ->
@@ -140,7 +140,7 @@ fun CircadianHeatmapView(map: CircadianHeatmap, metric: HeatMetric, modifier: Mo
                 if (sel == null) "Tap a cell to see that hour." else cellText(map, metric, sel.first, sel.second),
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
-                    .padding(Space.m)
+                    .padding(Spacing.l)
                     .semantics { liveRegion = LiveRegionMode.Polite },
             )
         }

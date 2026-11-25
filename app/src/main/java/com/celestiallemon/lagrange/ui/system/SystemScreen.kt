@@ -2,39 +2,39 @@ package com.celestiallemon.lagrange.ui.system
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Backup
 import androidx.compose.material.icons.outlined.BugReport
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.DataObject
 import androidx.compose.material.icons.outlined.DeleteForever
-import androidx.compose.material.icons.outlined.HealthAndSafety
-import androidx.compose.material.icons.outlined.Info
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Palette
-import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material.icons.outlined.Radar
+import androidx.compose.material.icons.outlined.Restore
+import androidx.compose.material.icons.outlined.Save
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.TableChart
+import androidx.compose.material.icons.outlined.WarningAmber
 import androidx.compose.material.icons.outlined.WbTwilight
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -49,20 +49,51 @@ import com.celestiallemon.lagrange.data.LagrangePreferences
 import com.celestiallemon.lagrange.harvest.HarvestResult
 import com.celestiallemon.lagrange.ui.DataViewModel
 import com.celestiallemon.lagrange.ui.MainViewModel
+import com.celestiallemon.lagrange.ui.components.Banner
+import com.celestiallemon.lagrange.ui.components.DrillIn
+import com.celestiallemon.lagrange.ui.components.EditSheet
+import com.celestiallemon.lagrange.ui.components.Info
 import com.celestiallemon.lagrange.ui.components.LagrangeScreen
-import com.celestiallemon.lagrange.ui.components.SectionCard
-import com.celestiallemon.lagrange.ui.components.StatRow
-import com.celestiallemon.lagrange.ui.components.StatTile
+import com.celestiallemon.lagrange.ui.components.LeadingIcon
+import com.celestiallemon.lagrange.ui.components.ListRow
+import com.celestiallemon.lagrange.ui.components.Panel
+import com.celestiallemon.lagrange.ui.components.RowGroup
+import com.celestiallemon.lagrange.ui.components.SectionHeader
+import com.celestiallemon.lagrange.ui.components.Stat
+import com.celestiallemon.lagrange.ui.components.StatStrip
+import com.celestiallemon.lagrange.ui.components.Stepper
+import com.celestiallemon.lagrange.ui.components.SwitchRow
+import com.celestiallemon.lagrange.ui.components.ValueRow
 import com.celestiallemon.lagrange.ui.formatAgo
 import com.celestiallemon.lagrange.ui.formatCount
 import com.celestiallemon.lagrange.ui.formatDate
 import com.celestiallemon.lagrange.ui.formatDateTime
 import com.celestiallemon.lagrange.ui.formatHour
-import com.celestiallemon.lagrange.ui.theme.LocalStatusColors
-import com.celestiallemon.lagrange.ui.theme.Space
+import com.celestiallemon.lagrange.ui.friction.DigestSettingsCard
+import com.celestiallemon.lagrange.ui.friction.FrictionViewModel
+import com.celestiallemon.lagrange.ui.theme.Lagrange
+import com.celestiallemon.lagrange.ui.theme.Spacing
+import com.celestiallemon.lagrange.ui.theme.Tone
+import com.celestiallemon.lagrange.ui.theme.Transitions
+import com.celestiallemon.lagrange.ui.theme.rise
+
+/**
+ * Housekeeping, in the order it matters: is Lagrange able to record, what it has recorded, your data, then
+ * preferences, then the tools for when something looks wrong.
+ */
+@Composable
+fun SettingsScreen(main: MainViewModel, onBack: () -> Unit, padding: PaddingValues = PaddingValues(), data: DataViewModel = viewModel()) {
+    var inspecting by rememberSaveable { mutableStateOf(false) }
+    DrillIn(
+        top = if (inspecting) Unit else null,
+        onBack = { inspecting = false },
+        base = { SettingsContent(main, onBack, padding, data, onOpenInspector = { inspecting = true }) },
+        detail = { TimelineInspector(padding, onClose = { inspecting = false }) },
+    )
+}
 
 @Composable
-fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewModel = viewModel()) {
+private fun SettingsContent(main: MainViewModel, onBack: () -> Unit, padding: PaddingValues, data: DataViewModel, onOpenInspector: () -> Unit) {
     val health by main.health.collectAsStateWithLifecycle()
     val stats by main.stats.collectAsStateWithLifecycle()
     val prefs by main.prefs.collectAsStateWithLifecycle()
@@ -71,251 +102,222 @@ fun SystemScreen(main: MainViewModel, padding: PaddingValues, data: DataViewMode
     val op by data.op.collectAsStateWithLifecycle()
     val staged by data.restoreStaged.collectAsStateWithLifecycle()
     val probe by data.probe.collectAsStateWithLifecycle()
+    val friction: FrictionViewModel = viewModel()
+    val frictionPrefs by friction.prefs.collectAsStateWithLifecycle()
     var confirmReset by remember { mutableStateOf(false) }
-    var inspecting by rememberSaveable { mutableStateOf(false) }
+    var editingRollover by remember { mutableStateOf(false) }
     val now = System.currentTimeMillis()
-    val status = LocalStatusColors.current
 
-    val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
-        uri?.let(data::backUpTo)
-    }
-    val openRestore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(data::stageRestore)
-    }
-    val createSqlite = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.sqlite3")) { uri ->
-        uri?.let(data::exportSqlite)
-    }
-    val createCsv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
-        uri?.let(data::exportCsv)
-    }
-    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        uri?.let(data::setBackupFolder)
-    }
+    val createBackup = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let(data::backUpTo) }
+    val openRestore = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri -> uri?.let(data::stageRestore) }
+    val createSqlite = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/vnd.sqlite3")) { uri -> uri?.let(data::exportSqlite) }
+    val createCsv = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri -> uri?.let(data::exportCsv) }
+    val pickFolder = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri -> uri?.let(data::setBackupFolder) }
 
-    if (inspecting) {
-        TimelineInspector(padding, onClose = { inspecting = false })
-        return
-    }
-
-    LagrangeScreen(
-        eyebrow = "System & Data",
-        title = "Under the hood",
-        subtitle = "Permissions, collection health and your data: all of it on this device, none of it online.",
-        contentPadding = padding,
-    ) {
-        item("health") {
-            SectionCard(title = "Permission Health", eyebrow = "Collectors", icon = Icons.Outlined.HealthAndSafety) {
-                PermissionList(health, compact = false, onChanged = main::refreshHealth)
+    LagrangeScreen(title = "Settings", contentPadding = padding, onBack = onBack) {
+        // -- Health summary -------------------------------------------------------------------------------------------
+        item("summary") {
+            val issues = listOf(!health.usageAccess, !health.notificationAccess, stats.harvestOverdue(now)).count { it }
+            val c = Lagrange.colors
+            Panel(
+                Modifier.rise(0),
+                color = if (issues == 0) c.good.container else c.caution.container,
+                contentColor = if (issues == 0) c.good.onContainer else c.caution.onContainer,
+                spacing = Spacing.xs,
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(if (issues == 0) Icons.Outlined.CheckCircle else Icons.Outlined.WarningAmber, null)
+                    Text(
+                        if (issues == 0) "  Recording normally" else "  $issues thing${if (issues == 1) "" else "s"} need${if (issues == 1) "s" else ""} attention",
+                        style = MaterialTheme.typography.titleMedium,
+                    )
+                }
+                Text(
+                    "Last harvest ${formatAgo(stats.lastHarvestAtMs, now)} · notification listener ${if (stats.listenerActive) "connected" else "offline"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
             }
         }
 
-        item("collection") {
-            SectionCard(title = "Data collection", eyebrow = "Raw ledger", icon = Icons.Outlined.Storage) {
-                StatRow {
-                    StatTile("Usage events", formatCount(stats.rawEventsTotal), Modifier.weight(1f), caption = "${formatCount(stats.rawEventsToday)} today")
-                    StatTile("Notifications", formatCount(stats.notificationsTotal), Modifier.weight(1f), caption = "${formatCount(stats.notificationsToday)} today")
-                }
-                StatRow {
-                    StatTile("Last harvest", formatAgo(stats.lastHarvestAtMs, now), Modifier.weight(1f))
-                    StatTile("History from", stats.earliestEventMs?.let(::formatDate) ?: "—", Modifier.weight(1f))
-                }
-                StatRow {
-                    StatTile("Listener", if (stats.listenerActive) "Connected" else "Offline", Modifier.weight(1f))
-                    StatTile("Harvest gaps", stats.gapCount.toString(), Modifier.weight(1f), caption = "silences over 48 h")
-                }
-                stats.backfill?.let { b ->
-                    Text(
-                        "Initial backfill reached back to ${formatDate(b.startMs)}. Backfilled days have no notification coverage and are marked as such.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        item("perm-header") { SectionHeader("Permissions", supporting = "What lets Lagrange record and pause") }
+        item("perms") { PermissionList(health, compact = false, onChanged = main::refreshHealth) }
+
+        // -- Recording ------------------------------------------------------------------------------------------------
+        item("rec-header") {
+            SectionHeader(
+                "Recording",
+                info = Info(
+                    "How recording works",
+                    "Android keeps only about a week of raw usage events, so Lagrange copies them into its own database as " +
+                        "they happen: when the screen turns off, when you open the app, and every hour or two in the background." +
+                        "\n\nApps inside Private Space or a work profile are invisible to Usage Access, so they never appear here.",
+                ),
+            )
+        }
+        item("rec") {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+                Panel(spacing = Spacing.m) {
+                    StatStrip {
+                        Stat("Usage events", formatCount(stats.rawEventsTotal), Modifier.weight(1f), caption = "${formatCount(stats.rawEventsToday)} today")
+                        Stat("Notifications", formatCount(stats.notificationsTotal), Modifier.weight(1f), caption = "${formatCount(stats.notificationsToday)} today")
+                    }
+                    StatStrip {
+                        Stat("History since", stats.earliestEventMs?.let(::formatDate) ?: "–", Modifier.weight(1f))
+                        Stat("Gaps", stats.gapCount.toString(), Modifier.weight(1f), caption = "silences over 48 h", captionTone = if (stats.gapCount > 0) Tone.Caution else Tone.Neutral)
+                    }
+                    lastHarvest?.let { Text(describe(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    AnimatedVisibility(harvesting, enter = Transitions.reveal, exit = Transitions.conceal) { LinearProgressIndicator(Modifier.fillMaxWidth()) }
                 }
                 if (stats.harvestOverdue(now)) {
-                    Text(
-                        "No harvest for over 48 hours. Android keeps only about a week of events, so open Lagrange regularly or allow unrestricted battery.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = status.warn,
+                    Banner("Nothing recorded for over 48 hours", Tone.Caution, Icons.Outlined.WarningAmber, body = "Open Lagrange regularly or allow unrestricted battery so recording keeps up.")
+                }
+                RowGroup {
+                    ListRow(
+                        "Record now",
+                        supporting = "Copy the latest events from Android",
+                        leading = { LeadingIcon(Icons.Outlined.Sync) },
+                        onClick = if (!harvesting && health.usageAccess) main::harvestNow else null,
                     )
-                }
-                lastHarvest?.let { Text(describe(it), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-                if (harvesting) LinearProgressIndicator(Modifier.fillMaxWidth())
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                    Button(onClick = main::harvestNow, enabled = !harvesting && health.usageAccess) { Text("Harvest now") }
-                    OutlinedButton(onClick = data::runProbe, enabled = !op.busy && health.usageAccess) { Text("Probe usage history") }
-                }
-                probe?.let { p ->
-                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                        Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.xs)) {
-                            Text("Platform probe (last 30 days)", style = MaterialTheme.typography.titleSmall)
-                            Text("Events visible: ${formatCount(p.totalEvents)}", style = MaterialTheme.typography.bodySmall)
-                            Text(
-                                "Retention: " + (p.retentionDays(p.scannedToMs)?.let { String.format(java.util.Locale.US, "%.1f days", it) } ?: "none"),
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                            Text(
-                                "NOTIFICATION_INTERRUPTION (type 12): " +
-                                    if (p.notificationInterruptionSeen) "seen ×${p.notificationInterruptionCount}" else "not returned",
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
+                    stats.backfill?.let { b ->
+                        ListRow("Imported history", supporting = "Reaches back to ${formatDate(b.startMs)}. These days have no notification data and are marked as such.", leading = { LeadingIcon(Icons.Outlined.Download) })
                     }
                 }
             }
         }
 
-        item("inspector") {
-            SectionCard(title = "Timeline Inspector", eyebrow = "Debug", icon = Icons.Outlined.BugReport) {
-                Text(
-                    "Raw usage events and notifications for any day, side by side with the sessions Lagrange reconstructed from them. Export a day as a JSON fixture to replay it in tests.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                FilledTonalButton(onClick = { inspecting = true }) { Text("Open inspector") }
-            }
+        // -- Data -----------------------------------------------------------------------------------------------------
+        item("data-header") {
+            SectionHeader(
+                "Backups and exports",
+                info = Info(
+                    "Where your data goes",
+                    "Nowhere, unless you save a file somewhere yourself. Backups are verified ZIPs (a database snapshot, your " +
+                        "preferences and checksums). A local folder or Syncthing stays fully self-hosted; a cloud provider syncs " +
+                        "the files under its own rules.\n\nThe CSV bundle holds daily summaries, per-app days, sessions, session " +
+                        "segments, notification metadata and friction events, with local and UTC timestamps.",
+                ),
+            )
         }
-
-        item("rollover") {
-            SectionCard(title = "Logical day", eyebrow = "Time model", icon = Icons.Outlined.WbTwilight) {
-                Text(
-                    "Your day rolls over at this hour, so a late-night session stays on the night it started. Changes are kept in settings history.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                val hour = prefs?.rolloverHour ?: 4
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    FilledTonalIconButton(onClick = { main.setRolloverHour((hour + 23) % 24) }) { Text("−") }
-                    Spacer(Modifier.width(Space.l))
-                    Text(formatHour(hour), style = MaterialTheme.typography.displaySmall)
-                    Spacer(Modifier.width(Space.l))
-                    FilledTonalIconButton(onClick = { main.setRolloverHour((hour + 1) % 24) }) { Text("+") }
+        item("data") {
+            val p = prefs
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+                if (staged) {
+                    Banner(
+                        "A verified backup is ready to restore",
+                        Tone.Brand,
+                        Icons.Outlined.Restore,
+                        body = "Restarting swaps it in before the database opens. Your current data is kept as a rollback copy.",
+                        action = "Restart and restore" to data::restartToApplyRestore,
+                        onDismiss = { data.cancelRestore() },
+                    )
+                }
+                RowGroup {
+                    ValueRow(
+                        "Weekly backups",
+                        if (p?.backupTreeUri == null) "Off" else "On",
+                        onClick = { if (!op.busy) pickFolder.launch(null) },
+                        leading = { LeadingIcon(Icons.Outlined.FolderOpen, if (p?.backupTreeUri != null) Tone.Good else Tone.Neutral) },
+                        supporting = if (p?.backupTreeUri == null) "Choose a folder; the newest 8 are kept" else "Last ${formatAgo(p.lastBackupAtMs, now)} · tap to change folder",
+                    )
+                    p?.lastBackupStatus?.takeIf { it != LagrangePreferences.STATUS_OK }?.let {
+                        ListRow("Last backup failed", supporting = it, leading = { LeadingIcon(Icons.Outlined.WarningAmber, Tone.Critical) })
+                    }
+                    if (p?.backupTreeUri != null) {
+                        ListRow("Back up now", leading = { LeadingIcon(Icons.Outlined.Backup) }, onClick = if (!op.busy) data::backUpToFolderNow else null)
+                        ListRow("Turn off weekly backups", leading = { LeadingIcon(Icons.Outlined.CloudOff) }, onClick = if (!op.busy) data::clearBackupFolder else null)
+                    }
+                    ListRow("Save a backup…", supporting = "A single .zip, anywhere you choose", leading = { LeadingIcon(Icons.Outlined.Save) }, onClick = if (!op.busy) ({ createBackup.launch(BackupFormat.fileName(System.currentTimeMillis())) }) else null)
+                    ListRow("Restore from a backup…", leading = { LeadingIcon(Icons.Outlined.Restore) }, onClick = if (!op.busy) ({ openRestore.launch(BackupFormat.ZIP_MIME_TYPES) }) else null)
+                    ListRow("Export database", supporting = ".sqlite for DuckDB, Python or DB Browser", leading = { LeadingIcon(Icons.Outlined.DataObject) }, onClick = if (!op.busy) ({ createSqlite.launch("lagrange-${System.currentTimeMillis() / 1000}.sqlite") }) else null)
+                    ListRow("Export spreadsheets", supporting = "Six CSV files in a .zip", leading = { LeadingIcon(Icons.Outlined.TableChart) }, onClick = if (!op.busy) ({ createCsv.launch(CsvExporter.fileName(System.currentTimeMillis())) }) else null)
+                }
+                AnimatedVisibility(op.busy, enter = Transitions.reveal, exit = Transitions.conceal) { LinearProgressIndicator(Modifier.fillMaxWidth()) }
+                op.message?.let { msg ->
+                    Banner(
+                        msg,
+                        if (op.isError) Tone.Critical else Tone.Neutral,
+                        if (op.isError) Icons.Outlined.WarningAmber else Icons.Outlined.CheckCircle,
+                        onDismiss = if (!op.busy) data::clearMessage else null,
+                    )
                 }
             }
         }
 
-        item("appearance") {
-            SectionCard(title = "Appearance", eyebrow = "Theme", icon = Icons.Outlined.Palette) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Wallpaper colours", style = MaterialTheme.typography.titleSmall)
+        // -- Preferences ----------------------------------------------------------------------------------------------
+        frictionPrefs?.let { fp ->
+            item("digest-header") { SectionHeader("Reflection digests", supporting = "A quiet local notification about your day or week") }
+            item("digest") { DigestSettingsCard(fp, friction) }
+        }
+        item("prefs-header") { SectionHeader("Preferences") }
+        item("prefs") {
+            RowGroup {
+                ValueRow(
+                    "Day starts at",
+                    formatHour(prefs?.rolloverHour ?: 4),
+                    onClick = { editingRollover = true },
+                    leading = { LeadingIcon(Icons.Outlined.WbTwilight) },
+                    supporting = "A late night stays on the day it started",
+                )
+                SwitchRow(
+                    "Wallpaper colours",
+                    checked = prefs?.useDynamicColor == true,
+                    onCheckedChange = main::setDynamicColor,
+                    supporting = "Buttons and surfaces follow your wallpaper. Data colours never change.",
+                    leading = { LeadingIcon(Icons.Outlined.Palette) },
+                )
+            }
+        }
+
+        // -- Tools ----------------------------------------------------------------------------------------------------
+        item("tools-header") { SectionHeader("Tools") }
+        item("tools") {
+            Column(verticalArrangement = Arrangement.spacedBy(Spacing.s)) {
+                RowGroup {
+                    ListRow("Timeline inspector", supporting = "Raw events beside the sessions rebuilt from them; export a day as a test fixture", leading = { LeadingIcon(Icons.Outlined.BugReport) }, onClick = onOpenInspector)
+                    ListRow("Check usage history", supporting = "How far back Android's own history reaches on this phone", leading = { LeadingIcon(Icons.Outlined.Radar) }, onClick = if (!op.busy && health.usageAccess) data::runProbe else null)
+                }
+                probe?.let { pr ->
+                    Panel(spacing = Spacing.xs) {
+                        Text("Last 30 days, as Android reports them", style = MaterialTheme.typography.titleSmall)
                         Text(
-                            "Use Material You dynamic colour instead of Lagrange's cosmic palette.",
-                            style = MaterialTheme.typography.bodySmall,
+                            "${formatCount(pr.totalEvents)} events · history reaches " +
+                                (pr.retentionDays(pr.scannedToMs)?.let { String.format(java.util.Locale.US, "%.1f days", it) } ?: "nothing") +
+                                " back · interruption events " + if (pr.notificationInterruptionSeen) "seen ×${pr.notificationInterruptionCount}" else "not returned",
+                            style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
-                    Switch(checked = prefs?.useDynamicColor == true, onCheckedChange = main::setDynamicColor)
                 }
-            }
-        }
-
-        item("backups") {
-            SectionCard(title = "Backups", eyebrow = "Keep history safe", icon = Icons.Outlined.Backup) {
-                Text(
-                    "Backups are verified ZIPs (database snapshot, preferences and checksums). Local storage or Syncthing stays fully self-hosted; a cloud provider will sync the files under its own rules.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                val p = prefs
-                Text(
-                    when {
-                        p?.backupTreeUri != null -> "Weekly backups on · newest 8 kept"
-                        else -> "Weekly backups off"
-                    } + " · last backup ${formatAgo(p?.lastBackupAtMs, now)}",
-                    style = MaterialTheme.typography.titleSmall,
-                )
-                p?.lastBackupStatus?.takeIf { it != LagrangePreferences.STATUS_OK }?.let {
-                    Text(it, style = MaterialTheme.typography.bodySmall, color = status.bad)
-                }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                    FilledTonalButton(onClick = { pickFolder.launch(null) }, enabled = !op.busy) {
-                        Text(if (p?.backupTreeUri == null) "Choose weekly folder" else "Change folder")
-                    }
-                    if (p?.backupTreeUri != null) {
-                        OutlinedButton(onClick = data::backUpToFolderNow, enabled = !op.busy) { Text("Back up to folder now") }
-                        TextButton(onClick = data::clearBackupFolder, enabled = !op.busy) { Text("Turn off") }
-                    }
-                }
-                FlowRow(horizontalArrangement = Arrangement.spacedBy(Space.s), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                    OutlinedButton(onClick = { createBackup.launch(BackupFormat.fileName(System.currentTimeMillis())) }, enabled = !op.busy) {
-                        Text("Save backup…")
-                    }
-                    OutlinedButton(onClick = { openRestore.launch(BackupFormat.ZIP_MIME_TYPES) }, enabled = !op.busy) {
-                        Text("Restore…")
-                    }
-                    OutlinedButton(onClick = { createSqlite.launch("lagrange-${System.currentTimeMillis() / 1000}.sqlite") }, enabled = !op.busy) {
-                        Text("Export .sqlite")
-                    }
-                    OutlinedButton(onClick = { createCsv.launch(CsvExporter.fileName(System.currentTimeMillis())) }, enabled = !op.busy) {
-                        Text("Export CSV bundle (.zip)")
-                    }
-                }
-                Text(
-                    "The CSV bundle holds daily summaries, per-app days, sessions, session segments, notification metadata and friction events, with local ISO-8601 and UTC timestamps.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (staged) {
-                    Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.tertiaryContainer) {
-                        Column(Modifier.padding(Space.m), verticalArrangement = Arrangement.spacedBy(Space.s)) {
-                            Text(
-                                "A verified backup is staged. Restarting swaps it in before the database opens; your current data is kept as a rollback copy.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer,
-                            )
-                            Row {
-                                Button(onClick = data::restartToApplyRestore, enabled = !op.busy) { Text("Restart & restore") }
-                                Spacer(Modifier.width(Space.s))
-                                TextButton(onClick = { data.cancelRestore() }, enabled = !op.busy) { Text("Discard") }
-                            }
-                        }
-                    }
-                }
-                if (op.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
-                op.message?.let { msg ->
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            msg,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = if (op.isError) status.bad else MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.weight(1f),
-                        )
-                        if (!op.busy) TextButton(onClick = data::clearMessage) { Text("Dismiss") }
-                    }
-                }
-            }
-        }
-
-        item("notes") {
-            SectionCard(title = "Blind spots", eyebrow = "Platform limits", icon = Icons.Outlined.Info) {
-                Text(
-                    "Apps inside Private Space or a work profile are invisible to Usage Access, so they never appear here. Android also keeps only about a week of raw events, which is why Lagrange harvests continuously.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
         }
 
         item("danger") {
-            SectionCard(
-                title = "Delete all data",
-                eyebrow = "Danger zone",
-                icon = Icons.Outlined.DeleteForever,
-                container = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.45f),
-            ) {
-                Text(
-                    "Erases the ledger, categories, preferences and staged restores on this device. Backups you saved elsewhere are not touched.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurface,
+            RowGroup(Modifier.padding(top = Spacing.xl)) {
+                ListRow(
+                    "Delete all data",
+                    supporting = "Erases everything on this phone. Backups you saved elsewhere are untouched.",
+                    leading = { LeadingIcon(Icons.Outlined.DeleteForever, Tone.Critical) },
+                    onClick = if (!op.busy) ({ confirmReset = true }) else null,
+                    supportingColor = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                OutlinedButton(
-                    onClick = { confirmReset = true },
-                    enabled = !op.busy,
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error),
-                ) { Text("Delete everything…") }
             }
         }
     }
 
+    if (editingRollover) {
+        var hour by remember { mutableIntStateOf(prefs?.rolloverHour ?: 4) }
+        EditSheet(
+            "Day starts at",
+            supporting = "Sessions before this hour count toward the previous day. Changes are kept in settings history.",
+            onDismiss = { editingRollover = false },
+            onConfirm = {
+                main.setRolloverHour(hour)
+                editingRollover = false
+            },
+        ) {
+            Stepper(formatHour(hour), onMinus = { hour = (hour + 23) % 24 }, onPlus = { hour = (hour + 1) % 24 }, minusDescription = "An hour earlier", plusDescription = "An hour later")
+        }
+    }
     if (confirmReset) {
         AlertDialog(
             onDismissRequest = { confirmReset = false },
